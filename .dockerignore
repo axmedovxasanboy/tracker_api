@@ -1,0 +1,45 @@
+# Build output
+target/
+build/
+out/
+*.jar
+*.war
+*.class
+
+# IDE / editor
+.idea/
+.vscode/
+.junie/
+.claude/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+.springBeans
+.sts4-cache
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Secrets — never bake into the image
+.env
+.env.*
+*.pem
+*.key
+
+# Logs / OS junk
+*.log
+.DS_Store
+Thumbs.db
+
+# Docs (not needed inside the image)
+HELP.md
+HANDOFF.md
+DEPLOY.md
+README.md
+*.md
