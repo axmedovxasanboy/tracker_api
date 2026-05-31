@@ -1,10 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
 # ─── Build stage ──────────────────────────────────────────────────────────────
-# Spring Boot 4.0.5 requires Java 21+; pom.xml pins Java 25. Eclipse Temurin only
-# ships JDK images for 25 (no -jre-alpine variant yet), so we use the JDK in both
-# stages. Final image is ~340 MB; acceptable on a 4 GB VPS.
-FROM eclipse-temurin:25.0.3_9-jre-alpine AS build
+# Spring Boot 4.0.5 requires Java 21+; pom.xml pins Java 25. The build stage
+# needs the JDK (Maven invokes javac); the runtime stage uses the smaller JRE.
+FROM eclipse-temurin:25.0.3_9-jdk-alpine AS build
 WORKDIR /workspace
 
 # Maven wrapper + manifest first → deps layer survives source-only changes

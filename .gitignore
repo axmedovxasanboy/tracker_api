@@ -1,46 +1,107 @@
-HELP.md
+# ───────────────────────────────────────────────
+# Maven / Spring Boot
+# ───────────────────────────────────────────────
 target/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+HELP.md
 
-### STS ###
+# ───────────────────────────────────────────────
+# Java compiled output
+# ───────────────────────────────────────────────
+*.class
+*.ctxt
+
+# ───────────────────────────────────────────────
+# Gradle (in case ever added)
+# ───────────────────────────────────────────────
+.gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# ───────────────────────────────────────────────
+# IDE — IntelliJ IDEA
+# ───────────────────────────────────────────────
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# ───────────────────────────────────────────────
+# IDE — Eclipse / STS
+# ───────────────────────────────────────────────
 .apt_generated
 .classpath
 .factorypath
 .project
-.settings
+.settings/
 .springBeans
 .sts4-cache
 
-### IntelliJ IDEA ###
-.idea
-*.iws
-*.iml
-*.ipr
+# ───────────────────────────────────────────────
+# IDE — VS Code
+# ───────────────────────────────────────────────
+.vscode/
 
-### NetBeans ###
+# ───────────────────────────────────────────────
+# IDE — NetBeans
+# ───────────────────────────────────────────────
 /nbproject/private/
 /nbbuild/
 /dist/
 /nbdist/
 /.nb-gradle/
-build/
-!**/src/main/**/build/
-!**/src/test/**/build/
 
-### VS Code ###
-.vscode/
+# ───────────────────────────────────────────────
+# JetBrains AI / Junie
+# ───────────────────────────────────────────────
+.junie/
 
-### OS ###
+# ───────────────────────────────────────────────
+# Claude Code workspace
+# ───────────────────────────────────────────────
+.claude/
+
+# ───────────────────────────────────────────────
+# OS junk
+# ───────────────────────────────────────────────
 .DS_Store
+.AppleDouble
+.LSOverride
 Thumbs.db
-*.log
+ehthumbs.db
+Desktop.ini
 
-### Local secrets / env overrides — NEVER commit ###
+# ───────────────────────────────────────────────
+# Logs
+# ───────────────────────────────────────────────
+*.log
+logs/
+spring.log*
+
+# ───────────────────────────────────────────────
+# Secrets / local config — NEVER commit
+# ───────────────────────────────────────────────
 .env
 .env.*
 *.env
 src/main/resources/application-local.properties
 src/main/resources/application-secrets.properties
 src/main/resources/application-*.local.properties
+
+# ───────────────────────────────────────────────
+# Misc
+# ───────────────────────────────────────────────
+*.bak
+*.swp
+*.swo
+*~
