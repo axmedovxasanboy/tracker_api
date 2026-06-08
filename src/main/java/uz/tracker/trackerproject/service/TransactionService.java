@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 import uz.tracker.trackerproject.dto.request.*;
 import uz.tracker.trackerproject.dto.response.*;
 import uz.tracker.trackerproject.entity.Card;
+import uz.tracker.trackerproject.entity.Investment;
 import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.enums.*;
 import uz.tracker.trackerproject.exception.ResourceNotFoundException;
@@ -36,10 +37,12 @@ public class TransactionService {
     private final CardRepository cardRepository;
     private final CashBalanceRepository cashBalanceRepository;
     private final FinanceService financeService;
+    private final MonthCloseService monthCloseService;
     private final LoanGivenRepository loanGivenRepository;
     private final LoanTakenRepository loanTakenRepository;
     private final DonationRepository donationRepository;
     private final InvestmentRepository investmentRepository;
+    private final FxConverter fx;
 
     @Value("${app.pagination.max-page-size:100}")
     private int maxPageSize;
@@ -85,6 +88,7 @@ public class TransactionService {
 
     @Transactional
     public TransactionResponse create(TransactionRequest request) {
+        monthCloseService.assertMonthOpen(request.getTransactionDate());
         validateCashAmount(request);
         validateCurrencyMatchesCard(request.getCardId(), request.getCurrency());
         checkCardBalance(request.getCardId(), cardPortionOf(request), request.getType(), null);
@@ -95,23 +99,12 @@ public class TransactionService {
     }
 
     @Transactional
-    public List<TransactionResponse> createBulk(Long cardId, List<TransactionRequest> requests) {
-        List<TransactionResponse> out = new ArrayList<>(requests.size());
-        for (TransactionRequest req : requests) {
-            if (cardId != null) req.setCardId(cardId);
-            validateCashAmount(req);
-            validateCurrencyMatchesCard(req.getCardId(), req.getCurrency());
-            checkCardBalance(req.getCardId(), cardPortionOf(req), req.getType(), null);
-            Transaction saved = transactionRepository.save(buildTransaction(new Transaction(), req));
-            autoCreateFinanceRecord(req, saved.getId());
-            out.add(TransactionResponse.from(saved));
-        }
-        return out;
-    }
-
-    @Transactional
     public TransactionResponse update(Long id, TransactionRequest request) {
         Transaction existing = findOrThrow(id);
+        // Lock both the existing month (can't edit a closed month's row) and the target month
+        // (can't move a row into a closed month).
+        monthCloseService.assertMonthOpen(existing.getTransactionDate());
+        monthCloseService.assertMonthOpen(request.getTransactionDate());
         validateCashAmount(request);
         validateCurrencyMatchesCard(request.getCardId(), request.getCurrency());
         checkCardBalance(request.getCardId(), cardPortionOf(request), request.getType(), existing);
@@ -131,6 +124,7 @@ public class TransactionService {
     public void delete(Long id) {
         Transaction tx = transactionRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
+        monthCloseService.assertMonthOpen(tx.getTransactionDate());
         reverseFinanceRecordOnDelete(tx);
 
         // If this is half of a transfer pair, also delete the other half.
@@ -155,6 +149,7 @@ public class TransactionService {
 
     @Transactional
     public List<TransactionResponse> transferBalance(BalanceTransferRequest request) {
+        monthCloseService.assertMonthOpen(request.getTransactionDate());
         if (request.getFromCardId().equals(request.getToCardId())) {
             throw new IllegalArgumentException("Source and destination cards must be different");
         }
@@ -222,6 +217,7 @@ public class TransactionService {
      */
     @Transactional
     public List<TransactionResponse> exchange(ExchangeRequest req) {
+        monthCloseService.assertMonthOpen(req.getTransactionDate());
         if (req.getFromAmount() == null || req.getFromAmount().signum() <= 0)
             throw new IllegalArgumentException("Amount sent must be greater than 0");
         if (req.getToAmount() == null || req.getToAmount().signum() <= 0)
@@ -326,7 +322,26 @@ public class TransactionService {
                 .netBalance(available)
                 .transactionCount(count)
                 .availableBalance(available)
+                .spendableBalance(available)
+                .netWorth(computeNetWorth(currency))
                 .build();
+    }
+
+    /**
+     * Net worth = spendable wallet money across ALL currencies + the current value of every
+     * investment / savings goal, all FX-converted into the requested display currency. Unlike
+     * spendableBalance (this currency's wallets only), this is the full "everything I own" figure.
+     */
+    private BigDecimal computeNetWorth(Currency display) {
+        BigDecimal total = BigDecimal.ZERO;
+        for (Currency c : Currency.values()) {
+            total = total.add(fx.convert(computeAvailableBalance(c), c, display));
+        }
+        for (Investment i : investmentRepository.findAll()) {
+            BigDecimal value = i.getCurrentValue() != null ? i.getCurrentValue() : i.getInvestedAmount();
+            if (value != null) total = total.add(fx.convert(value, i.getCurrency(), display));
+        }
+        return total;
     }
 
     /**
@@ -398,7 +413,7 @@ public class TransactionService {
                 FROM transactions t
                 JOIN categories c ON c.id = t.category_id
                 WHERE t.type = :type AND t.currency = :currency
-                  AND (t.sub_type IS NULL OR t.sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT'))
+                  AND (t.sub_type IS NULL OR t.sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT', 'EXCHANGE_IN', 'EXCHANGE_OUT'))
                 """);
         if (year != null)  sql.append(" AND EXTRACT(YEAR  FROM t.transaction_date) = :year");
         if (month != null) sql.append(" AND EXTRACT(MONTH FROM t.transaction_date) = :month");

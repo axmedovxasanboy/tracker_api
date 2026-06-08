@@ -16,7 +16,9 @@ import uz.tracker.trackerproject.repository.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.List;
+import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
@@ -32,7 +34,15 @@ public class FinanceService {
     private final CategoryRepository categoryRepository;
     private final TransactionRepository transactionRepository;
     private final CardRepository cardRepository;
+    private final MarkPaidRepository markPaidRepository;
     private final CardService cardService;
+    private final MonthCloseService monthCloseService;
+
+    /** Targets that support the "already paid" (no-transaction) mark. */
+    private static final Set<String> MARK_KINDS =
+            Set.of("SUBSCRIPTION", "BANK", "PERSONAL_LOAN", "DEBT", "BUCKET");
+    private static final Set<String> MARK_BUCKETS =
+            Set.of("DONATION", "EMERGENCY", "INVESTMENTS", "STOCKS");
 
     // ---- Debts ----
 
@@ -295,6 +305,7 @@ public class FinanceService {
 
     @Transactional
     public MonthlyPaymentResponse payMonthlyPayment(Long id, MonthlyPaymentPayRequest req) {
+        monthCloseService.assertMonthOpen(req.getPaymentDate());
         MonthlyPayment m = monthlyPaymentRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("MonthlyPayment", id));
 
@@ -416,7 +427,7 @@ public class FinanceService {
         Transaction tx = createBucketTransaction(
                 TransactionSubType.DONATION,
                 req.getAmount(), req.getCurrency(),
-                req.getDonationDate(), req.getCardId(),
+                req.getDonationDate(), req.getCardId(), req.getCategoryId(),
                 description);
         return DonationResponse.from(saveDonation(new Donation(), req, tx.getId()));
     }
@@ -472,7 +483,7 @@ public class FinanceService {
         Transaction tx = createBucketTransaction(
                 TransactionSubType.INVESTMENT,
                 req.getInvestedAmount(), req.getCurrency(),
-                req.getPurchaseDate(), req.getCardId(),
+                req.getPurchaseDate(), req.getCardId(), req.getCategoryId(),
                 description);
         return InvestmentResponse.from(saveInvestment(new Investment(), req, tx.getId()));
     }
@@ -533,12 +544,70 @@ public class FinanceService {
         i.setPurchaseDate(req.getPurchaseDate());
         i.setBroker(req.getBroker());
         i.setDescription(req.getDescription());
+        i.setEmergencyFund(Boolean.TRUE.equals(req.getEmergencyFund()));
+        // A savings goal is never the emergency fund — emergencyFund wins if both are set.
+        i.setSavingsGoal(Boolean.TRUE.equals(req.getSavingsGoal()) && !Boolean.TRUE.equals(req.getEmergencyFund()));
+        i.setTargetAmount(req.getTargetAmount());
+        // currentValue is optional: null = "tracks investedAmount" (the response mapper falls back).
+        i.setCurrentValue(req.getCurrentValue());
+    }
+
+    /**
+     * Contribute additional money to an existing investment / savings goal. Mirrors a real
+     * EXPENSE Transaction (sub-type INVESTMENT) from the chosen wallet so the contribution
+     * appears in the Transactions list and reduces spendable balance, links it to the
+     * investment via investmentId for the contributions history, and bumps the invested
+     * total (and currentValue, when it is being tracked explicitly).
+     */
+    @Transactional
+    public InvestmentResponse contributeToInvestment(Long id, InvestmentContributeRequest req) {
+        Investment i = investmentRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Investment", id));
+        if (req.getCurrency() != i.getCurrency()) {
+            throw new IllegalArgumentException(
+                    "Contribution currency (" + req.getCurrency() + ") does not match investment currency (" + i.getCurrency() + ")");
+        }
+        String description = (req.getDescription() != null && !req.getDescription().isBlank())
+                ? req.getDescription()
+                : "Contribution — " + i.getName();
+        Transaction tx = createBucketTransaction(
+                TransactionSubType.INVESTMENT,
+                req.getAmount(), req.getCurrency(),
+                req.getDate(), req.getCardId(), req.getCategoryId(),
+                description);
+        tx.setInvestmentId(i.getId());
+        transactionRepository.save(tx);
+
+        i.setInvestedAmount(i.getInvestedAmount().add(req.getAmount()));
+        // Only adjust currentValue when it is being tracked explicitly; a null currentValue
+        // keeps "tracks investedAmount" semantics and grows automatically via the fallback.
+        if (i.getCurrentValue() != null) {
+            i.setCurrentValue(i.getCurrentValue().add(req.getAmount()));
+        }
+        return InvestmentResponse.from(investmentRepository.save(i));
+    }
+
+    /** Update only an investment's current/market value to reflect platform growth (no transaction). */
+    @Transactional
+    public InvestmentResponse updateInvestmentValue(Long id, InvestmentValueRequest req) {
+        Investment i = investmentRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Investment", id));
+        i.setCurrentValue(req.getCurrentValue());
+        return InvestmentResponse.from(investmentRepository.save(i));
+    }
+
+    @Transactional(readOnly = true)
+    public List<TransactionResponse> getInvestmentContributions(Long id) {
+        if (!investmentRepository.existsById(id)) throw new ResourceNotFoundException("Investment", id);
+        return transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(id).stream()
+                .map(TransactionResponse::from).toList();
     }
 
     // ---- Repayments ----
 
     @Transactional
     public LoanTakenResponse repayLoanTaken(Long id, RepaymentRequest req) {
+        monthCloseService.assertMonthOpen(req.getPaymentDate());
         LoanTaken loan = loanTakenRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("LoanTaken", id));
 
@@ -564,6 +633,7 @@ public class FinanceService {
 
     @Transactional
     public DebtResponse repayDebt(Long id, RepaymentRequest req) {
+        monthCloseService.assertMonthOpen(req.getPaymentDate());
         Debt debt = debtRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Debt", id));
 
@@ -589,6 +659,7 @@ public class FinanceService {
 
     @Transactional
     public LoanGivenResponse markLoanGivenReturned(Long id, RepaymentRequest req) {
+        monthCloseService.assertMonthOpen(req.getPaymentDate());
         LoanGiven loan = loanGivenRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("LoanGiven", id));
 
@@ -610,6 +681,113 @@ public class FinanceService {
         transactionRepository.save(tx);
 
         return LoanGivenResponse.from(loan);
+    }
+
+    // ---- "Already paid" marks (no transaction, no money movement) ----
+
+    /**
+     * Record an "already paid" mark for a month. Creates no Transaction and moves no money;
+     * the tier engine simply counts the mark toward the relevant "paid this month" total.
+     * For PERSONAL_LOAN / DEBT we ALSO bump the entity's paidAmount (mirroring a real
+     * repayment) so the remaining balance and tier shift accordingly.
+     */
+    @Transactional
+    public MarkPaidResponse markPaid(MarkPaidRequest req) {
+        String kind = req.getKind() == null ? "" : req.getKind().trim().toUpperCase();
+        if (!MARK_KINDS.contains(kind)) {
+            throw new IllegalArgumentException("Unknown mark kind: " + req.getKind());
+        }
+        YearMonth ym = parseMarkMonth(req.getMonth());
+        LocalDate monthFirst = ym.atDay(1);
+        monthCloseService.assertMonthOpen(monthFirst);
+
+        BigDecimal amount = req.getAmount();
+        Currency currency = req.getCurrency();
+        String bucket = null;
+
+        switch (kind) {
+            case "PERSONAL_LOAN" -> {
+                LoanTaken loan = loanTakenRepository.findById(requireRef(req.getRefId(), "loan"))
+                        .orElseThrow(() -> new ResourceNotFoundException("LoanTaken", req.getRefId()));
+                assertMarkCurrency(currency, loan.getCurrency(), "loan");
+                BigDecimal remaining = loan.getTotalAmount().subtract(loan.getPaidAmount());
+                if (amount.compareTo(remaining) > 0) {
+                    throw new IllegalArgumentException(String.format(
+                            "Amount of %s %s exceeds remaining balance of %s %s",
+                            amount, currency, remaining, currency));
+                }
+                loan.setPaidAmount(loan.getPaidAmount().add(amount));
+                loan.setStatus(loan.getPaidAmount().compareTo(loan.getTotalAmount()) >= 0
+                        ? RecordStatus.PAID : RecordStatus.PARTIALLY_PAID);
+                loanTakenRepository.save(loan);
+            }
+            case "DEBT" -> {
+                Debt debt = debtRepository.findById(requireRef(req.getRefId(), "debt"))
+                        .orElseThrow(() -> new ResourceNotFoundException("Debt", req.getRefId()));
+                assertMarkCurrency(currency, debt.getCurrency(), "debt");
+                BigDecimal remaining = debt.getTotalAmount().subtract(debt.getPaidAmount());
+                if (amount.compareTo(remaining) > 0) {
+                    throw new IllegalArgumentException(String.format(
+                            "Amount of %s %s exceeds remaining balance of %s %s",
+                            amount, currency, remaining, currency));
+                }
+                debt.setPaidAmount(debt.getPaidAmount().add(amount));
+                debt.setStatus(debt.getPaidAmount().compareTo(debt.getTotalAmount()) >= 0
+                        ? RecordStatus.PAID : RecordStatus.PARTIALLY_PAID);
+                debtRepository.save(debt);
+            }
+            case "SUBSCRIPTION" -> {
+                MonthlyPayment mp = monthlyPaymentRepository.findById(requireRef(req.getRefId(), "subscription"))
+                        .orElseThrow(() -> new ResourceNotFoundException("MonthlyPayment", req.getRefId()));
+                assertMarkCurrency(currency, mp.getCurrency(), "subscription");
+            }
+            case "BANK" -> {
+                if (req.getRefId() != null) {
+                    BankLoan b = bankLoanRepository.findById(req.getRefId())
+                            .orElseThrow(() -> new ResourceNotFoundException("BankLoan", req.getRefId()));
+                    assertMarkCurrency(currency, b.getCurrency(), "bank loan");
+                }
+            }
+            case "BUCKET" -> {
+                bucket = req.getBucket() == null ? "" : req.getBucket().trim().toUpperCase();
+                if (!MARK_BUCKETS.contains(bucket)) {
+                    throw new IllegalArgumentException("Unknown bucket: " + req.getBucket());
+                }
+            }
+            default -> throw new IllegalArgumentException("Unknown mark kind: " + req.getKind());
+        }
+
+        MarkPaid mark = new MarkPaid();
+        mark.setKind(kind);
+        mark.setRefId("BUCKET".equals(kind) ? null : req.getRefId());
+        mark.setBucket(bucket);
+        mark.setMonth(monthFirst);
+        mark.setAmount(amount);
+        mark.setCurrency(currency);
+        mark.setNote(req.getNote() != null && req.getNote().isBlank() ? null : req.getNote());
+        return MarkPaidResponse.from(markPaidRepository.save(mark));
+    }
+
+    private static Long requireRef(Long refId, String what) {
+        if (refId == null) throw new IllegalArgumentException("refId (the " + what + " id) is required.");
+        return refId;
+    }
+
+    /** A mark carries no FX — its amount must already be in the target's own currency. */
+    private static void assertMarkCurrency(Currency reqCurrency, Currency entityCurrency, String what) {
+        if (reqCurrency != entityCurrency) {
+            throw new IllegalArgumentException(
+                    "Amount currency (" + reqCurrency + ") does not match the " + what + " currency (" + entityCurrency + ").");
+        }
+    }
+
+    private static YearMonth parseMarkMonth(String month) {
+        if (month == null || month.isBlank()) return YearMonth.now();
+        try {
+            return YearMonth.parse(month.trim());
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new IllegalArgumentException("month must be in YYYY-MM format (got: " + month + ")");
+        }
     }
 
     @Transactional(readOnly = true)
@@ -647,7 +825,10 @@ public class FinanceService {
         attachCardAndCategory(tx, req);
         // No card → fully cash; otherwise card-side payment (no split — UI gives the user
         // a single payment-source choice for repayments, not Card+Cash split).
-        if (tx.getCard() != null) cardService.assertSufficientBalance(tx.getCard(), req.getAmount());
+        // Only guard balance for EXPENSE outflows; an INCOME mark-returned deposits INTO the
+        // card, so it must not require the destination card to be pre-funded (mirrors
+        // TransactionService.checkCardBalance, which skips the check when type != EXPENSE).
+        if (type == TransactionType.EXPENSE && tx.getCard() != null) cardService.assertSufficientBalance(tx.getCard(), req.getAmount());
         tx.setCashAmount(tx.getCard() == null ? req.getAmount() : BigDecimal.ZERO);
         return tx;
     }
@@ -661,7 +842,8 @@ public class FinanceService {
      */
     private Transaction createBucketTransaction(
             TransactionSubType subType, BigDecimal amount, uz.tracker.trackerproject.enums.Currency currency,
-            java.time.LocalDate date, Long cardId, String description) {
+            java.time.LocalDate date, Long cardId, Long categoryId, String description) {
+        monthCloseService.assertMonthOpen(date);
         Transaction tx = new Transaction();
         tx.setType(TransactionType.EXPENSE);
         tx.setSubType(subType);
@@ -683,13 +865,25 @@ public class FinanceService {
             tx.setCard(null);
             tx.setCashAmount(amount);
         }
+        // Category: explicit override wins; otherwise auto-pick the single Category whose
+        // applicableSubType matches (same rule as repayments) so Overview pays aren't uncategorised.
+        if (categoryId != null) {
+            categoryRepository.findById(categoryId).ifPresent(tx::setCategory);
+        } else {
+            List<Category> matches = categoryRepository.findByApplicableSubTypeAndParentIsNull(subType);
+            if (matches.size() == 1) tx.setCategory(matches.get(0));
+        }
         return transactionRepository.save(tx);
     }
 
     private void attachCardAndCategory(Transaction tx, RepaymentRequest req) {
         if (req.getCardId() != null) {
-            Card card = cardRepository.findById(req.getCardId()).orElse(null);
-            if (card != null && card.getCurrency() != tx.getCurrency()) {
+            // A supplied cardId means a card-sourced payment; an unresolvable id must fail
+            // fast (404) rather than silently downgrade the payment to cash and corrupt the
+            // cash/card balance aggregates. Matches resolveCardForPayment / createBucketTransaction.
+            Card card = cardRepository.findById(req.getCardId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Card", req.getCardId()));
+            if (card.getCurrency() != tx.getCurrency()) {
                 throw new IllegalArgumentException(
                         "Card currency (" + card.getCurrency() + ") does not match payment currency (" + tx.getCurrency() + ")");
             }
@@ -700,7 +894,7 @@ public class FinanceService {
         } else if (tx.getSubType() != null) {
             // Mirror the modal's "auto-select-single" behaviour: if exactly one Category
             // declares applicableSubType = tx.subType, use it. Stays null on 0 or >1 hits.
-            List<Category> matches = categoryRepository.findByApplicableSubType(tx.getSubType());
+            List<Category> matches = categoryRepository.findByApplicableSubTypeAndParentIsNull(tx.getSubType());
             if (matches.size() == 1) tx.setCategory(matches.get(0));
         }
     }

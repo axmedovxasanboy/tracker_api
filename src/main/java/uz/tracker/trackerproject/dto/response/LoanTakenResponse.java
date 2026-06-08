@@ -25,6 +25,8 @@ public class LoanTakenResponse {
     private RecordStatus status;
     private String description;
     private LocalDateTime createdAt;
+    /** Frozen monthly installment (D3: a LoanTaken is a "loan", paid as a full installment). */
+    private BigDecimal monthlyPayment;
 
     public static LoanTakenResponse from(LoanTaken l) {
         return LoanTakenResponse.builder()
@@ -40,6 +42,7 @@ public class LoanTakenResponse {
                 .status(l.getStatus())
                 .description(l.getDescription())
                 .createdAt(l.getCreatedAt())
+                .monthlyPayment(l.getMonthlyPayment())
                 .build();
     }
 }

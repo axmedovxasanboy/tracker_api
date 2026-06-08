@@ -5,6 +5,7 @@ import lombok.Getter;
 import uz.tracker.trackerproject.enums.Currency;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 /**
  * Snapshot of the user's monthly financial tier. All monetary values are converted
@@ -40,6 +41,13 @@ public class OverviewTierResponse {
     /** income − mandatorySubscriptions. The level is computed from this. */
     private BigDecimal leftMoney;
 
+    /**
+     * "Left balance" = this month's available money (carryover + income earned this month). The
+     * bucket allocation percentages are applied to THIS, not to stable income. The tier level and
+     * tight/comfortable split still come from stable income.
+     */
+    private BigDecimal allocationBase;
+
     /** bankLoans + loansTaken + debts — used for the sub-level debt-ratio rule. */
     private BigDecimal debtPayments;
 
@@ -64,11 +72,40 @@ public class OverviewTierResponse {
     private boolean missingStableIncome;
 
     /**
+     * True when the viewed month is before the configured allocation tracking start month.
+     * Guidance is paused (no payment asks); the client greys the whole dashboard.
+     */
+    private boolean beforeTrackingStart;
+
+    /** YYYY-MM the allocation tracking starts from, or null when not configured. */
+    private String trackingStartMonth;
+
+    /**
+     * True when one or more active mandatory subscriptions are NOT yet fully paid for the
+     * viewed month. While true the level / sub-level / action items / allocation are withheld —
+     * the user must pay subscriptions first (see {@link #pendingSubscriptions}).
+     */
+    private boolean subscriptionsPending;
+
+    /** The unpaid (or partially paid) active subscriptions for the viewed month. Empty when none. */
+    private List<PendingSubscription> pendingSubscriptions;
+
+    /**
      * Recommended bucket allocation for this tier (Donation / Emergency / Investments /
      * Stocks). Hard-coded for Level 1; null/empty notes for Levels 2-6 until the user
      * configures their own percentages.
      */
     private TierAllocation allocation;
+
+    /** One unpaid/partly-paid subscription for the viewed month, in its own native currency. */
+    @Getter @Builder
+    public static class PendingSubscription {
+        private Long id;
+        private String name;
+        private Currency currency;
+        private BigDecimal amount;   // the subscription's monthly amount
+        private BigDecimal paid;     // recorded this month so far (native currency)
+    }
 
     @Getter @Builder
     public static class DebtBreakdown {

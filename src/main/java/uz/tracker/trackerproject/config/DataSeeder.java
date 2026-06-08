@@ -49,6 +49,9 @@ public class DataSeeder implements CommandLineRunner {
         // the old constraint then rejects inserts of the new values at the DB level.
         rebuildSubTypeCheckConstraint();
 
+        // Legacy STOCKS/CRYPTO investment types were removed — migrate old rows to OTHER first.
+        migrateLegacyInvestmentTypes();
+
         // Back-fill kind on any pre-existing categories so the new column has a value everywhere.
         categoryRepository.findAll().forEach(c -> {
             if (c.getKind() == null) {
@@ -74,9 +77,34 @@ public class DataSeeder implements CommandLineRunner {
         // Idempotent — only touches rows where monthlyPayment is null.
         backfillLoanMonthlyPayment();
 
-        if (categoryRepository.count() > 0) return;
+        if (categoryRepository.count() == 0) {
+            categoryRepository.saveAll(defaultCategories());
+        }
+        // Idempotent — runs AFTER the default-seed check above so a fresh DB still seeds the full
+        // set (adding these early would make count() > 0 and skip it). On an existing DB it adds
+        // the Stocks + Emergency categories if they're missing.
+        ensureBucketCategories();
+    }
 
-        List<Category> defaults = List.of(
+    /**
+     * Seed a clean database with the default category set (+ the Anonymous donation
+     * sub-category) and the sub_type CHECK constraint. Called on first boot via
+     * {@link #run} and again by the factory reset (ResetService) right after every
+     * table has been truncated, so a fresh signup lands on a usable app. Idempotent:
+     * the category seeding is a no-op when any category already exists.
+     */
+    @Transactional
+    public void seedDefaults() {
+        rebuildSubTypeCheckConstraint();
+        if (categoryRepository.count() == 0) {
+            categoryRepository.saveAll(defaultCategories());
+        }
+        ensureDonationAnonymous();
+        ensureBucketCategories();
+    }
+
+    private List<Category> defaultCategories() {
+        return List.of(
                 // INCOME
                 cat("Salary",          CategoryType.INCOME,  "#10b981", "briefcase",   TransactionSubType.REGULAR_INCOME,      CategoryKind.GENERIC),
                 cat("Freelance",       CategoryType.INCOME,  "#06b6d4", "laptop",      TransactionSubType.REGULAR_INCOME,      CategoryKind.GENERIC),
@@ -96,9 +124,41 @@ public class DataSeeder implements CommandLineRunner {
                 cat("Loan Repayment",  CategoryType.EXPENSE, "#f59e0b", "refresh-cw",    TransactionSubType.LOAN_REPAYMENT,    CategoryKind.GENERIC),
                 cat("Bank Instalment", CategoryType.EXPENSE, "#6366f1", "building",      TransactionSubType.BANK_LOAN_PAYMENT, CategoryKind.GENERIC),
                 cat("Donation",        CategoryType.EXPENSE, "#d946ef", "heart-handshake", TransactionSubType.DONATION,        CategoryKind.GENERIC),
-                cat("Investment",      CategoryType.EXPENSE, "#0ea5e9", "trending-up",   TransactionSubType.INVESTMENT,        CategoryKind.GENERIC)
+                cat("Investment",      CategoryType.EXPENSE, "#0ea5e9", "trending-up",   TransactionSubType.INVESTMENT,        CategoryKind.GENERIC),
+                cat("Stocks",          CategoryType.EXPENSE, "#0d9488", "line-chart",    TransactionSubType.STOCK_PURCHASE,    CategoryKind.GENERIC),
+                cat("Emergency Fund",  CategoryType.EXPENSE, "#f43f5e", "shield-alert",  TransactionSubType.EMERGENCY_CONTRIBUTION, CategoryKind.GENERIC),
+                cat("Everyday Spending", CategoryType.EXPENSE, "#94a3b8", "wallet",      TransactionSubType.EVERYDAY_SPENDING, CategoryKind.GENERIC)
         );
-        categoryRepository.saveAll(defaults);
+    }
+
+    /**
+     * Ensure a category exists for the Stocks and Emergency buckets so Overview pays of those
+     * kinds auto-pick a category. Idempotent and safe on existing databases (where the default
+     * seed above doesn't re-run). Only adds one when none already declares that sub-type.
+     */
+    private void ensureBucketCategories() {
+        ensureCategoryForSubType("Stocks",         "#0d9488", "line-chart",   TransactionSubType.STOCK_PURCHASE);
+        ensureCategoryForSubType("Emergency Fund", "#f43f5e", "shield-alert", TransactionSubType.EMERGENCY_CONTRIBUTION);
+        ensureCategoryForSubType("Everyday Spending", "#94a3b8", "wallet",    TransactionSubType.EVERYDAY_SPENDING);
+    }
+
+    private void ensureCategoryForSubType(String name, String color, String icon, TransactionSubType subType) {
+        if (!categoryRepository.findByApplicableSubType(subType).isEmpty()) return;
+        categoryRepository.save(cat(name, CategoryType.EXPENSE, color, icon, subType, CategoryKind.GENERIC));
+    }
+
+    /**
+     * Legacy data: the STOCKS and CRYPTO investment types were removed. Migrate any existing
+     * rows to OTHER via native SQL — done BEFORE JPA reads them under the trimmed enum, which
+     * would otherwise throw. Idempotent; non-fatal if the table doesn't exist yet.
+     */
+    private void migrateLegacyInvestmentTypes() {
+        try {
+            entityManager.createNativeQuery(
+                    "UPDATE investments SET type = 'OTHER' WHERE type IN ('STOCKS','CRYPTO')").executeUpdate();
+        } catch (Exception ignored) {
+            // schema not yet created / non-Postgres — safe to skip.
+        }
     }
 
     /**

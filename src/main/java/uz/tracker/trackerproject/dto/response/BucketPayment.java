@@ -17,7 +17,7 @@ import java.time.LocalDate;
 @Getter @Builder
 public class BucketPayment {
     private Long id;
-    private String bucket;          // DONATION | EMERGENCY | INVESTMENTS | STOCKS
+    private String bucket;          // DONATION | EMERGENCY | INVESTMENTS | STOCKS | SAVINGS
     private LocalDate date;
     private BigDecimal amount;       // converted into display currency
     private BigDecimal nativeAmount; // raw value as stored

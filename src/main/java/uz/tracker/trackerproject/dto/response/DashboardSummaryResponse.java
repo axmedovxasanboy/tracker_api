@@ -22,4 +22,18 @@ public class DashboardSummaryResponse {
      * which differs from netBalance because it includes starting balances.
      */
     private BigDecimal availableBalance;
+
+    /**
+     * SPENDABLE balance — money sitting in wallets you can spend (same value as
+     * {@link #availableBalance}, kept as a distinct field for the envelope model so the
+     * frontend can label it clearly against {@link #netWorth}).
+     */
+    private BigDecimal spendableBalance;
+
+    /**
+     * NET WORTH in this currency: spendable wallet money across ALL currencies plus the
+     * current value of every investment / savings goal, FX-converted into this currency.
+     * Money parked in investments/savings is still yours — just not spending-money.
+     */
+    private BigDecimal netWorth;
 }

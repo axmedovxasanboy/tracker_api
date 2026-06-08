@@ -55,7 +55,8 @@ public class LoanTaken {
      * path only when the field is currently null.
      *
      * Nullable so existing rows under ddl-auto=update keep working; DataSeeder
-     * back-fills any null values on boot. Read via OverviewService.sumLoansTakenMonthlyUzs.
+     * back-fills any null values on boot. (Retained for reference; the tier now treats
+     * borrowed money as 34%-of-total debt, not a fixed installment.)
      */
     @Column(name = "monthly_payment", precision = 19, scale = 4)
     private BigDecimal monthlyPayment;

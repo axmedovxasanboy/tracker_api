@@ -195,6 +195,23 @@ public class FinanceController {
         return ResponseEntity.noContent().build();
     }
 
+    @PostMapping("/investments/{id}/contribute")
+    public ResponseEntity<InvestmentResponse> contributeToInvestment(
+            @PathVariable Long id, @Valid @RequestBody InvestmentContributeRequest req) {
+        return ResponseEntity.ok(financeService.contributeToInvestment(id, req));
+    }
+
+    @PostMapping("/investments/{id}/value")
+    public ResponseEntity<InvestmentResponse> updateInvestmentValue(
+            @PathVariable Long id, @Valid @RequestBody InvestmentValueRequest req) {
+        return ResponseEntity.ok(financeService.updateInvestmentValue(id, req));
+    }
+
+    @GetMapping("/investments/{id}/contributions")
+    public ResponseEntity<List<TransactionResponse>> getInvestmentContributions(@PathVariable Long id) {
+        return ResponseEntity.ok(financeService.getInvestmentContributions(id));
+    }
+
     // ---- Repayments ----
 
     @PostMapping("/loans-taken/{id}/repay")
@@ -213,6 +230,13 @@ public class FinanceController {
     public ResponseEntity<LoanGivenResponse> markLoanGivenReturned(
             @PathVariable Long id, @Valid @RequestBody RepaymentRequest req) {
         return ResponseEntity.ok(financeService.markLoanGivenReturned(id, req));
+    }
+
+    // ---- "Already paid" mark (no transaction, no money movement) ----
+
+    @PostMapping("/mark-paid")
+    public ResponseEntity<MarkPaidResponse> markPaid(@Valid @RequestBody MarkPaidRequest req) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(financeService.markPaid(req));
     }
 
     // ---- Payment history (per loan/debt) ----

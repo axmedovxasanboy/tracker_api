@@ -7,7 +7,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import uz.tracker.trackerproject.dto.request.BalanceTransferRequest;
-import uz.tracker.trackerproject.dto.request.BulkTransactionRequest;
 import uz.tracker.trackerproject.dto.request.ExchangeRequest;
 import uz.tracker.trackerproject.dto.request.TransactionRequest;
 import uz.tracker.trackerproject.dto.response.PageResponse;
@@ -18,7 +17,6 @@ import uz.tracker.trackerproject.service.TransactionService;
 
 import java.time.LocalDate;
 import java.util.List;
-import java.util.Set;
 
 @RestController
 @RequestMapping("/api/v1/transactions")
@@ -58,12 +56,6 @@ public class TransactionController {
     @PostMapping
     public ResponseEntity<TransactionResponse> create(@Valid @RequestBody TransactionRequest request) {
         return ResponseEntity.status(HttpStatus.CREATED).body(transactionService.create(request));
-    }
-
-    @PostMapping("/bulk")
-    public ResponseEntity<List<TransactionResponse>> createBulk(@Valid @RequestBody BulkTransactionRequest request) {
-        return ResponseEntity.status(HttpStatus.CREATED)
-                .body(transactionService.createBulk(request.getCardId(), request.getTransactions()));
     }
 
     @PutMapping("/{id}")

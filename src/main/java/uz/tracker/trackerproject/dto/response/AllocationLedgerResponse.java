@@ -20,9 +20,12 @@ public class AllocationLedgerResponse {
     private String startMonth;       // YYYY-MM the ledger starts from (Settings, default = current)
     private String selectedMonth;    // YYYY-MM being viewed
     private boolean missingStableIncome;
+    private boolean beforeTrackingStart; // viewed month precedes the configured tracking start
+    private String trackingStartMonth;   // YYYY-MM the ledger will start from (null when unset)
 
     private BigDecimal stableIncome;     // selected month, display currency
     private BigDecimal bonusThisMonth;   // bonus-tagged income received in the selected month
+    private BigDecimal allocationBase;   // "left balance" = available (carryover + income) the %s apply to
     private Integer level;               // selected month (level is stable across months)
     private String subLevel;             // selected month
 
@@ -60,6 +63,7 @@ public class AllocationLedgerResponse {
         private String subLevel;
         private BigDecimal stableIncome;  // display currency
         private BigDecimal bonus;         // display currency
+        private BigDecimal allocationBase; // "left balance" the %s apply to (display currency)
         private boolean selected;         // true for the month being viewed
         private List<MonthBucketLine> lines;
     }

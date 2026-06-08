@@ -1,7 +1,6 @@
 package uz.tracker.trackerproject.dto.request;
 
 import jakarta.validation.constraints.DecimalMin;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.Getter;
 import lombok.Setter;
@@ -10,32 +9,25 @@ import uz.tracker.trackerproject.enums.Currency;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 
+/** Contribute additional money to an existing investment / savings goal. */
 @Getter @Setter
-public class DonationRequest {
-
-    @NotBlank
-    private String recipientName;
+public class InvestmentContributeRequest {
 
     @NotNull @DecimalMin("0.01")
     private BigDecimal amount;
 
+    /** Must match the investment's currency. */
     @NotNull
     private Currency currency;
 
     @NotNull
-    private LocalDate donationDate;
+    private LocalDate date;
 
-    private String description;
-
-    private Boolean anonymous;
-
-    /**
-     * Optional — when set, the auto-created Transaction is booked against this card.
-     * Null = cash. Used when the donation is recorded directly (not via the
-     * Transaction modal, which already passes the card on its side).
-     */
+    /** Optional — null = cash. */
     private Long cardId;
 
     /** Optional override for the mirrored transaction's category; null = auto-pick by sub-type. */
     private Long categoryId;
+
+    private String description;
 }

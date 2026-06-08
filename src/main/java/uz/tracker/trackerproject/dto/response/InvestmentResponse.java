@@ -7,6 +7,7 @@ import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.InvestmentType;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
@@ -21,9 +22,22 @@ public class InvestmentResponse {
     private LocalDate purchaseDate;
     private String broker;
     private String description;
+    private boolean emergencyFund;
+    private boolean savingsGoal;
+    private BigDecimal targetAmount;
+    /** Current/market value. Falls back to investedAmount when not explicitly set. */
+    private BigDecimal currentValue;
+    /** currentValue / targetAmount as a percentage; null when there is no target. */
+    private BigDecimal progressPercent;
     private LocalDateTime createdAt;
 
     public static InvestmentResponse from(Investment i) {
+        BigDecimal value = i.getCurrentValue() != null ? i.getCurrentValue() : i.getInvestedAmount();
+        BigDecimal progress = null;
+        if (i.getTargetAmount() != null && i.getTargetAmount().signum() > 0 && value != null) {
+            progress = value.multiply(BigDecimal.valueOf(100))
+                    .divide(i.getTargetAmount(), 2, RoundingMode.HALF_UP);
+        }
         return InvestmentResponse.builder()
                 .id(i.getId())
                 .name(i.getName())
@@ -33,6 +47,11 @@ public class InvestmentResponse {
                 .purchaseDate(i.getPurchaseDate())
                 .broker(i.getBroker())
                 .description(i.getDescription())
+                .emergencyFund(Boolean.TRUE.equals(i.getEmergencyFund()))
+                .savingsGoal(Boolean.TRUE.equals(i.getSavingsGoal()))
+                .targetAmount(i.getTargetAmount())
+                .currentValue(value)
+                .progressPercent(progress)
                 .createdAt(i.getCreatedAt())
                 .build();
     }

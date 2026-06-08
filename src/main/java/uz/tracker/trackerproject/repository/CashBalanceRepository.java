@@ -47,4 +47,26 @@ public interface CashBalanceRepository extends JpaRepository<CashBalance, Long> 
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT))
             """)
     BigDecimal sumCashlessTransactions(@Param("currency") Currency currency);
+
+    /**
+     * Month-bounded variant of {@link #sumCashlessTransactions} — same cash-portion + transfer
+     * exclusion logic, restricted to transactions dated on/before {@code end}. Used at
+     * month-close to compute a cash pot's balance as of the month boundary.
+     */
+    @Query("""
+            SELECT COALESCE(SUM(
+                CASE WHEN t.type = uz.tracker.trackerproject.enums.TransactionType.INCOME
+                     THEN  CASE WHEN t.card IS NULL THEN t.amount ELSE COALESCE(t.cashAmount, 0) END
+                     ELSE -CASE WHEN t.card IS NULL THEN t.amount ELSE COALESCE(t.cashAmount, 0) END
+                END
+            ), 0)
+            FROM Transaction t
+            WHERE t.currency = :currency
+              AND t.transactionDate <= :end
+              AND (t.subType IS NULL OR t.subType NOT IN (
+                    uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_IN,
+                    uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT))
+            """)
+    BigDecimal sumCashlessTransactionsUpTo(@Param("currency") Currency currency,
+                                           @Param("end") java.time.LocalDate end);
 }

@@ -25,4 +25,7 @@ public class EmergencyRequest {
 
     /** Optional — null = cash. See DonationRequest.cardId for rationale. */
     private Long cardId;
+
+    /** Optional override for the mirrored transaction's category; null = auto-pick by sub-type. */
+    private Long categoryId;
 }

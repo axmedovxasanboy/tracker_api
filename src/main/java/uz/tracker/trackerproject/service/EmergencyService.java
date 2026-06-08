@@ -6,12 +6,14 @@ import org.springframework.transaction.annotation.Transactional;
 import uz.tracker.trackerproject.dto.request.EmergencyRequest;
 import uz.tracker.trackerproject.dto.response.EmergencyResponse;
 import uz.tracker.trackerproject.entity.Card;
+import uz.tracker.trackerproject.entity.Category;
 import uz.tracker.trackerproject.entity.Emergency;
 import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.enums.TransactionSubType;
 import uz.tracker.trackerproject.enums.TransactionType;
 import uz.tracker.trackerproject.exception.ResourceNotFoundException;
 import uz.tracker.trackerproject.repository.CardRepository;
+import uz.tracker.trackerproject.repository.CategoryRepository;
 import uz.tracker.trackerproject.repository.EmergencyRepository;
 import uz.tracker.trackerproject.repository.TransactionRepository;
 
@@ -25,6 +27,7 @@ public class EmergencyService {
     private final EmergencyRepository repo;
     private final TransactionRepository transactionRepository;
     private final CardRepository cardRepository;
+    private final CategoryRepository categoryRepository;
     private final CardService cardService;
 
     @Transactional(readOnly = true)
@@ -58,6 +61,13 @@ public class EmergencyService {
         } else {
             tx.setCard(null);
             tx.setCashAmount(req.getAmount());
+        }
+        // Category: explicit override wins; else auto-pick the single category for this sub-type.
+        if (req.getCategoryId() != null) {
+            categoryRepository.findById(req.getCategoryId()).ifPresent(tx::setCategory);
+        } else {
+            List<Category> matches = categoryRepository.findByApplicableSubTypeAndParentIsNull(TransactionSubType.EMERGENCY_CONTRIBUTION);
+            if (matches.size() == 1) tx.setCategory(matches.get(0));
         }
         transactionRepository.save(tx);
 

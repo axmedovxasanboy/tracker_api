@@ -20,6 +20,13 @@ public interface CategoryRepository extends JpaRepository<Category, Long> {
 
     List<Category> findByApplicableSubType(TransactionSubType applicableSubType);
 
+    /**
+     * Root (top-level) categories declaring this applicableSubType. Used by the bucket/repayment
+     * auto-pick so a child that inherits/clones the sub-type (e.g. the seeded "Anonymous" donation
+     * sub-category) can't make the match ambiguous and silently leave the transaction uncategorised.
+     */
+    List<Category> findByApplicableSubTypeAndParentIsNull(TransactionSubType applicableSubType);
+
     List<Category> findByParentIsNull();
 
     List<Category> findByParentIsNullAndTypeIn(List<CategoryType> types);

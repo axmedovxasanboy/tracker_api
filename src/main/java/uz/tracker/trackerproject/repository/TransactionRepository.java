@@ -58,7 +58,8 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_IN,
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT,
                     uz.tracker.trackerproject.enums.TransactionSubType.EXCHANGE_IN,
-                    uz.tracker.trackerproject.enums.TransactionSubType.EXCHANGE_OUT))
+                    uz.tracker.trackerproject.enums.TransactionSubType.EXCHANGE_OUT,
+                    uz.tracker.trackerproject.enums.TransactionSubType.EVERYDAY_SPENDING))
             """)
     BigDecimal sumByTypeCurrencyDateRange(
             @Param("type") TransactionType type,
@@ -89,10 +90,12 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
      */
     @Query("""
             SELECT COALESCE(SUM(t.amount), 0) FROM Transaction t
+            LEFT JOIN t.category c
+            LEFT JOIN c.parent p
             WHERE t.type = uz.tracker.trackerproject.enums.TransactionType.INCOME
               AND t.currency = :currency
               AND t.transactionDate >= :start AND t.transactionDate <= :end
-              AND (t.category.bonusIncome = true OR t.category.parent.bonusIncome = true)
+              AND (c.bonusIncome = true OR p.bonusIncome = true)
             """)
     BigDecimal sumBonusIncomeByCurrencyDateRange(
             @Param("currency") Currency currency,
@@ -109,6 +112,18 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
 
     @Query("SELECT COALESCE(SUM(t.amount), 0) FROM Transaction t WHERE t.monthlyPaymentId = :id")
     BigDecimal sumAmountByMonthlyPaymentId(@Param("id") Long monthlyPaymentId);
+
+    /** Subscription payments recorded for one MonthlyPayment within a date window (this month). */
+    @Query("SELECT COALESCE(SUM(t.amount), 0) FROM Transaction t WHERE t.monthlyPaymentId = :id " +
+            "AND t.transactionDate BETWEEN :start AND :end")
+    BigDecimal sumByMonthlyPaymentIdAndDateRange(@Param("id") Long id,
+                                                 @Param("start") java.time.LocalDate start,
+                                                 @Param("end") java.time.LocalDate end);
+
+    /** Transactions of one sub-type within a date window — used for the Stocks bucket history. */
+    List<Transaction> findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+            uz.tracker.trackerproject.enums.TransactionSubType subType,
+            java.time.LocalDate start, java.time.LocalDate end);
 
     long countByMonthlyPaymentId(Long monthlyPaymentId);
 
@@ -131,7 +146,7 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
             FROM transactions t
             LEFT JOIN categories c ON c.id = t.category_id
             WHERE t.place IS NOT NULL AND t.place <> ''
-              AND (:categoryId IS NULL OR t.category_id = :categoryId OR c.parent_id = :categoryId)
+              AND (CAST(:categoryId AS bigint) IS NULL OR t.category_id = :categoryId OR c.parent_id = :categoryId)
               AND (:prefix IS NULL OR :prefix = '' OR t.place ILIKE '%' || :prefix || '%')
             ORDER BY t.place
             LIMIT 15
@@ -160,4 +175,7 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
     Optional<Transaction> findFirstByTransferPairIdAndIdNot(Long transferPairId, Long excludeId);
 
     long countByInvestmentId(Long investmentId);
+
+    /** Contribution history for one investment / savings goal — newest first. */
+    List<Transaction> findByInvestmentIdOrderByTransactionDateDesc(Long investmentId);
 }

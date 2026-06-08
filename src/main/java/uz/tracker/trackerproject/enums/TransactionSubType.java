@@ -12,8 +12,12 @@ public enum TransactionSubType {
     LOAN_REPAYMENT,      // Paying back what I owe → updates Debt / LoanTaken
     BANK_LOAN_PAYMENT,   // Monthly bank loan instalment
     INVESTMENT,          // Invested money → creates Investment
+    STOCK_PURCHASE,      // Money moved to stocks (tracked elsewhere) → funds the Stocks bucket
     DONATION,            // Donated money → creates Donation
     EMERGENCY_CONTRIBUTION, // Money set aside for emergency fund → creates Emergency
+    EVERYDAY_SPENDING,   // Month-end reconciliation plug: the untracked everyday spend that
+                         // brings a wallet's computed balance down to the entered real balance
+                         // (booked as INCOME when the entered balance is HIGHER — a surplus)
 
     // Internal card transfers
     TRANSFER_OUT,        // Money leaving a card (paired with TRANSFER_IN on destination)

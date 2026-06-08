@@ -28,7 +28,16 @@ public class SettingsService {
         if (req.getUsdToUzs() != null) s.setUsdToUzs(req.getUsdToUzs());
         if (req.getEurToUzs() != null) s.setEurToUzs(req.getEurToUzs());
         if (req.getAllocationTrackingStartMonth() != null) {
-            s.setAllocationTrackingStartMonth(req.getAllocationTrackingStartMonth().withDayOfMonth(1));
+            // Write-once: locked the moment it's first set. Re-sending the SAME value is a
+            // no-op (so saving other settings still works); a DIFFERENT value is rejected.
+            java.time.LocalDate incoming = req.getAllocationTrackingStartMonth().withDayOfMonth(1);
+            java.time.LocalDate existing = s.getAllocationTrackingStartMonth();
+            if (existing == null) {
+                s.setAllocationTrackingStartMonth(incoming);
+            } else if (!existing.equals(incoming)) {
+                throw new IllegalArgumentException(
+                        "Allocation tracking start month is locked once set and can't be changed.");
+            }
         }
         // URLs: an explicit empty string clears the value; a null (omitted field) leaves it as-is.
         if (req.getTelegramWebhookUrl() != null) s.setTelegramWebhookUrl(blankToNull(req.getTelegramWebhookUrl()));

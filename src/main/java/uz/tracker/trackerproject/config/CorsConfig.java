@@ -32,6 +32,10 @@ public class CorsConfig {
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/**", config);
+        // The SPA's offline-recovery health probe hits /actuator/health cross-origin in the
+        // split-origin (api.<domain>) production deploy; without CORS here the browser blocks
+        // it and the Retry button / 15s poller can never clear the offline banner.
+        source.registerCorsConfiguration("/actuator/**", config);
         return source;
     }
 }

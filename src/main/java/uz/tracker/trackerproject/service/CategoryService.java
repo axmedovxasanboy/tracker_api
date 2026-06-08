@@ -28,9 +28,10 @@ public class CategoryService {
         if (type == null) {
             roots = categoryRepository.findByParentIsNull();
         } else if (type == CategoryType.INCOME) {
-            roots = categoryRepository.findByParentIsNullAndTypeIn(List.of(CategoryType.INCOME));
+            // BOTH-typed roots are applicable to income AND expense, so include them.
+            roots = categoryRepository.findByParentIsNullAndTypeIn(List.of(CategoryType.INCOME, CategoryType.BOTH));
         } else if (type == CategoryType.EXPENSE) {
-            roots = categoryRepository.findByParentIsNullAndTypeIn(List.of(CategoryType.EXPENSE));
+            roots = categoryRepository.findByParentIsNullAndTypeIn(List.of(CategoryType.EXPENSE, CategoryType.BOTH));
         } else {
             roots = categoryRepository.findByParentIsNull().stream()
                     .filter(c -> c.getType() == type)
@@ -100,9 +101,17 @@ public class CategoryService {
         c.setParent(parent);
 
         // Sub-categories inherit the parent's kind by default. The client may override.
+        // On update with no explicit kind, preserve the category's existing kind so editing a
+        // non-GENERIC root (e.g. a FOOD/TRANSPORT seed) for any reason doesn't reset it to GENERIC.
         CategoryKind kind = req.getKind();
         if (kind == null) {
-            kind = parent != null && parent.getKind() != null ? parent.getKind() : CategoryKind.GENERIC;
+            if (parent != null && parent.getKind() != null) {
+                kind = parent.getKind();
+            } else if (c.getKind() != null) {
+                kind = c.getKind();
+            } else {
+                kind = CategoryKind.GENERIC;
+            }
         }
         c.setKind(kind);
 
