@@ -48,7 +48,13 @@ public class InvestmentRequest {
     @DecimalMin("0")
     private BigDecimal currentValue;
 
-    /** Optional — null = cash. See DonationRequest.cardId for rationale. */
+    /** When true, record an already-owned investment as an OPENING BALANCE: no wallet is debited,
+        no mirror transaction is created, and it is excluded from the monthly allocation buckets.
+        Use this for holdings you already had before you started tracking. */
+    private Boolean openingBalance;
+
+    /** Optional — null = cash. See DonationRequest.cardId for rationale. Ignored when
+        {@link #openingBalance} is true (no transaction is created). */
     private Long cardId;
 
     /** Optional override for the mirrored transaction's category; null = auto-pick by sub-type. */

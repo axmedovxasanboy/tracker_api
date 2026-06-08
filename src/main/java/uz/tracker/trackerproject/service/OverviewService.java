@@ -731,6 +731,9 @@ public class OverviewService {
         BigDecimal investments = BigDecimal.ZERO;
         BigDecimal savings = BigDecimal.ZERO;
         for (Investment i : investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)) {
+            // Opening balances are already-owned holdings, not a contribution made this month —
+            // exclude them from every allocation bucket (they still count toward net worth).
+            if (Boolean.TRUE.equals(i.getOpeningBalance())) continue;
             BigDecimal amt = fx.convert(i.getInvestedAmount(), i.getCurrency(), displayCurrency);
             if (Boolean.TRUE.equals(i.getEmergencyFund())) emergency = emergency.add(amt);
             else if (Boolean.TRUE.equals(i.getSavingsGoal())) savings = savings.add(amt);
@@ -786,8 +789,10 @@ public class OverviewService {
                                 .description(t.getDescription())
                                 .build()));
                 // Investments flagged as the emergency fund also count toward Emergency.
+                // Opening balances (already-owned holdings) are excluded — see computePaidThisMonth.
                 investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)
-                        .stream().filter(i -> Boolean.TRUE.equals(i.getEmergencyFund()))
+                        .stream().filter(i -> Boolean.TRUE.equals(i.getEmergencyFund())
+                                && !Boolean.TRUE.equals(i.getOpeningBalance()))
                         .forEach(i -> rows.add(uz.tracker.trackerproject.dto.response.BucketPayment.builder()
                                 .id(i.getId())
                                 .bucket("EMERGENCY")
@@ -801,7 +806,8 @@ public class OverviewService {
             }
             case "INVESTMENTS" -> investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)
                     .stream().filter(i -> !Boolean.TRUE.equals(i.getEmergencyFund())
-                            && !Boolean.TRUE.equals(i.getSavingsGoal()))
+                            && !Boolean.TRUE.equals(i.getSavingsGoal())
+                            && !Boolean.TRUE.equals(i.getOpeningBalance()))
                     .forEach(i -> rows.add(uz.tracker.trackerproject.dto.response.BucketPayment.builder()
                             .id(i.getId())
                             .bucket("INVESTMENTS")
@@ -814,7 +820,8 @@ public class OverviewService {
                             .build()));
             case "SAVINGS" -> investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)
                     .stream().filter(i -> Boolean.TRUE.equals(i.getSavingsGoal())
-                            && !Boolean.TRUE.equals(i.getEmergencyFund()))
+                            && !Boolean.TRUE.equals(i.getEmergencyFund())
+                            && !Boolean.TRUE.equals(i.getOpeningBalance()))
                     .forEach(i -> rows.add(uz.tracker.trackerproject.dto.response.BucketPayment.builder()
                             .id(i.getId())
                             .bucket("SAVINGS")

@@ -64,6 +64,14 @@ public class Investment {
     @Column(name = "current_value", precision = 19, scale = 4)
     private BigDecimal currentValue;
 
+    /** When true, this is an OPENING BALANCE — an investment the user already owned before
+        tracking started. It is recorded for net-worth / portfolio purposes only: NO mirror
+        EXPENSE transaction is created (no wallet is debited, nothing shows as spent now) and it
+        is EXCLUDED from the monthly allocation buckets (it was not a contribution made this
+        month). Null/false = a normal investment that debits a wallet and feeds its bucket. */
+    @Column(name = "opening_balance")
+    private Boolean openingBalance;
+
     @Column(name = "originating_transaction_id")
     private Long originatingTransactionId;
 

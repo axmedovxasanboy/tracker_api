@@ -474,6 +474,12 @@ public class FinanceService {
 
     @Transactional
     public InvestmentResponse createInvestment(InvestmentRequest req) {
+        // Opening balance: an investment the user already owned before tracking. Record it for
+        // net-worth / portfolio purposes only — DON'T mirror a transaction (no wallet is debited,
+        // nothing shows as spent now) and it won't count toward this month's Investments bucket.
+        if (Boolean.TRUE.equals(req.getOpeningBalance())) {
+            return InvestmentResponse.from(saveInvestment(new Investment(), req, null));
+        }
         // Direct creation. Mirror to an EXPENSE Transaction with sub-type INVESTMENT
         // so the investment also shows in the transactions list and in the bucket
         // payment history. Stock-type investments contribute to the Stocks bucket.
@@ -550,6 +556,7 @@ public class FinanceService {
         i.setTargetAmount(req.getTargetAmount());
         // currentValue is optional: null = "tracks investedAmount" (the response mapper falls back).
         i.setCurrentValue(req.getCurrentValue());
+        i.setOpeningBalance(Boolean.TRUE.equals(req.getOpeningBalance()));
     }
 
     /**

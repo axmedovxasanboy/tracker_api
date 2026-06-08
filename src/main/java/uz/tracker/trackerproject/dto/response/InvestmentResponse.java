@@ -29,6 +29,9 @@ public class InvestmentResponse {
     private BigDecimal currentValue;
     /** currentValue / targetAmount as a percentage; null when there is no target. */
     private BigDecimal progressPercent;
+    /** True when recorded as an opening balance (already-owned holding; no transaction, excluded
+        from the monthly allocation buckets). */
+    private boolean openingBalance;
     private LocalDateTime createdAt;
 
     public static InvestmentResponse from(Investment i) {
@@ -52,6 +55,7 @@ public class InvestmentResponse {
                 .targetAmount(i.getTargetAmount())
                 .currentValue(value)
                 .progressPercent(progress)
+                .openingBalance(Boolean.TRUE.equals(i.getOpeningBalance()))
                 .createdAt(i.getCreatedAt())
                 .build();
     }
