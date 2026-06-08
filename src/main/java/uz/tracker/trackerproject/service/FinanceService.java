@@ -480,14 +480,16 @@ public class FinanceService {
         if (Boolean.TRUE.equals(req.getOpeningBalance())) {
             return InvestmentResponse.from(saveInvestment(new Investment(), req, null));
         }
-        // Direct creation. Mirror to an EXPENSE Transaction with sub-type INVESTMENT
-        // so the investment also shows in the transactions list and in the bucket
-        // payment history. Stock-type investments contribute to the Stocks bucket.
+        // Direct creation. Mirror to an EXPENSE Transaction so the investment also shows in the
+        // transactions list and in the bucket payment history. Emergency-fund investments book an
+        // EMERGENCY_CONTRIBUTION (counts toward the Emergency bucket); the rest book INVESTMENT.
         String description = (req.getDescription() != null && !req.getDescription().isBlank())
                 ? req.getDescription()
                 : "Investment — " + req.getName();
+        TransactionSubType sub = Boolean.TRUE.equals(req.getEmergencyFund())
+                ? TransactionSubType.EMERGENCY_CONTRIBUTION : TransactionSubType.INVESTMENT;
         Transaction tx = createBucketTransaction(
-                TransactionSubType.INVESTMENT,
+                sub,
                 req.getInvestedAmount(), req.getCurrency(),
                 req.getPurchaseDate(), req.getCardId(), req.getCategoryId(),
                 description);
@@ -574,16 +576,25 @@ public class FinanceService {
             throw new IllegalArgumentException(
                     "Contribution currency (" + req.getCurrency() + ") does not match investment currency (" + i.getCurrency() + ")");
         }
-        String description = (req.getDescription() != null && !req.getDescription().isBlank())
-                ? req.getDescription()
-                : "Contribution — " + i.getName();
-        Transaction tx = createBucketTransaction(
-                TransactionSubType.INVESTMENT,
-                req.getAmount(), req.getCurrency(),
-                req.getDate(), req.getCardId(), req.getCategoryId(),
-                description);
-        tx.setInvestmentId(i.getId());
-        transactionRepository.save(tx);
+        // noWallet: the money came from outside the tracked wallets (e.g. it's already sitting in
+        // the investment account). Bump the invested total but DON'T create a transaction or debit
+        // a wallet. With a wallet, mirror a real EXPENSE so it shows in the transactions list.
+        if (!Boolean.TRUE.equals(req.getNoWallet())) {
+            String description = (req.getDescription() != null && !req.getDescription().isBlank())
+                    ? req.getDescription()
+                    : "Contribution — " + i.getName();
+            // Emergency-fund investments book an EMERGENCY_CONTRIBUTION so the top-up counts toward
+            // the Emergency allocation bucket (by transaction date); everything else books INVESTMENT.
+            TransactionSubType sub = Boolean.TRUE.equals(i.getEmergencyFund())
+                    ? TransactionSubType.EMERGENCY_CONTRIBUTION : TransactionSubType.INVESTMENT;
+            Transaction tx = createBucketTransaction(
+                    sub,
+                    req.getAmount(), req.getCurrency(),
+                    req.getDate(), req.getCardId(), req.getCategoryId(),
+                    description);
+            tx.setInvestmentId(i.getId());
+            transactionRepository.save(tx);
+        }
 
         i.setInvestedAmount(i.getInvestedAmount().add(req.getAmount()));
         // Only adjust currentValue when it is being tracked explicitly; a null currentValue

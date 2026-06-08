@@ -724,19 +724,19 @@ public class OverviewService {
             if (sum != null && sum.signum() > 0) emergency = emergency.add(fx.convert(sum, c, displayCurrency));
         }
 
-        // Investments split by flags: emergency-fund-flagged ones feed the Emergency bucket;
-        // savings-goal ones feed the separate (optional) Savings area; the rest feed the
-        // mandatory Investments bucket. (The old STOCKS investment type is gone.) emergencyFund
-        // is checked first — a savings goal is never the emergency fund.
+        // Investments split by flags: savings-goal ones feed the separate (optional) Savings area;
+        // the rest feed the mandatory Investments bucket. Emergency-fund investments are NOT counted
+        // here — their funding (initial + every top-up) books an EMERGENCY_CONTRIBUTION transaction,
+        // already summed into `emergency` above, so counting the entity too would double-count.
         BigDecimal investments = BigDecimal.ZERO;
         BigDecimal savings = BigDecimal.ZERO;
         for (Investment i : investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)) {
             // Opening balances are already-owned holdings, not a contribution made this month —
             // exclude them from every allocation bucket (they still count toward net worth).
             if (Boolean.TRUE.equals(i.getOpeningBalance())) continue;
+            if (Boolean.TRUE.equals(i.getEmergencyFund())) continue; // counted via EMERGENCY_CONTRIBUTION txs
             BigDecimal amt = fx.convert(i.getInvestedAmount(), i.getCurrency(), displayCurrency);
-            if (Boolean.TRUE.equals(i.getEmergencyFund())) emergency = emergency.add(amt);
-            else if (Boolean.TRUE.equals(i.getSavingsGoal())) savings = savings.add(amt);
+            if (Boolean.TRUE.equals(i.getSavingsGoal())) savings = savings.add(amt);
             else investments = investments.add(amt);
         }
 
@@ -788,21 +788,8 @@ public class OverviewService {
                                 .label("Emergency fund")
                                 .description(t.getDescription())
                                 .build()));
-                // Investments flagged as the emergency fund also count toward Emergency.
-                // Opening balances (already-owned holdings) are excluded — see computePaidThisMonth.
-                investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)
-                        .stream().filter(i -> Boolean.TRUE.equals(i.getEmergencyFund())
-                                && !Boolean.TRUE.equals(i.getOpeningBalance()))
-                        .forEach(i -> rows.add(uz.tracker.trackerproject.dto.response.BucketPayment.builder()
-                                .id(i.getId())
-                                .bucket("EMERGENCY")
-                                .date(i.getPurchaseDate())
-                                .amount(fx.convert(i.getInvestedAmount(), i.getCurrency(), displayCurrency))
-                                .nativeAmount(i.getInvestedAmount())
-                                .nativeCurrency(i.getCurrency())
-                                .label(i.getName() + " (investment)")
-                                .description(i.getDescription())
-                                .build()));
+                // Emergency-fund investment funding (initial + top-ups) books EMERGENCY_CONTRIBUTION
+                // transactions, already listed above — no separate by-entity listing needed.
             }
             case "INVESTMENTS" -> investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)
                     .stream().filter(i -> !Boolean.TRUE.equals(i.getEmergencyFund())

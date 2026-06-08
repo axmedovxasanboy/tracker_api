@@ -23,8 +23,13 @@ public class InvestmentContributeRequest {
     @NotNull
     private LocalDate date;
 
-    /** Optional — null = cash. */
+    /** Optional — null = cash. Ignored when {@link #noWallet} is true. */
     private Long cardId;
+
+    /** When true, record the contribution WITHOUT moving money: no transaction is created and no
+        wallet is debited; only the invested total is bumped. Use when the funds came from outside
+        your tracked wallets (e.g. money already sitting in the investment account). */
+    private Boolean noWallet;
 
     /** Optional override for the mirrored transaction's category; null = auto-pick by sub-type. */
     private Long categoryId;
