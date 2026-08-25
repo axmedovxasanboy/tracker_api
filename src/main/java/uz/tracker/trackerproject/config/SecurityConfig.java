@@ -30,28 +30,19 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
-                .csrf(csrf -> csrf.disable())
-                .cors(Customizer.withDefaults())
-                .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                .authorizeHttpRequests(auth -> auth
-                        // Public auth endpoints (everything else under /auth, e.g. /me, needs a token).
-                        .requestMatchers(
-                                "/api/v1/auth/status",
-                                "/api/v1/auth/signup",
-                                "/api/v1/auth/login",
-                                "/api/v1/auth/refresh").permitAll()
-                        // Non-secret Telegram bot config: the bot reads this before it has a session.
-                        .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/settings/telegram").permitAll()
-                        .requestMatchers("/actuator/health").permitAll()
-                        .anyRequest().permitAll())
-                .exceptionHandling(e -> e.authenticationEntryPoint((req, res, ex) -> {
-                    res.setStatus(HttpStatus.UNAUTHORIZED.value());
-                    res.setContentType("application/json");
-                    res.getWriter().write("{\"status\":401,\"message\":\"Authentication required\"}");
-                }))
-                .httpBasic(b -> b.disable())
-                .formLogin(f -> f.disable())
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+            .csrf(csrf -> csrf.disable())
+            .cors(Customizer.withDefaults())
+            .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth
+                    // Allow absolutely every request without authentication
+                    .anyRequest().permitAll()
+            )
+            .httpBasic(b -> b.disable())
+            .formLogin(f -> f.disable());
+            
+            // REMOVED: .exceptionHandling(...)
+            // REMOVED: .addFilterBefore(jwtAuthFilter, ...)
+    
         return http.build();
     }
 
