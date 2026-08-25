@@ -43,7 +43,7 @@ public class SecurityConfig {
                         // Non-secret Telegram bot config: the bot reads this before it has a session.
                         .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/settings/telegram").permitAll()
                         .requestMatchers("/actuator/health").permitAll()
-                        .anyRequest().authenticated())
+                        .anyRequest().permitAll())
                 .exceptionHandling(e -> e.authenticationEntryPoint((req, res, ex) -> {
                     res.setStatus(HttpStatus.UNAUTHORIZED.value());
                     res.setContentType("application/json");
