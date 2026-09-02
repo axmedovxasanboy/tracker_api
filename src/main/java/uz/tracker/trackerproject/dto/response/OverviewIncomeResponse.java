@@ -27,6 +27,4 @@ public class OverviewIncomeResponse {
      */
     private BigDecimal stableIncome;
 
-    /** True when the user has not configured FX rates and defaults are in effect. */
-    private boolean fxRatesUsingDefaults;
 }

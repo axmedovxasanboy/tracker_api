@@ -37,6 +37,7 @@ public class FinanceService {
     private final MarkPaidRepository markPaidRepository;
     private final CardService cardService;
     private final MonthCloseService monthCloseService;
+    private final SettingsService settingsService;
 
     /** Targets that support the "already paid" (no-transaction) mark. */
     private static final Set<String> MARK_KINDS =
@@ -305,6 +306,7 @@ public class FinanceService {
 
     @Transactional
     public MonthlyPaymentResponse payMonthlyPayment(Long id, MonthlyPaymentPayRequest req) {
+        settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(req.getPaymentDate());
         MonthlyPayment m = monthlyPaymentRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("MonthlyPayment", id));
@@ -493,7 +495,13 @@ public class FinanceService {
                 req.getInvestedAmount(), req.getCurrency(),
                 req.getPurchaseDate(), req.getCardId(), req.getCategoryId(),
                 description);
-        return InvestmentResponse.from(saveInvestment(new Investment(), req, tx.getId()));
+        Investment saved = saveInvestment(new Investment(), req, tx.getId());
+        // Link the mirror tx back to the investment so the initial funding shows up in the
+        // contributions history and never outlives the record: deleting either side now
+        // removes the other (see deleteInvestment / TransactionService.reverseAutoCreated).
+        tx.setInvestmentId(saved.getId());
+        transactionRepository.save(tx);
+        return InvestmentResponse.from(saved);
     }
 
     public Investment createInvestmentFromTransaction(InvestmentRequest req, Long transactionId) {
@@ -517,10 +525,26 @@ public class FinanceService {
     public void deleteInvestment(Long id) {
         Investment i = investmentRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Investment", id));
-        long refs = transactionRepository.countByInvestmentId(id);
+        // The investment's OWN mirror transaction goes with it — the mirror image of
+        // TransactionService's "delete the tx → delete the investment" direction — so it must
+        // not count as an external reference, or nothing created from a bucket/Investments
+        // form could ever be deleted. Contributions and other linked rows still block: those
+        // are separate money movements the user has to remove deliberately.
+        Long originatingTxId = i.getOriginatingTransactionId();
+        long refs = transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(id).stream()
+                .filter(t -> !java.util.Objects.equals(t.getId(), originatingTxId))
+                .count();
         if (refs > 0) {
             throw new IllegalArgumentException(
                     "Cannot delete: " + refs + " transaction(s) are linked to this investment.");
+        }
+        // Removing the mirror row also refunds the wallet (balances are summed from
+        // transactions). Legacy rows whose mirror was never linked are cleaned up here too.
+        if (originatingTxId != null) {
+            transactionRepository.findById(originatingTxId).ifPresent(tx -> {
+                monthCloseService.assertMonthOpen(tx.getTransactionDate());
+                transactionRepository.delete(tx);
+            });
         }
         investmentRepository.delete(i);
     }
@@ -570,6 +594,11 @@ public class FinanceService {
      */
     @Transactional
     public InvestmentResponse contributeToInvestment(Long id, InvestmentContributeRequest req) {
+        // Guard the noWallet path too: a record-only contribution still lands on this date's
+        // month figures, so a closed month must reject it just like a wallet-backed one
+        // (the wallet path re-asserts inside createBucketTransaction; that's harmless).
+        settingsService.assertStableIncomeSet();
+        monthCloseService.assertMonthOpen(req.getDate());
         Investment i = investmentRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Investment", id));
         if (req.getCurrency() != i.getCurrency()) {
@@ -625,6 +654,7 @@ public class FinanceService {
 
     @Transactional
     public LoanTakenResponse repayLoanTaken(Long id, RepaymentRequest req) {
+        settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(req.getPaymentDate());
         LoanTaken loan = loanTakenRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("LoanTaken", id));
@@ -651,6 +681,7 @@ public class FinanceService {
 
     @Transactional
     public DebtResponse repayDebt(Long id, RepaymentRequest req) {
+        settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(req.getPaymentDate());
         Debt debt = debtRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Debt", id));
@@ -677,6 +708,7 @@ public class FinanceService {
 
     @Transactional
     public LoanGivenResponse markLoanGivenReturned(Long id, RepaymentRequest req) {
+        settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(req.getPaymentDate());
         LoanGiven loan = loanGivenRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("LoanGiven", id));
@@ -717,6 +749,7 @@ public class FinanceService {
         }
         YearMonth ym = parseMarkMonth(req.getMonth());
         LocalDate monthFirst = ym.atDay(1);
+        settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(monthFirst);
 
         BigDecimal amount = req.getAmount();
@@ -861,6 +894,7 @@ public class FinanceService {
     private Transaction createBucketTransaction(
             TransactionSubType subType, BigDecimal amount, uz.tracker.trackerproject.enums.Currency currency,
             java.time.LocalDate date, Long cardId, Long categoryId, String description) {
+        settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(date);
         Transaction tx = new Transaction();
         tx.setType(TransactionType.EXPENSE);

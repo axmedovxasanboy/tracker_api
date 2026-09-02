@@ -29,6 +29,8 @@ public class EmergencyService {
     private final CardRepository cardRepository;
     private final CategoryRepository categoryRepository;
     private final CardService cardService;
+    private final SettingsService settingsService;
+    private final MonthCloseService monthCloseService;
 
     @Transactional(readOnly = true)
     public List<EmergencyResponse> getAll() {
@@ -37,6 +39,8 @@ public class EmergencyService {
 
     @Transactional
     public EmergencyResponse create(EmergencyRequest req) {
+        settingsService.assertStableIncomeSet();
+        monthCloseService.assertMonthOpen(req.getDate());
         // Mirror to an EXPENSE Transaction so the contribution shows up in the
         // Transactions list AND in the per-bucket payment history alongside any
         // emergency contributions created from the other side.

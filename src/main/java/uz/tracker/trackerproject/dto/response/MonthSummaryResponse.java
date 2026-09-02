@@ -36,5 +36,4 @@ public class MonthSummaryResponse {
     /** Null until the month is closed. The real balance entered at close (next month's start). */
     private BigDecimal leftover;
 
-    private boolean fxRatesUsingDefaults;
 }

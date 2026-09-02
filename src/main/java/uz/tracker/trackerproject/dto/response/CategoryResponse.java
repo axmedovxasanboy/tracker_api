@@ -14,6 +14,7 @@ public class CategoryResponse {
 
     private Long id;
     private String name;
+    private String nameUz;
     private CategoryType type;
     private String color;
     private String icon;
@@ -30,6 +31,7 @@ public class CategoryResponse {
         return CategoryResponse.builder()
                 .id(c.getId())
                 .name(c.getName())
+                .nameUz(c.getNameUz())
                 .type(c.getType())
                 .color(c.getColor())
                 .icon(c.getIcon())
@@ -50,6 +52,7 @@ public class CategoryResponse {
         return CategoryResponse.builder()
                 .id(c.getId())
                 .name(c.getName())
+                .nameUz(c.getNameUz())
                 .type(c.getType())
                 .color(c.getColor())
                 .icon(c.getIcon())

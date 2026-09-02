@@ -1,5 +1,6 @@
 package uz.tracker.trackerproject.controller;
 
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -9,6 +10,8 @@ import uz.tracker.trackerproject.dto.response.AllocationRulesViewResponse;
 import uz.tracker.trackerproject.dto.response.BucketPayment;
 import uz.tracker.trackerproject.dto.response.OverviewIncomeResponse;
 import uz.tracker.trackerproject.dto.response.OverviewTierResponse;
+import uz.tracker.trackerproject.dto.request.AllocationPreviewRequest;
+import uz.tracker.trackerproject.dto.response.AllocationPreviewResponse;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.service.OverviewService;
 
@@ -72,4 +75,17 @@ public class OverviewController {
             throw new IllegalArgumentException("month must be in YYYY-MM format (got: " + month + ")");
         }
     }
+
+    /**
+     * What would a draft transaction do to the allocation? Read-only; nothing is persisted.
+     * The sub-type to bucket routing lives in OverviewService so it can't drift from the
+     * accounting that actually credits the bucket.
+     */
+    @PostMapping("/allocation-preview")
+    public ResponseEntity<AllocationPreviewResponse> previewAllocation(
+            @Valid @RequestBody AllocationPreviewRequest request,
+            @RequestParam(defaultValue = "UZS") Currency currency) {
+        return ResponseEntity.ok(service.previewAllocation(request, currency));
+    }
+
 }

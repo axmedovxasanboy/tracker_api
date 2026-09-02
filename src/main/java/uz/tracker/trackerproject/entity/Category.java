@@ -23,6 +23,15 @@ public class Category {
     @Column(nullable = false)
     private String name;
 
+    /**
+     * Uzbek display name. Nullable: when unset the English {@link #name} is shown instead.
+     * NOTE: {@code name} stays the canonical English identifier — all internal matching
+     * (DataSeeder's Donation/Anonymous lookups, the frontend's Donation check) keys off it,
+     * so it must never be replaced with a translation.
+     */
+    @Column(name = "name_uz")
+    private String nameUz;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private CategoryType type;

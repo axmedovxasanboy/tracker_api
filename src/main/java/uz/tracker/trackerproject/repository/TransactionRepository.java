@@ -27,9 +27,7 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
             WHERE t.type = :type AND t.currency = :currency
               AND (t.subType IS NULL OR t.subType NOT IN (
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_IN,
-                    uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT,
-                    uz.tracker.trackerproject.enums.TransactionSubType.EXCHANGE_IN,
-                    uz.tracker.trackerproject.enums.TransactionSubType.EXCHANGE_OUT))
+                    uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT))
             """)
     BigDecimal sumByTypeAndCurrency(@Param("type") TransactionType type,
                                     @Param("currency") Currency currency);
@@ -39,9 +37,7 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
             WHERE t.currency = :currency
               AND (t.subType IS NULL OR t.subType NOT IN (
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_IN,
-                    uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT,
-                    uz.tracker.trackerproject.enums.TransactionSubType.EXCHANGE_IN,
-                    uz.tracker.trackerproject.enums.TransactionSubType.EXCHANGE_OUT))
+                    uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT))
             """)
     long countByCurrency(@Param("currency") Currency currency);
 
@@ -57,8 +53,6 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
               AND (t.subType IS NULL OR t.subType NOT IN (
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_IN,
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT,
-                    uz.tracker.trackerproject.enums.TransactionSubType.EXCHANGE_IN,
-                    uz.tracker.trackerproject.enums.TransactionSubType.EXCHANGE_OUT,
                     uz.tracker.trackerproject.enums.TransactionSubType.EVERYDAY_SPENDING))
             """)
     BigDecimal sumByTypeCurrencyDateRange(

@@ -7,7 +7,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import uz.tracker.trackerproject.dto.request.BalanceTransferRequest;
-import uz.tracker.trackerproject.dto.request.ExchangeRequest;
 import uz.tracker.trackerproject.dto.request.TransactionRequest;
 import uz.tracker.trackerproject.dto.response.PageResponse;
 import uz.tracker.trackerproject.dto.response.TransactionResponse;
@@ -75,11 +74,6 @@ public class TransactionController {
     @PostMapping("/transfer")
     public ResponseEntity<List<TransactionResponse>> transfer(@Valid @RequestBody BalanceTransferRequest request) {
         return ResponseEntity.status(HttpStatus.CREATED).body(transactionService.transferBalance(request));
-    }
-
-    @PostMapping("/exchange")
-    public ResponseEntity<List<TransactionResponse>> exchange(@Valid @RequestBody ExchangeRequest request) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(transactionService.exchange(request));
     }
 
     @GetMapping("/suggestions")

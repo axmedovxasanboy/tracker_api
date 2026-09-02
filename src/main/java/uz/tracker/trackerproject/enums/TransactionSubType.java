@@ -21,10 +21,5 @@ public enum TransactionSubType {
 
     // Internal card transfers
     TRANSFER_OUT,        // Money leaving a card (paired with TRANSFER_IN on destination)
-    TRANSFER_IN,         // Money arriving on a card (paired with TRANSFER_OUT on source)
-
-    // Currency / wallet exchanges. Like TRANSFER_* but allowed across currencies (and across
-    // cash ↔ card), with potentially different from/to amounts because of the FX rate.
-    EXCHANGE_OUT,        // Source side of an exchange (cash or card)
-    EXCHANGE_IN          // Destination side of an exchange (cash or card)
+    TRANSFER_IN          // Money arriving on a card (paired with TRANSFER_OUT on source)
 }

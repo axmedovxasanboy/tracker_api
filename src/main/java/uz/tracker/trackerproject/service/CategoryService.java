@@ -89,6 +89,9 @@ public class CategoryService {
 
     private void applyRequest(Category c, CategoryRequest req) {
         c.setName(req.getName());
+        // Blank clears the translation; display then falls back to the English name.
+        c.setNameUz(req.getNameUz() == null || req.getNameUz().isBlank()
+                ? null : req.getNameUz().trim());
         c.setType(req.getType());
         c.setColor(req.getColor() != null ? req.getColor() : "#6366f1");
         if (req.getIcon() != null) c.setIcon(req.getIcon());

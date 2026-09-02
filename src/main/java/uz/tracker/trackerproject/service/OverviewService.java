@@ -16,6 +16,7 @@ import uz.tracker.trackerproject.entity.BankLoan;
 import uz.tracker.trackerproject.entity.Debt;
 import uz.tracker.trackerproject.entity.Donation;
 import uz.tracker.trackerproject.entity.Investment;
+import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.entity.LevelAllocationRule;
 import uz.tracker.trackerproject.entity.LevelConfig;
 import uz.tracker.trackerproject.entity.LoanTaken;
@@ -84,40 +85,33 @@ public class OverviewService {
     private final LevelConfigRepository levelConfigRepository;
     private final MarkPaidRepository markPaidRepository;
     private final SettingsService settingsService;
-    private final FxConverter fx;
 
     @Transactional(readOnly = true)
     public OverviewIncomeResponse getIncome(YearMonth month, Currency displayCurrency) {
         LocalDate start = month.atDay(1);
         LocalDate end = month.atEndOfMonth();
 
-        // Sum INCOME transactions per currency in this month, FX-convert each to the
-        // display currency, then total. Iterating the enum keeps this future-proof if
-        // we add more currencies later.
+        // Sum this month's INCOME transactions. Iterating the enum keeps this working
+        // unchanged if more currencies are ever reintroduced.
         BigDecimal actual = BigDecimal.ZERO;
         for (Currency c : Currency.values()) {
             BigDecimal sum = transactionRepository.sumByTypeCurrencyDateRange(
                     TransactionType.INCOME, c, start, end);
             if (sum == null || sum.signum() == 0) continue;
-            actual = actual.add(fx.convert(sum, c, displayCurrency));
+            actual = actual.add(sum);
         }
 
         Settings s = settingsService.getOrCreate();
         BigDecimal stable = null;
-        if (s.getMonthlyStableIncome() != null && s.getMonthlyStableIncomeCurrency() != null) {
-            stable = fx.convert(s.getMonthlyStableIncome(), s.getMonthlyStableIncomeCurrency(), displayCurrency);
+        if (s.getMonthlyStableIncome() != null) {
+            stable = s.getMonthlyStableIncome();
         }
-
-        boolean usingDefaults =
-                (s.getUsdToUzs() == null || s.getUsdToUzs().signum() <= 0)
-                || (s.getEurToUzs() == null || s.getEurToUzs().signum() <= 0);
 
         return OverviewIncomeResponse.builder()
                 .month(month.toString())
                 .currency(displayCurrency)
                 .actualIncome(actual)
                 .stableIncome(stable)
-                .fxRatesUsingDefaults(usingDefaults)
                 .build();
     }
 
@@ -134,11 +128,10 @@ public class OverviewService {
     public OverviewTierResponse getTier(YearMonth month, Currency displayCurrency) {
         Settings s = settingsService.getOrCreate();
         boolean missingIncome = s.getMonthlyStableIncome() == null
-                || s.getMonthlyStableIncomeCurrency() == null
                 || s.getMonthlyStableIncome().signum() <= 0;
 
         BigDecimal incomeUzs = missingIncome ? BigDecimal.ZERO
-                : fx.toUzs(s.getMonthlyStableIncome(), s.getMonthlyStableIncomeCurrency());
+                : s.getMonthlyStableIncome();
 
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
         BigDecimal leftMoneyUzs = incomeUzs.subtract(mandatoryUzs);
@@ -209,27 +202,22 @@ public class OverviewService {
                     displayCurrency, paid, monthPaid);
         }
 
-        boolean usingDefaults =
-                (s.getUsdToUzs() == null || s.getUsdToUzs().signum() <= 0)
-                || (s.getEurToUzs() == null || s.getEurToUzs().signum() <= 0);
-
         return OverviewTierResponse.builder()
                 .currency(displayCurrency)
-                .income(fx.fromUzs(incomeUzs, displayCurrency))
-                .mandatorySubscriptions(fx.fromUzs(mandatoryUzs, displayCurrency))
-                .leftMoney(fx.fromUzs(leftMoneyUzs, displayCurrency))
-                .allocationBase(fx.fromUzs(allocBaseUzs, displayCurrency))
-                .debtPayments(fx.fromUzs(debtPaymentsUzs, displayCurrency))
+                .income(incomeUzs)
+                .mandatorySubscriptions(mandatoryUzs)
+                .leftMoney(leftMoneyUzs)
+                .allocationBase(allocBaseUzs)
+                .debtPayments(debtPaymentsUzs)
                 .debtBreakdown(OverviewTierResponse.DebtBreakdown.builder()
-                        .bankLoans(fx.fromUzs(bankUzs, displayCurrency))
-                        .loansTaken(fx.fromUzs(loanTaken34Uzs, displayCurrency))
-                        .debts(fx.fromUzs(debtRows34Uzs, displayCurrency))
+                        .bankLoans(bankUzs)
+                        .loansTaken(loanTaken34Uzs)
+                        .debts(debtRows34Uzs)
                         .build())
                 .debtRatio(debtRatio)
                 .level(level)
                 .subLevel(subLevel)
                 .levelLabel(levelLabel)
-                .fxRatesUsingDefaults(usingDefaults)
                 .missingStableIncome(missingIncome)
                 .beforeTrackingStart(beforeTrackingStart)
                 .trackingStartMonth(trackingStart == null ? null : trackingStart.toString())
@@ -255,7 +243,7 @@ public class OverviewService {
             if (paidThisMonth == null) paidThisMonth = BigDecimal.ZERO;
             // Include "already paid" marks for this subscription this month (no transaction recorded).
             for (MarkPaid mk : markPaidRepository.findByKindAndRefIdAndMonth("SUBSCRIPTION", m.getId(), start)) {
-                paidThisMonth = paidThisMonth.add(fx.convert(mk.getAmount(), mk.getCurrency(), m.getCurrency()));
+                paidThisMonth = paidThisMonth.add(mk.getAmount());
             }
             if (paidThisMonth.compareTo(m.getAmount()) >= 0) continue; // fully covered this month
             pending.add(OverviewTierResponse.PendingSubscription.builder()
@@ -287,7 +275,6 @@ public class OverviewService {
     public AllocationLedgerResponse getAllocationLedger(YearMonth selected, Currency display) {
         Settings s = settingsService.getOrCreate();
         boolean missingIncome = s.getMonthlyStableIncome() == null
-                || s.getMonthlyStableIncomeCurrency() == null
                 || s.getMonthlyStableIncome().signum() <= 0;
 
         // Dormant before the configured start month: the ledger shows no dues at all, so a
@@ -322,7 +309,7 @@ public class OverviewService {
                     .build();
         }
 
-        BigDecimal stableUzs = fx.toUzs(s.getMonthlyStableIncome(), s.getMonthlyStableIncomeCurrency());
+        BigDecimal stableUzs = s.getMonthlyStableIncome();
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
         Integer level = computeLevel(stableUzs.subtract(mandatoryUzs));
         LocalDate today = LocalDate.now();
@@ -393,9 +380,9 @@ public class OverviewService {
                     lines.add(MonthBucketLine.builder()
                             .bucket(LEDGER_BUCKETS[b])
                             .percent(pct[b] == null ? null : new BigDecimal(pct[b]))
-                            .recommended(fx.fromUzs(recUzs, display))
-                            .paid(fx.fromUzs(paidB, display))
-                            .net(fx.fromUzs(net, display))
+                            .recommended(recUzs)
+                            .paid(paidB)
+                            .net(net)
                             .build());
                 }
             }
@@ -414,9 +401,9 @@ public class OverviewService {
                         .month(m.toString())
                         .level(level)
                         .subLevel(subLevel)
-                        .stableIncome(fx.fromUzs(stableUzs, display))
-                        .bonus(fx.fromUzs(bonusUzs, display))
-                        .allocationBase(fx.fromUzs(allocBaseUzs, display))
+                        .stableIncome(stableUzs)
+                        .bonus(bonusUzs)
+                        .allocationBase(allocBaseUzs)
                         .selected(isSelected)
                         .lines(lines)
                         .build());
@@ -443,10 +430,10 @@ public class OverviewService {
                     .bucket(LEDGER_BUCKETS[b])
                     .label(LEDGER_LABELS[b])
                     .percent(pctSelected[b] == null ? null : new BigDecimal(pctSelected[b]))
-                    .recommended(fx.fromUzs(recSelected[b], display))
-                    .paid(fx.fromUzs(paidSelected[b], display))
-                    .carried(fx.fromUzs(carried, display))
-                    .outstanding(fx.fromUzs(outstanding, display))
+                    .recommended(recSelected[b])
+                    .paid(paidSelected[b])
+                    .carried(carried)
+                    .outstanding(outstanding)
                     .effectivePercent(effPct)
                     .overAllocated(over)
                     .build());
@@ -461,14 +448,14 @@ public class OverviewService {
                 .startMonth(start.toString())
                 .selectedMonth(selected.toString())
                 .missingStableIncome(false)
-                .stableIncome(fx.fromUzs(stableUzs, display))
-                .bonusThisMonth(fx.fromUzs(bonusSelectedUzs, display))
-                .allocationBase(fx.fromUzs(allocBaseSelectedUzs, display))
+                .stableIncome(stableUzs)
+                .bonusThisMonth(bonusSelectedUzs)
+                .allocationBase(allocBaseSelectedUzs)
                 .level(level)
                 .subLevel(subLevelSelected)
-                .dueThisMonth(fx.fromUzs(dueThisMonthUzs, display))
-                .carriedFromPrevious(fx.fromUzs(carriedPrevUzs, display))
-                .totalDueNow(fx.fromUzs(totalDueNowUzs, display))
+                .dueThisMonth(dueThisMonthUzs)
+                .carriedFromPrevious(carriedPrevUzs)
+                .totalDueNow(totalDueNowUzs)
                 .carriedStartMonth(earliestDue == null ? null : earliestDue.toString())
                 .carriedEndMonth(latestDue == null ? null : latestDue.toString())
                 .buckets(buckets)
@@ -483,7 +470,7 @@ public class OverviewService {
         for (MonthlyPayment m : monthlyPaymentRepository.findAll()) {
             if (!Boolean.TRUE.equals(m.getActive())) continue;
             if (m.getAmount() == null || m.getCurrency() == null) continue;
-            total = total.add(fx.toUzs(m.getAmount(), m.getCurrency()));
+            total = total.add(m.getAmount());
         }
         return total;
     }
@@ -496,7 +483,7 @@ public class OverviewService {
         for (Currency c : Currency.values()) {
             BigDecimal sum = transactionRepository.sumBonusIncomeByCurrencyDateRange(c, start, end);
             if (sum != null && sum.signum() != 0) {
-                total = total.add(fx.toUzs(sum, c));
+                total = total.add(sum);
             }
         }
         return total;
@@ -508,7 +495,7 @@ public class OverviewService {
             if (b.getMonthlyPayment() == null || b.getMonthlyPayment().signum() <= 0) continue;
             // If the loan has ended, it no longer contributes.
             if (b.getEndDate() != null && b.getEndDate().isBefore(today)) continue;
-            total = total.add(fx.toUzs(b.getMonthlyPayment(), b.getCurrency()));
+            total = total.add(b.getMonthlyPayment());
         }
         return total;
     }
@@ -530,7 +517,7 @@ public class OverviewService {
             BigDecimal charge = debtMonthlyCharge(l.getTotalAmount(), l.getPaidAmount());
             if (charge.signum() <= 0) continue;
             if (!hasStartedBy(l.getPaymentStartDate(), month)) continue;
-            total = total.add(fx.toUzs(charge, l.getCurrency()));
+            total = total.add(charge);
         }
         return total;
     }
@@ -542,7 +529,7 @@ public class OverviewService {
             BigDecimal charge = debtMonthlyCharge(d.getTotalAmount(), d.getPaidAmount());
             if (charge.signum() <= 0) continue;
             if (!hasStartedBy(d.getPaymentStartDate(), month)) continue;
-            total = total.add(fx.toUzs(charge, d.getCurrency()));
+            total = total.add(charge);
         }
         return total;
     }
@@ -624,13 +611,13 @@ public class OverviewService {
             BigDecimal remaining = nullToZero(l.getTotalAmount()).subtract(nullToZero(l.getPaidAmount()));
             if (remaining.signum() <= 0) continue;
             if (!hasStartedBy(l.getPaymentStartDate(), month)) continue;
-            total = total.add(fx.toUzs(remaining, l.getCurrency()));
+            total = total.add(remaining);
         }
         for (Debt d : debtRepository.findAll()) {
             BigDecimal remaining = nullToZero(d.getTotalAmount()).subtract(nullToZero(d.getPaidAmount()));
             if (remaining.signum() <= 0) continue;
             if (!hasStartedBy(d.getPaymentStartDate(), month)) continue;
-            total = total.add(fx.toUzs(remaining, d.getCurrency()));
+            total = total.add(remaining);
         }
         return total;
     }
@@ -659,26 +646,25 @@ public class OverviewService {
             BigDecimal bankSum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.BANK_LOAN_PAYMENT, c, start, end);
             if (bankSum != null && bankSum.signum() > 0) {
-                bank = bank.add(fx.convert(bankSum, c, displayCurrency));
+                bank = bank.add(bankSum);
             }
             BigDecimal repaySum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.LOAN_REPAYMENT, c, start, end);
             if (repaySum != null && repaySum.signum() > 0) {
-                personal = personal.add(fx.convert(repaySum, c, displayCurrency));
+                personal = personal.add(repaySum);
             }
         }
         // "Already paid" marks (no transaction) for bank installments and personal loans / debts.
         for (MarkPaid m : markPaidRepository.findByMonth(start)) {
             switch (m.getKind() == null ? "" : m.getKind()) {
-                case "BANK" -> bank = bank.add(fx.convert(m.getAmount(), m.getCurrency(), displayCurrency));
+                case "BANK" -> bank = bank.add(m.getAmount());
                 case "PERSONAL_LOAN", "DEBT" ->
-                        personal = personal.add(fx.convert(m.getAmount(), m.getCurrency(), displayCurrency));
+                        personal = personal.add(m.getAmount());
                 default -> { }
             }
         }
         return new MonthPaid(bank, personal);
     }
-
 
     // ── "Already paid" marks ──────────────────────────────────────────────────
 
@@ -692,7 +678,7 @@ public class OverviewService {
         BigDecimal investments = base.investments(), stocks = base.stocks();
         for (MarkPaid m : markPaidRepository.findByMonth(month.atDay(1))) {
             if (!"BUCKET".equals(m.getKind()) || m.getBucket() == null) continue;
-            BigDecimal amt = fx.convert(m.getAmount(), m.getCurrency(), display);
+            BigDecimal amt = m.getAmount();
             switch (m.getBucket()) {
                 case "DONATION" -> donation = donation.add(amt);
                 case "EMERGENCY" -> emergency = emergency.add(amt);
@@ -704,13 +690,138 @@ public class OverviewService {
         return new BucketPaid(donation, emergency, investments, stocks, base.savings());
     }
 
+    /** One INVESTMENT transaction rendered as a bucket-history row. */
+    private uz.tracker.trackerproject.dto.response.BucketPayment investmentBucketRow(
+            Transaction t, String bucket) {
+        return uz.tracker.trackerproject.dto.response.BucketPayment.builder()
+                .id(t.getId())
+                .bucket(bucket)
+                .date(t.getTransactionDate())
+                .amount(t.getAmount())
+                .nativeAmount(t.getAmount())
+                .nativeCurrency(t.getCurrency())
+                .label(t.getDescription())
+                .description(t.getNote())
+                .build();
+    }
+
+    /**
+     * Does this INVESTMENT transaction fund a savings goal (rather than a plain investment)?
+     * A contribution row carries investmentId; the row that CREATED the holding is instead
+     * referenced by the investment's originatingTransactionId. Unlinked rows (a bare
+     * INVESTMENT transaction whose auto-created record is gone) count as a plain investment.
+     */
+    private boolean isSavingsGoalTx(Transaction t) {
+        Investment target = null;
+        if (t.getInvestmentId() != null) {
+            target = investmentRepository.findById(t.getInvestmentId()).orElse(null);
+        }
+        if (target == null) {
+            target = investmentRepository.findByOriginatingTransactionId(t.getId()).orElse(null);
+        }
+        return target != null && Boolean.TRUE.equals(target.getSavingsGoal());
+    }
+
+    // ── Allocation preview (what would this draft transaction do?) ────────────
+
+    /**
+     * Which bucket, if any, a sub-type funds. This is the SAME routing
+     * {@link #computePaidThisMonth} uses, kept in one place so the preview can never
+     * promise a bucket the accounting wouldn't actually credit.
+     */
+    private String bucketForSubType(uz.tracker.trackerproject.enums.TransactionSubType subType, Long investmentId) {
+        if (subType == null) return null;
+        return switch (subType) {
+            case DONATION -> "DONATION";
+            case EMERGENCY_CONTRIBUTION -> "EMERGENCY";
+            case STOCK_PURCHASE -> "STOCKS";
+            case INVESTMENT -> {
+                Investment target = investmentId == null ? null
+                        : investmentRepository.findById(investmentId).orElse(null);
+                // An emergency-flagged target books EMERGENCY_CONTRIBUTION at write time,
+                // so the preview must say Emergency, not Investments.
+                if (target != null && Boolean.TRUE.equals(target.getEmergencyFund())) yield "EMERGENCY";
+                yield (target != null && Boolean.TRUE.equals(target.getSavingsGoal()))
+                        ? "SAVINGS" : "INVESTMENTS";
+            }
+            default -> null;
+        };
+    }
+
+    @Transactional(readOnly = true)
+    public uz.tracker.trackerproject.dto.response.AllocationPreviewResponse previewAllocation(
+            uz.tracker.trackerproject.dto.request.AllocationPreviewRequest req, Currency display) {
+
+        String bucket = bucketForSubType(req.getSubType(), req.getInvestmentId());
+        if (bucket == null) {
+            return uz.tracker.trackerproject.dto.response.AllocationPreviewResponse.builder()
+                    .applicable(false)
+                    .message("This transaction doesn't fund any allocation bucket.")
+                    .build();
+        }
+
+        YearMonth month = YearMonth.from(req.getTransactionDate());
+        OverviewTierResponse tier = getTier(month, display);
+        BigDecimal amount = req.getAmount() == null ? BigDecimal.ZERO : req.getAmount();
+
+        TierAllocation.AllocationLine line = tier.getAllocation() == null ? null
+                : tier.getAllocation().getLines().stream()
+                        .filter(l -> bucket.equals(l.getBucket()))
+                        .findFirst().orElse(null);
+
+        String label = line != null ? line.getLabel() : bucket;
+
+        // No line, or a 0% bucket at this tier: the money still lands there, it just isn't
+        // being asked of the user this month. Say so rather than showing a target of zero.
+        if (line == null || !line.isRecommended()) {
+            return uz.tracker.trackerproject.dto.response.AllocationPreviewResponse.builder()
+                    .applicable(true)
+                    .bucket(bucket)
+                    .label(label)
+                    .bucketNotRecommended(true)
+                    .amount(amount)
+                    .paidBefore(line == null ? BigDecimal.ZERO : line.getPaidAmount())
+                    .paidAfter((line == null ? BigDecimal.ZERO : line.getPaidAmount()).add(amount))
+                    .message("Counts toward " + label + ", which isn't required at your current tier"
+                            + " — it's recorded, but nothing is expected this month.")
+                    .build();
+        }
+
+        BigDecimal recommended = nullToZero(line.getMinAmount());
+        BigDecimal paidBefore = nullToZero(line.getPaidAmount());
+        BigDecimal paidAfter = paidBefore.add(amount);
+        BigDecimal remainingBefore = clampZero(recommended.subtract(paidBefore));
+        BigDecimal remainingAfter = clampZero(recommended.subtract(paidAfter));
+        boolean completes = remainingBefore.signum() > 0 && remainingAfter.signum() == 0;
+
+        String msg = completes
+                ? "This covers the rest of your " + label + " for " + monthLabel(month) + "."
+                : remainingAfter.signum() == 0
+                    ? label + " was already covered for " + monthLabel(month) + "."
+                    : "Leaves " + remainingAfter + " still to put aside for " + label + ".";
+
+        return uz.tracker.trackerproject.dto.response.AllocationPreviewResponse.builder()
+                .applicable(true)
+                .bucket(bucket)
+                .label(label)
+                .recommended(recommended)
+                .paidBefore(paidBefore)
+                .amount(amount)
+                .paidAfter(paidAfter)
+                .remainingBefore(remainingBefore)
+                .remainingAfter(remainingAfter)
+                .completesBucket(completes)
+                .message(msg)
+                .build();
+    }
+
     BucketPaid computePaidThisMonth(YearMonth month, Currency displayCurrency) {
         LocalDate start = month.atDay(1);
         LocalDate end = month.atEndOfMonth();
 
         BigDecimal donation = BigDecimal.ZERO;
         for (Donation d : donationRepository.findByDonationDateBetweenOrderByDonationDateDesc(start, end)) {
-            donation = donation.add(fx.convert(d.getAmount(), d.getCurrency(), displayCurrency));
+            donation = donation.add(d.getAmount());
         }
 
         // Emergency bucket = EMERGENCY_CONTRIBUTION transactions (the actual money out — covers both
@@ -721,22 +832,24 @@ public class OverviewService {
         for (Currency c : Currency.values()) {
             BigDecimal sum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.EMERGENCY_CONTRIBUTION, c, start, end);
-            if (sum != null && sum.signum() > 0) emergency = emergency.add(fx.convert(sum, c, displayCurrency));
+            if (sum != null && sum.signum() > 0) emergency = emergency.add(sum);
         }
 
-        // Investments split by flags: savings-goal ones feed the separate (optional) Savings area;
-        // the rest feed the mandatory Investments bucket. Emergency-fund investments are NOT counted
-        // here — their funding (initial + every top-up) books an EMERGENCY_CONTRIBUTION transaction,
-        // already summed into `emergency` above, so counting the entity too would double-count.
+        // Investments + Savings are counted from INVESTMENT transactions BY TRANSACTION DATE, the
+        // same way Emergency and Stocks are. Counting the Investment entity by purchaseDate instead
+        // (the old behaviour) credited every later top-up to the month the holding was first bought
+        // — so money spent this month was invisible, a past (possibly closed) month silently grew,
+        // and a top-up aimed at a savings goal or emergency fund landed in no bucket at all.
+        // Money that never moved (opening balances, "None"/noWallet contributions) books no
+        // transaction, so it is now excluded automatically rather than by an explicit flag check.
         BigDecimal investments = BigDecimal.ZERO;
         BigDecimal savings = BigDecimal.ZERO;
-        for (Investment i : investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)) {
-            // Opening balances are already-owned holdings, not a contribution made this month —
-            // exclude them from every allocation bucket (they still count toward net worth).
-            if (Boolean.TRUE.equals(i.getOpeningBalance())) continue;
-            if (Boolean.TRUE.equals(i.getEmergencyFund())) continue; // counted via EMERGENCY_CONTRIBUTION txs
-            BigDecimal amt = fx.convert(i.getInvestedAmount(), i.getCurrency(), displayCurrency);
-            if (Boolean.TRUE.equals(i.getSavingsGoal())) savings = savings.add(amt);
+        for (Transaction t : transactionRepository
+                .findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+                        uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT, start, end)) {
+            BigDecimal amt = t.getAmount();
+            if (amt == null || amt.signum() <= 0) continue;
+            if (isSavingsGoalTx(t)) savings = savings.add(amt);
             else investments = investments.add(amt);
         }
 
@@ -745,7 +858,7 @@ public class OverviewService {
         for (Currency c : Currency.values()) {
             BigDecimal sum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.STOCK_PURCHASE, c, start, end);
-            if (sum != null && sum.signum() > 0) stocks = stocks.add(fx.convert(sum, c, displayCurrency));
+            if (sum != null && sum.signum() > 0) stocks = stocks.add(sum);
         }
 
         return new BucketPaid(donation, emergency, investments, stocks, savings);
@@ -769,7 +882,7 @@ public class OverviewService {
                             .id(d.getId())
                             .bucket("DONATION")
                             .date(d.getDonationDate())
-                            .amount(fx.convert(d.getAmount(), d.getCurrency(), displayCurrency))
+                            .amount(d.getAmount())
                             .nativeAmount(d.getAmount())
                             .nativeCurrency(d.getCurrency())
                             .label(Boolean.TRUE.equals(d.getAnonymous()) ? "Anonymous" : d.getRecipientName())
@@ -782,7 +895,7 @@ public class OverviewService {
                                 .id(t.getId())
                                 .bucket("EMERGENCY")
                                 .date(t.getTransactionDate())
-                                .amount(fx.convert(t.getAmount(), t.getCurrency(), displayCurrency))
+                                .amount(t.getAmount())
                                 .nativeAmount(t.getAmount())
                                 .nativeCurrency(t.getCurrency())
                                 .label("Emergency fund")
@@ -791,41 +904,26 @@ public class OverviewService {
                 // Emergency-fund investment funding (initial + top-ups) books EMERGENCY_CONTRIBUTION
                 // transactions, already listed above — no separate by-entity listing needed.
             }
-            case "INVESTMENTS" -> investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)
-                    .stream().filter(i -> !Boolean.TRUE.equals(i.getEmergencyFund())
-                            && !Boolean.TRUE.equals(i.getSavingsGoal())
-                            && !Boolean.TRUE.equals(i.getOpeningBalance()))
-                    .forEach(i -> rows.add(uz.tracker.trackerproject.dto.response.BucketPayment.builder()
-                            .id(i.getId())
-                            .bucket("INVESTMENTS")
-                            .date(i.getPurchaseDate())
-                            .amount(fx.convert(i.getInvestedAmount(), i.getCurrency(), displayCurrency))
-                            .nativeAmount(i.getInvestedAmount())
-                            .nativeCurrency(i.getCurrency())
-                            .label(i.getName())
-                            .description(i.getDescription())
-                            .build()));
-            case "SAVINGS" -> investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(start, end)
-                    .stream().filter(i -> Boolean.TRUE.equals(i.getSavingsGoal())
-                            && !Boolean.TRUE.equals(i.getEmergencyFund())
-                            && !Boolean.TRUE.equals(i.getOpeningBalance()))
-                    .forEach(i -> rows.add(uz.tracker.trackerproject.dto.response.BucketPayment.builder()
-                            .id(i.getId())
-                            .bucket("SAVINGS")
-                            .date(i.getPurchaseDate())
-                            .amount(fx.convert(i.getInvestedAmount(), i.getCurrency(), displayCurrency))
-                            .nativeAmount(i.getInvestedAmount())
-                            .nativeCurrency(i.getCurrency())
-                            .label(i.getName())
-                            .description(i.getDescription())
-                            .build()));
+            // Both read the SAME source as computePaidThisMonth (INVESTMENT transactions by
+            // transaction date, split by the target's savingsGoal flag) so the history rows always
+            // add up to the bucket total shown above them.
+            case "INVESTMENTS" -> transactionRepository
+                    .findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+                            uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT, start, end)
+                    .stream().filter(t -> !isSavingsGoalTx(t))
+                    .forEach(t -> rows.add(investmentBucketRow(t, "INVESTMENTS")));
+            case "SAVINGS" -> transactionRepository
+                    .findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+                            uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT, start, end)
+                    .stream().filter(this::isSavingsGoalTx)
+                    .forEach(t -> rows.add(investmentBucketRow(t, "SAVINGS")));
             case "STOCKS" -> transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
                             uz.tracker.trackerproject.enums.TransactionSubType.STOCK_PURCHASE, start, end)
                     .forEach(t -> rows.add(uz.tracker.trackerproject.dto.response.BucketPayment.builder()
                             .id(t.getId())
                             .bucket("STOCKS")
                             .date(t.getTransactionDate())
-                            .amount(fx.convert(t.getAmount(), t.getCurrency(), displayCurrency))
+                            .amount(t.getAmount())
                             .nativeAmount(t.getAmount())
                             .nativeCurrency(t.getCurrency())
                             .label("Stocks")
@@ -871,9 +969,9 @@ public class OverviewService {
 
         // Action targets (display currency). Bank installments pay via PayBankInstallmentModal; the
         // 34%-of-debt action (borrowed money + debts) pays via PayPersonalLoanModal.
-        BigDecimal bankTarget = fx.fromUzs(bankMonthlyUzs, displayCurrency);
+        BigDecimal bankTarget = bankMonthlyUzs;
         BigDecimal personalUzs = nullToZero(debt34Uzs);
-        BigDecimal personalTarget = fx.fromUzs(personalUzs, displayCurrency);
+        BigDecimal personalTarget = personalUzs;
 
         List<ActionItem> actions = level1Actions(plan, monthPaid, bankTarget,
                 bankMonthlyUzs, personalTarget, personalUzs, displayCurrency);
@@ -1023,11 +1121,10 @@ public class OverviewService {
 
         List<ActionItem> actions = new ArrayList<>();
         if (bankMonthlyUzs.signum() > 0) {
-            actions.add(payBank(monthPaid, fx.fromUzs(bankMonthlyUzs, displayCurrency)));
+            actions.add(payBank(monthPaid, bankMonthlyUzs));
         }
         if (personalLoansRemainingUzs.signum() > 0) {
-            BigDecimal personalTarget = fx.fromUzs(
-                    personalLoansRemainingUzs.multiply(PERSONAL_LOAN_PAYDOWN_RATE, MC), displayCurrency);
+            BigDecimal personalTarget = personalLoansRemainingUzs.multiply(PERSONAL_LOAN_PAYDOWN_RATE, MC);
             actions.add(payPersonal(personalTarget, displayCurrency, monthPaid, personalTarget));
         }
         if (rule.getNote() != null && !rule.getNote().isBlank()) {
@@ -1078,9 +1175,9 @@ public class OverviewService {
     /** The user's current level from stable income − subscriptions (null if income unset). */
     private Integer currentLevel() {
         Settings s = settingsService.getOrCreate();
-        if (s.getMonthlyStableIncome() == null || s.getMonthlyStableIncomeCurrency() == null
+        if (s.getMonthlyStableIncome() == null
                 || s.getMonthlyStableIncome().signum() <= 0) return null;
-        BigDecimal stableUzs = fx.toUzs(s.getMonthlyStableIncome(), s.getMonthlyStableIncomeCurrency());
+        BigDecimal stableUzs = s.getMonthlyStableIncome();
         return computeLevel(stableUzs.subtract(sumActiveSubscriptionsUzs()));
     }
 
@@ -1107,13 +1204,12 @@ public class OverviewService {
     public AllocationRulesViewResponse getAllocationRules() {
         Settings s = settingsService.getOrCreate();
         boolean missingIncome = s.getMonthlyStableIncome() == null
-                || s.getMonthlyStableIncomeCurrency() == null
                 || s.getMonthlyStableIncome().signum() <= 0;
 
         Integer curLevel = currentLevel();
         String curSubLevel = null;
         if (curLevel != null && !missingIncome) {
-            BigDecimal stableUzs = fx.toUzs(s.getMonthlyStableIncome(), s.getMonthlyStableIncomeCurrency());
+            BigDecimal stableUzs = s.getMonthlyStableIncome();
             LocalDate today = LocalDate.now();
             YearMonth now = YearMonth.now();
             BigDecimal debtTotal = sumBankLoanMonthlyPaymentsUzs(today).add(sumDebt34Uzs(now));
@@ -1329,7 +1425,7 @@ public class OverviewService {
         }
         BigDecimal pct = new BigDecimal(pctStr);
         BigDecimal amountUzs = incomeUzs.multiply(pct, MC).divide(new BigDecimal("100"), MC);
-        BigDecimal minAmount = fx.fromUzs(amountUzs, displayCurrency);
+        BigDecimal minAmount = amountUzs;
 
         BigDecimal paidPercent = minAmount.signum() > 0
                 ? paidDisplay.multiply(new BigDecimal("100"), MC).divide(minAmount, MC)

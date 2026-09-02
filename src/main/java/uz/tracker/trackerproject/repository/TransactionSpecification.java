@@ -46,12 +46,11 @@ public class TransactionSpecification {
                 predicates.add(cb.like(cb.lower(root.get("description")), "%" + search.toLowerCase() + "%"));
             if (excludeTransfers) {
                 // Null sub-type is allowed (legacy rows / regular transactions); exclude
-                // explicit TRANSFER_IN / TRANSFER_OUT / EXCHANGE_IN / EXCHANGE_OUT rows.
+                // explicit TRANSFER_IN / TRANSFER_OUT rows.
                 predicates.add(cb.or(
                         cb.isNull(root.get("subType")),
                         root.get("subType").in(
-                                TransactionSubType.TRANSFER_IN, TransactionSubType.TRANSFER_OUT,
-                                TransactionSubType.EXCHANGE_IN, TransactionSubType.EXCHANGE_OUT).not()
+                                TransactionSubType.TRANSFER_IN, TransactionSubType.TRANSFER_OUT).not()
                 ));
             }
             if (cashOnly) {

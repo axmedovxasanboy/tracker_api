@@ -7,6 +7,7 @@ import uz.tracker.trackerproject.dto.request.SettingsRequest;
 import uz.tracker.trackerproject.dto.response.SettingsResponse;
 import uz.tracker.trackerproject.dto.response.TelegramConfigResponse;
 import uz.tracker.trackerproject.entity.Settings;
+import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.repository.SettingsRepository;
 
 @Service
@@ -24,9 +25,9 @@ public class SettingsService {
     public SettingsResponse update(SettingsRequest req) {
         Settings s = getOrCreate();
         if (req.getMonthlyStableIncome() != null) s.setMonthlyStableIncome(req.getMonthlyStableIncome());
-        if (req.getMonthlyStableIncomeCurrency() != null) s.setMonthlyStableIncomeCurrency(req.getMonthlyStableIncomeCurrency());
-        if (req.getUsdToUzs() != null) s.setUsdToUzs(req.getUsdToUzs());
-        if (req.getEurToUzs() != null) s.setEurToUzs(req.getEurToUzs());
+        // UZS-only: the field is kept for a future multi-currency rework, but it is never
+        // chosen by the user and must never be left null (nothing may gate on it).
+        s.setMonthlyStableIncomeCurrency(Currency.UZS);
         if (req.getAllocationTrackingStartMonth() != null) {
             // Write-once: locked the moment it's first set. Re-sending the SAME value is a
             // no-op (so saving other settings still works); a DIFFERENT value is rejected.
@@ -43,6 +44,28 @@ public class SettingsService {
         if (req.getTelegramWebhookUrl() != null) s.setTelegramWebhookUrl(blankToNull(req.getTelegramWebhookUrl()));
         if (req.getTelegramWebViewUrl() != null) s.setTelegramWebViewUrl(blankToNull(req.getTelegramWebViewUrl()));
         return SettingsResponse.from(repository.save(s));
+    }
+
+
+    // ── Write guard (called by every money-writing service) ────────────────────
+
+    /**
+     * Reject any money-writing action until a monthly stable income is configured.
+     * Everything downstream — the tier, the allocation base, every bucket recommendation —
+     * is derived from it, so recording money before it is set produces figures that are
+     * silently wrong rather than merely absent.
+     *
+     * Mirrors {@code MonthCloseService.assertMonthOpen}: called as the first statement of
+     * each write path, throws {@link IllegalArgumentException} so the global handler turns
+     * it into a 400 with a readable message.
+     */
+    public void assertStableIncomeSet() {
+        Settings s = getOrCreate();
+        if (s.getMonthlyStableIncome() == null || s.getMonthlyStableIncome().signum() <= 0) {
+            throw new IllegalArgumentException(
+                    "Set your monthly stable income in Settings before recording any money. "
+                    + "Your tier and every allocation figure are calculated from it.");
+        }
     }
 
     /** Public, non-secret Telegram config consumed by the bot at startup. */

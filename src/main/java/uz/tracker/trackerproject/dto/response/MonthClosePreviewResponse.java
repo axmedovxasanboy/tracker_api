@@ -38,8 +38,6 @@ public class MonthClosePreviewResponse {
     private BigDecimal taggedTotal;    // donation+emergency+investments+stocks+savings
     private BigDecimal spendableNow;   // current total wallet balance (display currency)
 
-    private boolean fxRatesUsingDefaults;
-
     @Getter @Builder
     public static class WalletLine {
         private String walletType;        // CARD | CASH

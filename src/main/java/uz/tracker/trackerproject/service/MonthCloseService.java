@@ -51,7 +51,7 @@ public class MonthCloseService {
     private final TransactionRepository transactionRepository;
     private final CategoryRepository categoryRepository;
     private final OverviewService overviewService;
-    private final FxConverter fx;
+    private final SettingsService settingsService;
 
     // ── Lock guard (called by the transaction-writing services) ───────────────
 
@@ -94,7 +94,7 @@ public class MonthCloseService {
             lines.add(WalletLine.builder()
                     .walletType("CARD").cardId(card.getId()).label(card.getName())
                     .currency(card.getCurrency()).computedBalance(computed).build());
-            spendableNow = spendableNow.add(fx.convert(computed, card.getCurrency(), display));
+            spendableNow = spendableNow.add(computed);
         }
         for (Currency c : Currency.values()) {
             BigDecimal cashSum = nz(cashBalanceRepository.sumCashlessTransactionsUpTo(c, monthEnd));
@@ -102,9 +102,9 @@ public class MonthCloseService {
             if (pot.isEmpty() && cashSum.signum() == 0) continue; // no cash activity in this currency
             BigDecimal computed = pot.map(p -> nz(p.getInitialBalance())).orElse(BigDecimal.ZERO).add(cashSum);
             lines.add(WalletLine.builder()
-                    .walletType("CASH").cardId(null).label("Cash " + c)
+                    .walletType("CASH").cardId(null).label("Cash")
                     .currency(c).computedBalance(computed).build());
-            spendableNow = spendableNow.add(fx.convert(computed, c, display));
+            spendableNow = spendableNow.add(computed);
         }
 
         var income = overviewService.getIncome(month, display);
@@ -128,7 +128,6 @@ public class MonthCloseService {
                 .savings(paid.savings())
                 .taggedTotal(tagged)
                 .spendableNow(spendableNow)
-                .fxRatesUsingDefaults(income.isFxRatesUsingDefaults())
                 .build();
     }
 
@@ -136,6 +135,7 @@ public class MonthCloseService {
 
     @Transactional
     public MonthCloseResponse close(MonthCloseRequest req) {
+        settingsService.assertStableIncomeSet();
         YearMonth month = parseMonth(req.getMonth());
         LocalDate monthFirst = month.atDay(1);
         LocalDate monthEnd = month.atEndOfMonth();
@@ -168,7 +168,7 @@ public class MonthCloseService {
             BigDecimal delta = computed.subtract(enteredBal);
             Long txId = bookAdjustment(card, card.getCurrency(), delta, monthEnd);
             close.addWallet(walletRow("CARD", card.getId(), card.getCurrency(), computed, enteredBal, delta, txId));
-            leftoverUzs = leftoverUzs.add(fx.convert(enteredBal, card.getCurrency(), Currency.UZS));
+            leftoverUzs = leftoverUzs.add(enteredBal);
         }
         for (Currency c : Currency.values()) {
             BigDecimal cashSum = nz(cashBalanceRepository.sumCashlessTransactionsUpTo(c, monthEnd));
@@ -180,7 +180,7 @@ public class MonthCloseService {
             BigDecimal delta = computed.subtract(enteredBal);
             Long txId = bookAdjustment(null, c, delta, monthEnd);
             close.addWallet(walletRow("CASH", null, c, computed, enteredBal, delta, txId));
-            leftoverUzs = leftoverUzs.add(fx.convert(enteredBal, c, Currency.UZS));
+            leftoverUzs = leftoverUzs.add(enteredBal);
         }
 
         BigDecimal taggedUzs = paid.donation().add(paid.emergency()).add(paid.investments())
@@ -217,22 +217,21 @@ public class MonthCloseService {
 
         if (closeOpt.isPresent()) {
             MonthClose m = closeOpt.get();
-            BigDecimal donation = fx.fromUzs(nz(m.getDonationUzs()), display);
-            BigDecimal emergency = fx.fromUzs(nz(m.getEmergencyUzs()), display);
-            BigDecimal investments = fx.fromUzs(nz(m.getInvestmentsUzs()), display);
-            BigDecimal stocks = fx.fromUzs(nz(m.getStocksUzs()), display);
-            BigDecimal savings = fx.fromUzs(nz(m.getSavingsUzs()), display);
+            BigDecimal donation = nz(m.getDonationUzs());
+            BigDecimal emergency = nz(m.getEmergencyUzs());
+            BigDecimal investments = nz(m.getInvestmentsUzs());
+            BigDecimal stocks = nz(m.getStocksUzs());
+            BigDecimal savings = nz(m.getSavingsUzs());
             return MonthSummaryResponse.builder()
                     .month(month.toString()).currency(display).closed(true)
-                    .startBalance(fx.fromUzs(nz(m.getStartBalanceUzs()), display))
-                    .income(fx.fromUzs(nz(m.getIncomeUzs()), display))
+                    .startBalance(nz(m.getStartBalanceUzs()))
+                    .income(nz(m.getIncomeUzs()))
                     .donation(donation).emergency(emergency).investments(investments)
                     .stocks(stocks).savings(savings)
                     .taggedTotal(donation.add(emergency).add(investments).add(stocks).add(savings))
-                    .everydaySpend(fx.fromUzs(nz(m.getEverydaySpendUzs()), display))
-                    .totalSpent(fx.fromUzs(nz(m.getTotalSpentUzs()), display))
-                    .leftover(fx.fromUzs(nz(m.getLeftoverUzs()), display))
-                    .fxRatesUsingDefaults(income.isFxRatesUsingDefaults())
+                    .everydaySpend(nz(m.getEverydaySpendUzs()))
+                    .totalSpent(nz(m.getTotalSpentUzs()))
+                    .leftover(nz(m.getLeftoverUzs()))
                     .build();
         }
 
@@ -249,7 +248,6 @@ public class MonthCloseService {
                 .stocks(paid.stocks()).savings(paid.savings())
                 .taggedTotal(tagged)
                 .everydaySpend(null).totalSpent(null).leftover(null)
-                .fxRatesUsingDefaults(income.isFxRatesUsingDefaults())
                 .build();
     }
 
@@ -266,13 +264,13 @@ public class MonthCloseService {
         return null;
     }
 
-    /** Total of every wallet's balance as of {@code end}, FX-converted into {@code target}. */
+    /** Total of every wallet's balance as of {@code end}. */
     private BigDecimal walletBalanceUpTo(LocalDate end, Currency target) {
         BigDecimal total = BigDecimal.ZERO;
         for (Card card : cardRepository.findAll()) {
             BigDecimal bal = nz(card.getInitialBalance())
                     .add(nz(cardRepository.sumTransactionsByCardIdUpTo(card.getId(), end)));
-            total = total.add(fx.convert(bal, card.getCurrency(), target));
+            total = total.add(bal);
         }
         for (Currency c : Currency.values()) {
             BigDecimal cashSum = nz(cashBalanceRepository.sumCashlessTransactionsUpTo(c, end));
@@ -280,7 +278,7 @@ public class MonthCloseService {
                     .map(p -> nz(p.getInitialBalance())).orElse(BigDecimal.ZERO);
             BigDecimal bal = init.add(cashSum);
             if (bal.signum() == 0) continue;
-            total = total.add(fx.convert(bal, c, target));
+            total = total.add(bal);
         }
         return total;
     }

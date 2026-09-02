@@ -65,9 +65,6 @@ public class OverviewTierResponse {
     /** Human-readable badge label e.g. "Level 1.2" or "Above tier 6". */
     private String levelLabel;
 
-    /** True when FX rates are unset and built-in defaults are in effect. */
-    private boolean fxRatesUsingDefaults;
-
     /** True when the user hasn't configured Settings.monthlyStableIncome. */
     private boolean missingStableIncome;
 

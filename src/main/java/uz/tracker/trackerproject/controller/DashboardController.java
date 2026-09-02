@@ -22,14 +22,14 @@ public class DashboardController {
 
     @GetMapping("/summary")
     public ResponseEntity<DashboardSummaryResponse> getSummary(
-            @RequestParam(defaultValue = "USD") Currency currency
+            @RequestParam(defaultValue = "UZS") Currency currency
     ) {
         return ResponseEntity.ok(transactionService.getSummary(currency));
     }
 
     @GetMapping("/monthly")
     public ResponseEntity<List<MonthlyDataResponse>> getMonthly(
-            @RequestParam(defaultValue = "USD") Currency currency,
+            @RequestParam(defaultValue = "UZS") Currency currency,
             @RequestParam(required = false) Integer year
     ) {
         int targetYear = year != null ? year : LocalDate.now().getYear();
@@ -39,7 +39,7 @@ public class DashboardController {
     @GetMapping("/category-breakdown")
     public ResponseEntity<List<CategoryBreakdownResponse>> getCategoryBreakdown(
             @RequestParam(defaultValue = "EXPENSE") TransactionType type,
-            @RequestParam(defaultValue = "USD") Currency currency,
+            @RequestParam(defaultValue = "UZS") Currency currency,
             @RequestParam(required = false) Integer year,
             @RequestParam(required = false) Integer month
     ) {

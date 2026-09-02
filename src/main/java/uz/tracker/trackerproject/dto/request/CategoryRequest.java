@@ -14,6 +14,9 @@ public class CategoryRequest {
     @NotBlank(message = "Name is required")
     private String name;
 
+    /** Optional Uzbek name; blank clears it and display falls back to the English name. */
+    private String nameUz;
+
     @NotNull(message = "Type is required")
     private CategoryType type;
 

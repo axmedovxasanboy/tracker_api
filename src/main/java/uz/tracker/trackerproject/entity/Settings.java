@@ -34,13 +34,6 @@ public class Settings {
     @Column(name = "monthly_stable_income_currency")
     private Currency monthlyStableIncomeCurrency;
 
-    /** 1 USD = ? UZS. Nullable; consumers fall back to a sentinel when missing. */
-    @Column(name = "usd_to_uzs", precision = 19, scale = 4)
-    private BigDecimal usdToUzs;
-
-    /** 1 EUR = ? UZS. Nullable; consumers fall back to a sentinel when missing. */
-    @Column(name = "eur_to_uzs", precision = 19, scale = 4)
-    private BigDecimal eurToUzs;
 
     /**
      * Month (stored as its first day) from which the allocation ledger starts

@@ -24,6 +24,7 @@ import uz.tracker.trackerproject.repository.TransactionRepository;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Component
@@ -43,9 +44,18 @@ public class DataSeeder implements CommandLineRunner {
     @Override
     @Transactional
     public void run(String... args) {
+        // MUST be first: the app is UZS-only now, and Hibernate throws
+        // "No enum constant Currency.USD" the moment it reads a legacy non-UZS row.
+        // This is raw SQL precisely so it runs before any JPA read below.
+        purgeNonUzsData();
+
+        // Also before any JPA read — and before the CHECK constraint below is rebuilt from
+        // the current enum, which would otherwise fail against the very rows it forbids.
+        purgeRemovedExchangeRows();
+
         // Rebuild the sub_type CHECK constraint so it matches today's TransactionSubType
         // enum values. `ddl-auto=update` doesn't migrate Hibernate-generated CHECK
-        // constraints when an enum gains new members (e.g. EXCHANGE_IN/EXCHANGE_OUT) —
+        // constraints when an enum gains or loses members —
         // the old constraint then rejects inserts of the new values at the DB level.
         rebuildSubTypeCheckConstraint();
 
@@ -84,6 +94,10 @@ public class DataSeeder implements CommandLineRunner {
         // set (adding these early would make count() > 0 and skip it). On an existing DB it adds
         // the Stocks + Emergency categories if they're missing.
         ensureBucketCategories();
+
+        // Runs last: every default and bucket category now exists, so all of them get
+        // their Uzbek name in one pass.
+        backfillUzbekCategoryNames();
     }
 
     /**
@@ -101,6 +115,55 @@ public class DataSeeder implements CommandLineRunner {
         }
         ensureDonationAnonymous();
         ensureBucketCategories();
+    }
+
+    /**
+     * Uzbek names for the seeded defaults. Keyed by the canonical ENGLISH name, which
+     * stays the identifier — only the display translation is added. Owner-editable
+     * afterwards from the Categories page.
+     */
+    private static final Map<String, String> DEFAULT_UZ_NAMES = Map.ofEntries(
+            Map.entry("Salary", "Oylik maosh"),
+            Map.entry("Freelance", "Frilans"),
+            Map.entry("Loan Received", "Olingan qarz"),
+            Map.entry("Loan Returned", "Qaytarilgan qarz"),
+            Map.entry("Investment Return", "Investitsiya daromadi"),
+            Map.entry("Other Income", "Boshqa daromad"),
+            Map.entry("Food & Dining", "Ovqat va ichimlik"),
+            Map.entry("Transport", "Transport"),
+            Map.entry("Housing", "Uy-joy"),
+            Map.entry("Healthcare", "Sog'liqni saqlash"),
+            Map.entry("Entertainment", "Ko'ngilochar"),
+            Map.entry("Shopping", "Xaridlar"),
+            Map.entry("Education", "Ta'lim"),
+            Map.entry("Loan Given", "Berilgan qarz"),
+            Map.entry("Loan Repayment", "Qarzni to'lash"),
+            Map.entry("Bank Instalment", "Bank to'lovi"),
+            Map.entry("Donation", "Xayriya"),
+            Map.entry("Investment", "Investitsiya"),
+            Map.entry("Stocks", "Aksiyalar"),
+            Map.entry("Emergency Fund", "Favqulodda jamg'arma"),
+            Map.entry("Everyday Spending", "Kundalik xarajat"),
+            Map.entry("Anonymous", "Anonim"));
+
+    /**
+     * Give every category an Uzbek name where we know one and the row doesn't have one yet.
+     * Idempotent: only fills nulls, so an owner edit is never overwritten.
+     */
+    private void backfillUzbekCategoryNames() {
+        List<Category> all = categoryRepository.findAll();
+        int filled = 0;
+        for (Category c : all) {
+            if (c.getNameUz() != null && !c.getNameUz().isBlank()) continue;
+            String uz = DEFAULT_UZ_NAMES.get(c.getName());
+            if (uz == null) continue;
+            c.setNameUz(uz);
+            categoryRepository.save(c);
+            filled++;
+        }
+        if (filled > 0) {
+            System.out.println("[DataSeeder] Added Uzbek names to " + filled + " category/categories.");
+        }
     }
 
     private List<Category> defaultCategories() {
@@ -152,6 +215,87 @@ public class DataSeeder implements CommandLineRunner {
      * rows to OTHER via native SQL — done BEFORE JPA reads them under the trimmed enum, which
      * would otherwise throw. Idempotent; non-fatal if the table doesn't exist yet.
      */
+    /**
+     * One-way migration to the UZS-only model: delete every row denominated in a currency
+     * that no longer exists. Runs before anything else in {@link #run} because Hibernate
+     * cannot even read a row whose currency is not a {@link Currency} constant.
+     *
+     * Children go before parents so foreign keys stay satisfied, and transactions attached
+     * to a doomed wallet/record are removed even if their own currency column looks fine.
+     * Idempotent: once the data is clean every statement matches zero rows, so this is a
+     * no-op on every later boot.
+     */
+    private void purgeNonUzsData() {
+        // Children first: anything pointing at a wallet or record that is about to go.
+        List<String> statements = List.of(
+                "DELETE FROM transactions WHERE card_id IN (SELECT id FROM cards WHERE currency <> 'UZS')",
+                "DELETE FROM transactions WHERE investment_id IN (SELECT id FROM investments WHERE currency <> 'UZS')",
+                "DELETE FROM transactions WHERE monthly_payment_id IN "
+                        + "(SELECT id FROM monthly_payments WHERE currency <> 'UZS')",
+                "DELETE FROM transactions WHERE repaid_loan_taken_id IN "
+                        + "(SELECT id FROM loans_taken WHERE currency <> 'UZS')",
+                "DELETE FROM transactions WHERE repaid_loan_given_id IN "
+                        + "(SELECT id FROM loans_given WHERE currency <> 'UZS')",
+                "DELETE FROM transactions WHERE repaid_debt_id IN (SELECT id FROM debts WHERE currency <> 'UZS')",
+                "DELETE FROM transactions WHERE currency <> 'UZS'",
+                "DELETE FROM month_close_wallets WHERE currency <> 'UZS' "
+                        + "OR card_id IN (SELECT id FROM cards WHERE currency <> 'UZS')",
+                "DELETE FROM mark_paids WHERE currency <> 'UZS'",
+                // Then the records themselves.
+                "DELETE FROM cards WHERE currency <> 'UZS'",
+                "DELETE FROM cash_balances WHERE currency <> 'UZS'",
+                "DELETE FROM investments WHERE currency <> 'UZS'",
+                "DELETE FROM donations WHERE currency <> 'UZS'",
+                "DELETE FROM debts WHERE currency <> 'UZS'",
+                "DELETE FROM loans_taken WHERE currency <> 'UZS'",
+                "DELETE FROM loans_given WHERE currency <> 'UZS'",
+                "DELETE FROM monthly_payments WHERE currency <> 'UZS'",
+                "DELETE FROM emergencies WHERE currency <> 'UZS'",
+                "DELETE FROM bank_loans WHERE currency <> 'UZS'",
+                // The stable-income currency is a setting, not a row — just restamp it.
+                "UPDATE settings SET monthly_stable_income_currency = 'UZS' "
+                        + "WHERE monthly_stable_income_currency IS NOT NULL "
+                        + "AND monthly_stable_income_currency <> 'UZS'");
+
+        int purged = 0;
+        for (String sql : statements) {
+            try {
+                purged += entityManager.createNativeQuery(sql).executeUpdate();
+            } catch (Exception ignored) {
+                // Table not created yet on a virgin DB, or a non-Postgres engine — safe to skip.
+            }
+        }
+        if (purged > 0) {
+            System.out.println("[DataSeeder] UZS-only migration: removed " + purged
+                    + " row(s) denominated in a currency that is no longer supported.");
+        }
+    }
+
+    /**
+     * The wallet-to-wallet "exchange" feature was removed, along with its two sub-types.
+     * Any surviving row would be unreadable (`No enum constant …EXCHANGE_IN`) and would also
+     * break the rebuilt sub_type CHECK constraint, so the rows go.
+     *
+     * NOTE: an exchange was a PAIR of rows that moved money between two wallets, so deleting
+     * them restores the source wallet and debits the destination — wallet balances shift by
+     * design (the owner accepted this when the feature was dropped).
+     * Idempotent: a no-op once nothing is left.
+     */
+    private void purgeRemovedExchangeRows() {
+        try {
+            int n = entityManager.createNativeQuery(
+                    "DELETE FROM transactions WHERE sub_type IN ('EXCHANGE_IN','EXCHANGE_OUT')")
+                    .executeUpdate();
+            if (n > 0) {
+                System.out.println("[DataSeeder] Removed " + n
+                        + " transaction(s) from the deleted wallet-exchange feature; "
+                        + "affected wallet balances have shifted accordingly.");
+            }
+        } catch (Exception ignored) {
+            // Table not created yet on a virgin DB — safe to skip.
+        }
+    }
+
     private void migrateLegacyInvestmentTypes() {
         try {
             entityManager.createNativeQuery(

@@ -16,12 +16,6 @@ public class SettingsRequest {
 
     private Currency monthlyStableIncomeCurrency;
 
-    @DecimalMin(value = "0.0", message = "USD→UZS rate cannot be negative")
-    private BigDecimal usdToUzs;
-
-    @DecimalMin(value = "0.0", message = "EUR→UZS rate cannot be negative")
-    private BigDecimal eurToUzs;
-
     /** Month (any day; normalised to the 1st) the allocation ledger should start from. */
     private java.time.LocalDate allocationTrackingStartMonth;
 

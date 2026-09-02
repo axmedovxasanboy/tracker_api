@@ -14,8 +14,6 @@ public class SettingsResponse {
     private Long id;
     private BigDecimal monthlyStableIncome;
     private Currency monthlyStableIncomeCurrency;
-    private BigDecimal usdToUzs;
-    private BigDecimal eurToUzs;
     private java.time.LocalDate allocationTrackingStartMonth;
     private String telegramWebhookUrl;
     private String telegramWebViewUrl;
@@ -26,8 +24,6 @@ public class SettingsResponse {
                 .id(s.getId())
                 .monthlyStableIncome(s.getMonthlyStableIncome())
                 .monthlyStableIncomeCurrency(s.getMonthlyStableIncomeCurrency())
-                .usdToUzs(s.getUsdToUzs())
-                .eurToUzs(s.getEurToUzs())
                 .allocationTrackingStartMonth(s.getAllocationTrackingStartMonth())
                 .telegramWebhookUrl(s.getTelegramWebhookUrl())
                 .telegramWebViewUrl(s.getTelegramWebViewUrl())

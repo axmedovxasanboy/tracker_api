@@ -38,11 +38,11 @@ public class TransactionService {
     private final CashBalanceRepository cashBalanceRepository;
     private final FinanceService financeService;
     private final MonthCloseService monthCloseService;
+    private final SettingsService settingsService;
     private final LoanGivenRepository loanGivenRepository;
     private final LoanTakenRepository loanTakenRepository;
     private final DonationRepository donationRepository;
     private final InvestmentRepository investmentRepository;
-    private final FxConverter fx;
 
     @Value("${app.pagination.max-page-size:100}")
     private int maxPageSize;
@@ -88,6 +88,7 @@ public class TransactionService {
 
     @Transactional
     public TransactionResponse create(TransactionRequest request) {
+        settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(request.getTransactionDate());
         validateCashAmount(request);
         validateCurrencyMatchesCard(request.getCardId(), request.getCurrency());
@@ -103,6 +104,7 @@ public class TransactionService {
         Transaction existing = findOrThrow(id);
         // Lock both the existing month (can't edit a closed month's row) and the target month
         // (can't move a row into a closed month).
+        settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(existing.getTransactionDate());
         monthCloseService.assertMonthOpen(request.getTransactionDate());
         validateCashAmount(request);
@@ -149,6 +151,7 @@ public class TransactionService {
 
     @Transactional
     public List<TransactionResponse> transferBalance(BalanceTransferRequest request) {
+        settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(request.getTransactionDate());
         if (request.getFromCardId().equals(request.getToCardId())) {
             throw new IllegalArgumentException("Source and destination cards must be different");
@@ -202,108 +205,6 @@ public class TransactionService {
         return List.of(TransactionResponse.from(savedExpense), TransactionResponse.from(savedIncome));
     }
 
-    // ── Exchange (cash ↔ card, cross-currency allowed) ────────────────────────
-
-    /**
-     * Cross-wallet / cross-currency exchange. Either side can be a card or "cash"
-     * (cardId = null). When cross-currency, fromAmount and toAmount may differ — the
-     * implied FX rate is `fromAmount / toAmount`. We persist two rows:
-     *   – EXPENSE row on the source side, sub-type EXCHANGE_OUT
-     *   – INCOME row on the destination side, sub-type EXCHANGE_IN
-     * They share transferPairId so deletes cascade just like a Transfer.
-     *
-     * Cash-side rows have cardId = null and book the cashAmount as the full amount,
-     * keeping the cash-balance math consistent with regular cash transactions.
-     */
-    @Transactional
-    public List<TransactionResponse> exchange(ExchangeRequest req) {
-        monthCloseService.assertMonthOpen(req.getTransactionDate());
-        if (req.getFromAmount() == null || req.getFromAmount().signum() <= 0)
-            throw new IllegalArgumentException("Amount sent must be greater than 0");
-        if (req.getToAmount() == null || req.getToAmount().signum() <= 0)
-            throw new IllegalArgumentException("Amount received must be greater than 0");
-        if (req.getFromCurrency() == null || req.getToCurrency() == null)
-            throw new IllegalArgumentException("Both source and destination currency are required");
-
-        Card fromCard = null;
-        if (req.getFromCardId() != null) {
-            fromCard = cardRepository.findById(req.getFromCardId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Card", req.getFromCardId()));
-            if (fromCard.getCurrency() != req.getFromCurrency()) {
-                throw new IllegalArgumentException(
-                        "Source card currency (" + fromCard.getCurrency() + ") does not match source currency (" + req.getFromCurrency() + ")");
-            }
-        }
-        Card toCard = null;
-        if (req.getToCardId() != null) {
-            toCard = cardRepository.findById(req.getToCardId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Card", req.getToCardId()));
-            if (toCard.getCurrency() != req.getToCurrency()) {
-                throw new IllegalArgumentException(
-                        "Destination card currency (" + toCard.getCurrency() + ") does not match destination currency (" + req.getToCurrency() + ")");
-            }
-        }
-        if (fromCard != null && toCard != null && fromCard.getId().equals(toCard.getId())) {
-            throw new IllegalArgumentException("Source and destination cannot be the same card");
-        }
-        if (req.getFromCardId() == null && req.getToCardId() == null
-                && req.getFromCurrency() == req.getToCurrency()) {
-            throw new IllegalArgumentException("Cannot exchange cash to cash in the same currency — there's nothing to exchange");
-        }
-
-        // Pre-flight balance check for the source card (if any).
-        checkCardBalance(req.getFromCardId(), req.getFromAmount(), TransactionType.EXPENSE, null);
-
-        String baseDesc = (req.getDescription() != null && !req.getDescription().isBlank())
-                ? req.getDescription()
-                : (req.getFromCurrency() + " → " + req.getToCurrency() + " exchange");
-
-        Transaction outRow = new Transaction();
-        outRow.setType(TransactionType.EXPENSE);
-        outRow.setSubType(TransactionSubType.EXCHANGE_OUT);
-        outRow.setAmount(req.getFromAmount());
-        outRow.setCurrency(req.getFromCurrency());
-        outRow.setCard(fromCard);
-        outRow.setCashAmount(fromCard == null ? req.getFromAmount() : BigDecimal.ZERO);
-        outRow.setDescription(baseDesc);
-        outRow.setTransactionDate(req.getTransactionDate());
-        outRow.setNote(buildExchangeNote(req, false));
-
-        Transaction inRow = new Transaction();
-        inRow.setType(TransactionType.INCOME);
-        inRow.setSubType(TransactionSubType.EXCHANGE_IN);
-        inRow.setAmount(req.getToAmount());
-        inRow.setCurrency(req.getToCurrency());
-        inRow.setCard(toCard);
-        inRow.setCashAmount(toCard == null ? req.getToAmount() : BigDecimal.ZERO);
-        inRow.setDescription(baseDesc);
-        inRow.setTransactionDate(req.getTransactionDate());
-        inRow.setNote(buildExchangeNote(req, true));
-
-        Transaction savedOut = transactionRepository.save(outRow);
-        Transaction savedIn = transactionRepository.save(inRow);
-        savedOut.setTransferPairId(savedOut.getId());
-        savedIn.setTransferPairId(savedOut.getId());
-        transactionRepository.save(savedOut);
-        transactionRepository.save(savedIn);
-
-        return List.of(TransactionResponse.from(savedOut), TransactionResponse.from(savedIn));
-    }
-
-    private String buildExchangeNote(ExchangeRequest req, boolean incomingSide) {
-        String src = req.getFromCardId() != null ? "card" : "cash";
-        String dst = req.getToCardId() != null ? "card" : "cash";
-        // Implied rate, only when meaningful (different currencies).
-        if (req.getFromCurrency() != req.getToCurrency()) {
-            BigDecimal rate = req.getFromAmount().divide(req.getToAmount(), 6, RoundingMode.HALF_UP);
-            return String.format("%s %s %s → %s %s %s · rate %s %s/%s",
-                    req.getFromAmount(), req.getFromCurrency(), src,
-                    req.getToAmount(), req.getToCurrency(), dst,
-                    rate, req.getFromCurrency(), req.getToCurrency());
-        }
-        return String.format("%s → %s (same currency)", src, dst);
-    }
-
     // ── Dashboard ─────────────────────────────────────────────────────────────
 
     @Transactional(readOnly = true)
@@ -328,18 +229,14 @@ public class TransactionService {
     }
 
     /**
-     * Net worth = spendable wallet money across ALL currencies + the current value of every
-     * investment / savings goal, all FX-converted into the requested display currency. Unlike
-     * spendableBalance (this currency's wallets only), this is the full "everything I own" figure.
+     * Net worth = spendable wallet money + the current value of every investment / savings
+     * goal. Unlike spendableBalance (wallets only), this is the full "everything I own" figure.
      */
     private BigDecimal computeNetWorth(Currency display) {
-        BigDecimal total = BigDecimal.ZERO;
-        for (Currency c : Currency.values()) {
-            total = total.add(fx.convert(computeAvailableBalance(c), c, display));
-        }
+        BigDecimal total = computeAvailableBalance(display);
         for (Investment i : investmentRepository.findAll()) {
             BigDecimal value = i.getCurrentValue() != null ? i.getCurrentValue() : i.getInvestedAmount();
-            if (value != null) total = total.add(fx.convert(value, i.getCurrency(), display));
+            if (value != null) total = total.add(value);
         }
         return total;
     }
@@ -376,7 +273,7 @@ public class TransactionService {
                 FROM transactions
                 WHERE currency = :currency
                   AND EXTRACT(YEAR FROM transaction_date) = :year
-                  AND (sub_type IS NULL OR sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT', 'EXCHANGE_IN', 'EXCHANGE_OUT'))
+                  AND (sub_type IS NULL OR sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT'))
                 GROUP BY EXTRACT(MONTH FROM transaction_date)
                 ORDER BY EXTRACT(MONTH FROM transaction_date)
                 """)
@@ -413,7 +310,7 @@ public class TransactionService {
                 FROM transactions t
                 JOIN categories c ON c.id = t.category_id
                 WHERE t.type = :type AND t.currency = :currency
-                  AND (t.sub_type IS NULL OR t.sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT', 'EXCHANGE_IN', 'EXCHANGE_OUT'))
+                  AND (t.sub_type IS NULL OR t.sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT'))
                 """);
         if (year != null)  sql.append(" AND EXTRACT(YEAR  FROM t.transaction_date) = :year");
         if (month != null) sql.append(" AND EXTRACT(MONTH FROM t.transaction_date) = :month");
@@ -459,7 +356,7 @@ public class TransactionService {
         switch (req.getSubType()) {
             case LOAN_RECEIVED -> {
                 LoanTakenRequest lt = new LoanTakenRequest();
-                lt.setLenderName(name != null ? name : desc);
+                lt.setLenderName(firstNonBlank(name, desc, "Lender"));
                 lt.setTotalAmount(req.getAmount());
                 lt.setCurrency(req.getCurrency());
                 lt.setBorrowedDate(req.getTransactionDate());
@@ -470,7 +367,7 @@ public class TransactionService {
             }
             case LOAN_GIVEN -> {
                 LoanGivenRequest lg = new LoanGivenRequest();
-                lg.setDebtorName(name != null ? name : desc);
+                lg.setDebtorName(firstNonBlank(name, desc, "Borrower"));
                 lg.setTotalAmount(req.getAmount());
                 lg.setCurrency(req.getCurrency());
                 lg.setLentDate(req.getTransactionDate());
@@ -494,7 +391,9 @@ public class TransactionService {
                     financeService.addFundsToInvestment(req.getInvestmentId(), req.getAmount());
                 } else {
                     InvestmentRequest ir = new InvestmentRequest();
-                    ir.setName(name != null ? name : desc);
+                    // Investment.name is NOT NULL — never let a blank description reach it,
+                    // or the constraint violation rolls the whole transaction back.
+                    ir.setName(firstNonBlank(name, desc, "Investment"));
                     ir.setType(req.getInvestmentType() != null ? req.getInvestmentType() : InvestmentType.OTHER);
                     ir.setInvestedAmount(req.getAmount());
                     ir.setCurrency(req.getCurrency());
@@ -503,8 +402,24 @@ public class TransactionService {
                     financeService.createInvestmentFromTransaction(ir, transactionId);
                 }
             }
+            case EMERGENCY_CONTRIBUTION -> {
+                // Only "top up an existing emergency fund" applies here. A bare
+                // EMERGENCY_CONTRIBUTION with no investmentId (the Emergencies-tab shape) has
+                // no linked record to create — the tx alone feeds the Emergency bucket.
+                if (req.getInvestmentId() != null) {
+                    financeService.addFundsToInvestment(req.getInvestmentId(), req.getAmount());
+                }
+            }
             default -> { /* no auto-create for REGULAR / TRANSFER / LOAN_REPAYMENT / BANK_LOAN_PAYMENT */ }
         }
+    }
+
+    /** First non-blank of the candidates; the last one is the guaranteed fallback. */
+    private static String firstNonBlank(String... candidates) {
+        for (String c : candidates) {
+            if (c != null && !c.isBlank()) return c.trim();
+        }
+        return "—";
     }
 
     private void syncFinanceRecordOnUpdate(
@@ -517,7 +432,8 @@ public class TransactionService {
         // If sub-type changed (or moved away from an auto-create sub-type), reverse the old
         // record and recreate from scratch — simpler and avoids subtle field-by-field bugs.
         if (previousSubType != req.getSubType()
-                || (req.getSubType() == TransactionSubType.INVESTMENT
+                || ((req.getSubType() == TransactionSubType.INVESTMENT
+                        || req.getSubType() == TransactionSubType.EMERGENCY_CONTRIBUTION)
                     && !java.util.Objects.equals(previousInvestmentId, req.getInvestmentId()))) {
             reverseAutoCreated(tx, previousAmount, previousSubType, previousInvestmentId);
             autoCreateFinanceRecord(req, tx.getId());
@@ -561,7 +477,7 @@ public class TransactionService {
                         }
                         donationRepository.save(d);
                     });
-            case INVESTMENT -> {
+            case INVESTMENT, EMERGENCY_CONTRIBUTION -> {
                 if (req.getInvestmentId() != null) {
                     // "Add funds to existing" — diff the amount and apply.
                     BigDecimal diff = req.getAmount().subtract(previousAmount);
@@ -597,15 +513,44 @@ public class TransactionService {
                     .ifPresent(loanGivenRepository::delete);
             case DONATION -> donationRepository.findByOriginatingTransactionId(tx.getId())
                     .ifPresent(donationRepository::delete);
-            case INVESTMENT -> {
-                if (investmentId != null) {
-                    financeService.removeFundsFromInvestment(investmentId, amount);
-                } else {
-                    investmentRepository.findByOriginatingTransactionId(tx.getId())
-                            .ifPresent(investmentRepository::delete);
-                }
+            case INVESTMENT, EMERGENCY_CONTRIBUTION -> {
+                // The tx that ORIGINATED an investment deletes the record itself; a
+                // contribution tx (investmentId set) just backs its amount out of the fund.
+                // Originating txs may carry investmentId too, so that check goes first —
+                // otherwise deleting a fund-creating tx would zero the fund's total but
+                // leave the record behind.
+                investmentRepository.findByOriginatingTransactionId(tx.getId()).ifPresentOrElse(
+                        inv -> {
+                            assertNoOtherContributions(inv, tx.getId());
+                            investmentRepository.delete(inv);
+                        },
+                        () -> {
+                            if (investmentId != null) {
+                                financeService.removeFundsFromInvestment(investmentId, amount);
+                            }
+                        });
             }
             default -> { /* no-op */ }
+        }
+    }
+
+    /**
+     * Removing the transaction that created an investment removes the investment too — but its
+     * own contribution transactions would then point at a record that no longer exists (and an
+     * orphaned EMERGENCY_CONTRIBUTION keeps crediting the Emergency bucket forever). Refuse
+     * instead, so the user clears the contributions deliberately. This is the same rule
+     * {@code FinanceService.deleteInvestment} applies from the other direction.
+     */
+    private void assertNoOtherContributions(Investment inv, Long excludedTxId) {
+        List<Transaction> contributions =
+                transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(inv.getId()).stream()
+                        .filter(t -> !java.util.Objects.equals(t.getId(), excludedTxId))
+                        .toList();
+        if (!contributions.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "This transaction created \"" + inv.getName() + "\", which has "
+                    + contributions.size() + " contribution transaction(s) linked to it. "
+                    + "Delete those first.");
         }
     }
 
