@@ -115,6 +115,9 @@ public class DataSeeder implements CommandLineRunner {
         }
         ensureDonationAnonymous();
         ensureBucketCategories();
+        // The factory reset re-seeds through here, so the Uzbek names must be applied on this
+        // path too — otherwise categories come back English-only until the next boot.
+        backfillUzbekCategoryNames();
     }
 
     /**
