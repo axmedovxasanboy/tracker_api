@@ -54,6 +54,9 @@ public class TransactionRequest {
     // When adding funds to an existing investment instead of creating a new one
     private Long investmentId;
 
+    /** Top up an existing loan given instead of creating a new borrower record. */
+    private Long loanGivenId;
+
     /**
      * For LOAN_RECEIVED: month from which repayments start counting toward the Overview
      * tier (passed through to the auto-created LoanTaken). Null → backend defaults to the

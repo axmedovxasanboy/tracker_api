@@ -107,6 +107,10 @@ public class CardService {
     }
 
     private void applyRequest(Card card, CardRequest req) {
+        if (req.getCurrency() != uz.tracker.trackerproject.enums.Currency.UZS) {
+            throw new IllegalArgumentException(
+                    "Cards are UZS-only. USD and EUR exist only as standalone cash pots.");
+        }
         card.setName(req.getName());
         card.setBankName(req.getBankName());
         card.setType(req.getType());

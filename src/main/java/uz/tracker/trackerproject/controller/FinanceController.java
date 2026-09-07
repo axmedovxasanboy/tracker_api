@@ -151,9 +151,11 @@ public class FinanceController {
 
     // ---- Donations ----
 
+    /** @param month YYYY-MM to scope the list to; blank → all time (the previous behaviour). */
     @GetMapping("/donations")
-    public ResponseEntity<List<DonationResponse>> getDonations() {
-        return ResponseEntity.ok(financeService.getAllDonations());
+    public ResponseEntity<List<DonationResponse>> getDonations(
+            @RequestParam(required = false) String month) {
+        return ResponseEntity.ok(financeService.getAllDonations(month));
     }
 
     @PostMapping("/donations")
@@ -174,9 +176,11 @@ public class FinanceController {
 
     // ---- Investments ----
 
+    /** @param month YYYY-MM to scope the list to; blank → all time (the previous behaviour). */
     @GetMapping("/investments")
-    public ResponseEntity<List<InvestmentResponse>> getInvestments() {
-        return ResponseEntity.ok(financeService.getAllInvestments());
+    public ResponseEntity<List<InvestmentResponse>> getInvestments(
+            @RequestParam(required = false) String month) {
+        return ResponseEntity.ok(financeService.getAllInvestments(month));
     }
 
     @PostMapping("/investments")
@@ -220,6 +224,12 @@ public class FinanceController {
         return ResponseEntity.ok(financeService.repayLoanTaken(id, req));
     }
 
+    @PutMapping("/loans-taken/{id}/plan")
+    public ResponseEntity<LoanTakenResponse> setLoanTakenPlan(
+            @PathVariable Long id, @RequestBody java.util.Map<String, java.math.BigDecimal> body) {
+        return ResponseEntity.ok(financeService.setLoanTakenPlan(id, body.get("plannedMonthlyPayment")));
+    }
+
     @PostMapping("/debts/{id}/repay")
     public ResponseEntity<DebtResponse> repayDebt(
             @PathVariable Long id, @Valid @RequestBody RepaymentRequest req) {
@@ -237,6 +247,19 @@ public class FinanceController {
     @PostMapping("/mark-paid")
     public ResponseEntity<MarkPaidResponse> markPaid(@Valid @RequestBody MarkPaidRequest req) {
         return ResponseEntity.status(HttpStatus.CREATED).body(financeService.markPaid(req));
+    }
+
+    /** @param month YYYY-MM; blank → the current month. */
+    @GetMapping("/mark-paid")
+    public ResponseEntity<List<MarkPaidResponse>> listMarks(
+            @RequestParam(required = false) String month) {
+        return ResponseEntity.ok(financeService.listMarks(month));
+    }
+
+    @DeleteMapping("/mark-paid/{id}")
+    public ResponseEntity<Void> deleteMark(@PathVariable Long id) {
+        financeService.deleteMark(id);
+        return ResponseEntity.noContent().build();
     }
 
     // ---- Payment history (per loan/debt) ----

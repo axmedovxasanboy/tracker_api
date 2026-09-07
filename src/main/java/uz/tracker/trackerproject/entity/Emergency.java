@@ -13,8 +13,12 @@ import java.time.LocalDateTime;
 /**
  * Money set aside for emergencies (medical, sudden repairs, etc). Treated as a
  * savings bucket — each row is a contribution to the emergency fund, not a
- * spend FROM it. The Overview "Emergency" allocation tracks the sum of these
- * for the selected month.
+ * spend FROM it.
+ *
+ * <p>The row is a companion to a real EMERGENCY_CONTRIBUTION transaction, which is what the
+ * Overview "Emergency" bucket actually sums — this table is never the money, only the tab's
+ * list. {@link #originatingTransactionId} ties the two together so editing or deleting one
+ * moves the other; rows created before that link exists carry null and are edited list-only.
  */
 @Entity
 @Table(name = "emergencies")
@@ -37,6 +41,10 @@ public class Emergency {
 
     @Column
     private String description;
+
+    /** The mirrored EMERGENCY_CONTRIBUTION transaction. Null for rows created before the link. */
+    @Column(name = "originating_transaction_id")
+    private Long originatingTransactionId;
 
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;

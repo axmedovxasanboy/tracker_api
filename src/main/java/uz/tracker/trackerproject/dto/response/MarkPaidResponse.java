@@ -7,7 +7,7 @@ import uz.tracker.trackerproject.enums.Currency;
 
 import java.math.BigDecimal;
 
-/** Acknowledgement of a recorded "already paid" mark. */
+/** One "already paid" mark — the acknowledgement of a write and the row the user can undo. */
 @Getter @Builder
 public class MarkPaidResponse {
 
@@ -18,6 +18,8 @@ public class MarkPaidResponse {
     private String month;
     private BigDecimal amount;
     private Currency currency;
+    /** The user's own reason for the mark. Carried so a listed mark is recognisable. */
+    private String note;
 
     public static MarkPaidResponse from(MarkPaid m) {
         return MarkPaidResponse.builder()
@@ -28,6 +30,7 @@ public class MarkPaidResponse {
                 .month(m.getMonth() == null ? null : m.getMonth().toString())
                 .amount(m.getAmount())
                 .currency(m.getCurrency())
+                .note(m.getNote())
                 .build();
     }
 }

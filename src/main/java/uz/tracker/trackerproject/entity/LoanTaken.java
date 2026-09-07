@@ -71,6 +71,21 @@ public class LoanTaken {
     @Column(name = "payment_start_date")
     private LocalDate paymentStartDate;
 
+    /**
+     * OPT-IN repayment plan: the fixed amount the user intends to put toward this loan each
+     * month. When set, the tier charges THIS instead of the default 34%-of-original rule —
+     * the point of a big loan you settle in one go later is that 34% of the whole thing is not
+     * what you actually owe monthly.
+     *
+     * <p>Deliberately separate from {@link #monthlyPayment}, which is auto-derived for display
+     * and back-filled on every existing row; keying the tier off that would silently move every
+     * loan already in the database off the 34% rule.
+     *
+     * <p>Null = no plan = default 34% behaviour, so existing rows are untouched.
+     */
+    @Column(name = "planned_monthly_payment", precision = 19, scale = 4)
+    private BigDecimal plannedMonthlyPayment;
+
     @Column(name = "originating_transaction_id")
     private Long originatingTransactionId;
 

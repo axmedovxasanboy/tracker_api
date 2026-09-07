@@ -23,6 +23,7 @@ import uz.tracker.trackerproject.repository.TransactionRepository;
 
 import java.math.BigDecimal;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -47,7 +48,11 @@ public class DataSeeder implements CommandLineRunner {
         // MUST be first: the app is UZS-only now, and Hibernate throws
         // "No enum constant Currency.USD" the moment it reads a legacy non-UZS row.
         // This is raw SQL precisely so it runs before any JPA read below.
-        purgeNonUzsData();
+        // USD/EUR cash pots are supported again (as standalone pots — nothing converts),
+        // so the CHECK constraints Hibernate generated when the enum held only UZS must be
+        // rebuilt, exactly as for sub_type below. `ddl-auto=update` never migrates them,
+        // and the stale constraint rejects the new values at the DB level.
+        rebuildCurrencyCheckConstraints();
 
         // Also before any JPA read — and before the CHECK constraint below is rebuilt from
         // the current enum, which would otherwise fail against the very rows it forbids.
@@ -61,6 +66,11 @@ public class DataSeeder implements CommandLineRunner {
 
         // Legacy STOCKS/CRYPTO investment types were removed — migrate old rows to OTHER first.
         migrateLegacyInvestmentTypes();
+
+        // Freeze which allocation bucket each existing bucket-funding transaction credits, so
+        // editing a holding can no longer re-bucket money that has already been spent — and, for
+        // a closed month, already snapshotted.
+        backfillAllocationBuckets();
 
         // Back-fill kind on any pre-existing categories so the new column has a value everywhere.
         categoryRepository.findAll().forEach(c -> {
@@ -92,7 +102,7 @@ public class DataSeeder implements CommandLineRunner {
         }
         // Idempotent — runs AFTER the default-seed check above so a fresh DB still seeds the full
         // set (adding these early would make count() > 0 and skip it). On an existing DB it adds
-        // the Stocks + Emergency categories if they're missing.
+        // the Emergency category if it's missing.
         ensureBucketCategories();
 
         // Runs last: every default and bucket category now exists, so all of them get
@@ -191,19 +201,17 @@ public class DataSeeder implements CommandLineRunner {
                 cat("Bank Instalment", CategoryType.EXPENSE, "#6366f1", "building",      TransactionSubType.BANK_LOAN_PAYMENT, CategoryKind.GENERIC),
                 cat("Donation",        CategoryType.EXPENSE, "#d946ef", "heart-handshake", TransactionSubType.DONATION,        CategoryKind.GENERIC),
                 cat("Investment",      CategoryType.EXPENSE, "#0ea5e9", "trending-up",   TransactionSubType.INVESTMENT,        CategoryKind.GENERIC),
-                cat("Stocks",          CategoryType.EXPENSE, "#0d9488", "line-chart",    TransactionSubType.STOCK_PURCHASE,    CategoryKind.GENERIC),
                 cat("Emergency Fund",  CategoryType.EXPENSE, "#f43f5e", "shield-alert",  TransactionSubType.EMERGENCY_CONTRIBUTION, CategoryKind.GENERIC),
                 cat("Everyday Spending", CategoryType.EXPENSE, "#94a3b8", "wallet",      TransactionSubType.EVERYDAY_SPENDING, CategoryKind.GENERIC)
         );
     }
 
     /**
-     * Ensure a category exists for the Stocks and Emergency buckets so Overview pays of those
+     * Ensure a category exists for the Emergency bucket so Overview pays of that
      * kinds auto-pick a category. Idempotent and safe on existing databases (where the default
      * seed above doesn't re-run). Only adds one when none already declares that sub-type.
      */
     private void ensureBucketCategories() {
-        ensureCategoryForSubType("Stocks",         "#0d9488", "line-chart",   TransactionSubType.STOCK_PURCHASE);
         ensureCategoryForSubType("Emergency Fund", "#f43f5e", "shield-alert", TransactionSubType.EMERGENCY_CONTRIBUTION);
         ensureCategoryForSubType("Everyday Spending", "#94a3b8", "wallet",    TransactionSubType.EVERYDAY_SPENDING);
     }
@@ -228,51 +236,6 @@ public class DataSeeder implements CommandLineRunner {
      * Idempotent: once the data is clean every statement matches zero rows, so this is a
      * no-op on every later boot.
      */
-    private void purgeNonUzsData() {
-        // Children first: anything pointing at a wallet or record that is about to go.
-        List<String> statements = List.of(
-                "DELETE FROM transactions WHERE card_id IN (SELECT id FROM cards WHERE currency <> 'UZS')",
-                "DELETE FROM transactions WHERE investment_id IN (SELECT id FROM investments WHERE currency <> 'UZS')",
-                "DELETE FROM transactions WHERE monthly_payment_id IN "
-                        + "(SELECT id FROM monthly_payments WHERE currency <> 'UZS')",
-                "DELETE FROM transactions WHERE repaid_loan_taken_id IN "
-                        + "(SELECT id FROM loans_taken WHERE currency <> 'UZS')",
-                "DELETE FROM transactions WHERE repaid_loan_given_id IN "
-                        + "(SELECT id FROM loans_given WHERE currency <> 'UZS')",
-                "DELETE FROM transactions WHERE repaid_debt_id IN (SELECT id FROM debts WHERE currency <> 'UZS')",
-                "DELETE FROM transactions WHERE currency <> 'UZS'",
-                "DELETE FROM month_close_wallets WHERE currency <> 'UZS' "
-                        + "OR card_id IN (SELECT id FROM cards WHERE currency <> 'UZS')",
-                "DELETE FROM mark_paids WHERE currency <> 'UZS'",
-                // Then the records themselves.
-                "DELETE FROM cards WHERE currency <> 'UZS'",
-                "DELETE FROM cash_balances WHERE currency <> 'UZS'",
-                "DELETE FROM investments WHERE currency <> 'UZS'",
-                "DELETE FROM donations WHERE currency <> 'UZS'",
-                "DELETE FROM debts WHERE currency <> 'UZS'",
-                "DELETE FROM loans_taken WHERE currency <> 'UZS'",
-                "DELETE FROM loans_given WHERE currency <> 'UZS'",
-                "DELETE FROM monthly_payments WHERE currency <> 'UZS'",
-                "DELETE FROM emergencies WHERE currency <> 'UZS'",
-                "DELETE FROM bank_loans WHERE currency <> 'UZS'",
-                // The stable-income currency is a setting, not a row — just restamp it.
-                "UPDATE settings SET monthly_stable_income_currency = 'UZS' "
-                        + "WHERE monthly_stable_income_currency IS NOT NULL "
-                        + "AND monthly_stable_income_currency <> 'UZS'");
-
-        int purged = 0;
-        for (String sql : statements) {
-            try {
-                purged += entityManager.createNativeQuery(sql).executeUpdate();
-            } catch (Exception ignored) {
-                // Table not created yet on a virgin DB, or a non-Postgres engine — safe to skip.
-            }
-        }
-        if (purged > 0) {
-            System.out.println("[DataSeeder] UZS-only migration: removed " + purged
-                    + " row(s) denominated in a currency that is no longer supported.");
-        }
-    }
 
     /**
      * The wallet-to-wallet "exchange" feature was removed, along with its two sub-types.
@@ -299,6 +262,49 @@ public class DataSeeder implements CommandLineRunner {
         }
     }
 
+    /**
+     * Fill {@code transactions.allocation_bucket} for every row written before that column existed.
+     *
+     * <p>{@code ddl-auto=update} ADDS a column but never migrates data, so without this every
+     * historical row would fall back to the old read-time derivation for ever, and one tick of a
+     * holding's "savings goal" checkbox would still move money between the Investments and Savings
+     * buckets of a month that is closed and snapshotted. The values written here are exactly what
+     * that derivation returns today, so no figure on any screen changes — what changes is that
+     * they stop being able to move.
+     *
+     * <p>Raw SQL because this is a one-shot pass over the whole table. Idempotent: the WHERE clause
+     * matches only rows that have not been stamped yet, so later boots update nothing.
+     *
+     * <p>The two links to a holding are ORed rather than tried in the read path's order
+     * (investmentId first, then originatingTransactionId) because by construction they resolve to
+     * the same holding: a transaction carries an investmentId only when it tops one up, and only a
+     * holding created FROM a transaction back-references it.
+     */
+    private void backfillAllocationBuckets() {
+        try {
+            int n = entityManager.createNativeQuery("""
+                    UPDATE transactions t SET allocation_bucket = CASE t.sub_type
+                        WHEN 'DONATION' THEN 'DONATION'
+                        WHEN 'EMERGENCY_CONTRIBUTION' THEN 'EMERGENCY'
+                        WHEN 'STOCK_PURCHASE' THEN 'STOCKS'
+                        ELSE CASE WHEN EXISTS (
+                                     SELECT 1 FROM investments i
+                                      WHERE (i.id = t.investment_id OR i.originating_transaction_id = t.id)
+                                        AND i.savings_goal = true)
+                                  THEN 'SAVINGS' ELSE 'INVESTMENTS' END
+                    END
+                    WHERE t.allocation_bucket IS NULL
+                      AND t.sub_type IN ('DONATION', 'EMERGENCY_CONTRIBUTION', 'STOCK_PURCHASE', 'INVESTMENT')
+                    """).executeUpdate();
+            if (n > 0) {
+                System.out.println("[DataSeeder] Recorded the allocation bucket on " + n
+                        + " existing transaction(s); those buckets can no longer shift when a holding is edited.");
+            }
+        } catch (Exception ignored) {
+            // Tables not created yet on a virgin DB — there is nothing to back-fill.
+        }
+    }
+
     private void migrateLegacyInvestmentTypes() {
         try {
             entityManager.createNativeQuery(
@@ -317,6 +323,45 @@ public class DataSeeder implements CommandLineRunner {
      * We do this defensively (catch + swallow) so it can't take the app down if the
      * underlying DB engine isn't Postgres or has a different constraint name scheme.
      */
+    /**
+     * Every currency column carries a Hibernate-generated CHECK constraint listing the enum
+     * members that existed when the column was created. Adding USD/EUR does not update them,
+     * so an insert of a new value fails at the DB level with a constraint violation. Rebuild
+     * each one from today's enum. Idempotent, and safe on a virgin DB (the ALTER is skipped
+     * if the table isn't there yet).
+     */
+    private void rebuildCurrencyCheckConstraints() {
+        String inList = Arrays.stream(Currency.values())
+                .map(v -> "'" + v.name() + "'")
+                .collect(Collectors.joining(", "));
+        // table -> currency column. Hibernate names the constraint <table>_<column>_check.
+        Map<String, String> columns = new LinkedHashMap<>();
+        for (String table : List.of("transactions", "cards", "cash_balances", "investments",
+                "donations", "debts", "loans_taken", "loans_given", "monthly_payments",
+                "emergencies", "bank_loans", "mark_paids", "month_close_wallets")) {
+            columns.put(table, "currency");
+        }
+        columns.put("settings", "monthly_stable_income_currency");
+
+        for (Map.Entry<String, String> e : columns.entrySet()) {
+            String table = e.getKey();
+            String column = e.getValue();
+            String constraint = table + "_" + column + "_check";
+            try {
+                entityManager.createNativeQuery(
+                        "ALTER TABLE " + table + " DROP CONSTRAINT IF EXISTS " + constraint
+                ).executeUpdate();
+                entityManager.createNativeQuery(
+                        "ALTER TABLE " + table + " ADD CONSTRAINT " + constraint +
+                                " CHECK (" + column + " IS NULL OR " + column + " IN (" + inList + "))"
+                ).executeUpdate();
+            } catch (Exception ignored) {
+                // Table not created yet, or a non-Postgres engine — the @Enumerated(STRING)
+                // mapping still stops bogus values being written through JPA.
+            }
+        }
+    }
+
     private void rebuildSubTypeCheckConstraint() {
         String inList = Arrays.stream(TransactionSubType.values())
                 .map(v -> "'" + v.name() + "'")

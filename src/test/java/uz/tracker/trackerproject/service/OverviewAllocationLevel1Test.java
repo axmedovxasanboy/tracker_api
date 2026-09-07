@@ -52,7 +52,7 @@ class OverviewAllocationLevel1Test {
         assertAmount(amt(p, 0), "1000000");   // donation 10%
         assertAmount(amt(p, 1), "500000");    // emergency 5%
         assertAmount(amt(p, 2), "1500000");   // investment 15%
-        assertAmount(amt(p, 3), "500000");    // stocks 5%
+        assertAmount(amt(p, 3), "500000");    // 4th slot: retained in the scenario tuple, no longer surfaced as a bucket
     }
 
     @Test
@@ -65,7 +65,7 @@ class OverviewAllocationLevel1Test {
         assertPct(p, "7", "3", "10", "3");
         assertAmount(amt(p, 0), "490000");
         assertAmount(amt(p, 2), "700000");
-        assertAmount(amt(p, 3), "210000");    // stocks 3%
+        assertAmount(amt(p, 3), "210000");    // 4th slot: retained in the scenario tuple, no longer surfaced as a bucket
     }
 
     @Test
@@ -89,7 +89,7 @@ class OverviewAllocationLevel1Test {
         assertAmount(p.calcBaseUzs(), "8960000");
         assertPct(p, "7", "3", "10", "3");
         assertAmount(amt(p, 2), "896000");
-        assertAmount(amt(p, 3), "268800");    // stocks 3%
+        assertAmount(amt(p, 3), "268800");    // 4th slot: retained in the scenario tuple, no longer surfaced as a bucket
     }
 
     @Test

@@ -96,7 +96,7 @@ public class MonthCloseService {
                     .currency(card.getCurrency()).computedBalance(computed).build());
             spendableNow = spendableNow.add(computed);
         }
-        for (Currency c : Currency.values()) {
+        for (Currency c : Currency.reporting()) {
             BigDecimal cashSum = nz(cashBalanceRepository.sumCashlessTransactionsUpTo(c, monthEnd));
             var pot = cashBalanceRepository.findByCurrency(c);
             if (pot.isEmpty() && cashSum.signum() == 0) continue; // no cash activity in this currency
@@ -108,9 +108,12 @@ public class MonthCloseService {
         }
 
         var income = overviewService.getIncome(month, display);
-        OverviewService.BucketPaid paid = overviewService.computePaidThisMonth(month, display);
-        BigDecimal tagged = paid.donation().add(paid.emergency()).add(paid.investments())
-                .add(paid.stocks()).add(paid.savings());
+        // Marks included, so the preview quotes the same bucket figures the plan does. The
+        // snapshot's arithmetic is built on the recorded half alone, which `taggedRecorded` names
+        // outright — the user sees exactly what will be frozen before committing.
+        OverviewService.BucketPaid marks = overviewService.computeBucketMarks(month);
+        OverviewService.BucketPaid recorded = overviewService.computePaidThisMonth(month, display, false);
+        OverviewService.BucketPaid paid = OverviewService.withBucketMarks(recorded, marks);
 
         return MonthClosePreviewResponse.builder()
                 .month(month.toString())
@@ -126,7 +129,12 @@ public class MonthCloseService {
                 .investments(paid.investments())
                 .stocks(paid.stocks())
                 .savings(paid.savings())
-                .taggedTotal(tagged)
+                .taggedTotal(sumBuckets(paid))
+                .taggedRecorded(sumBuckets(recorded))
+                .markedDonation(marks.donation())
+                .markedEmergency(marks.emergency())
+                .markedInvestments(marks.investments())
+                .markedNotMoved(OverviewService.markedTotal(marks))
                 .spendableNow(spendableNow)
                 .build();
     }
@@ -155,7 +163,12 @@ public class MonthCloseService {
         // anyway, but this keeps the figures unambiguous).
         BigDecimal startUzs = walletBalanceUpTo(priorEnd, Currency.UZS);
         BigDecimal incomeUzs = nz(overviewService.getIncome(month, Currency.UZS).getActualIncome());
-        OverviewService.BucketPaid paid = overviewService.computePaidThisMonth(month, Currency.UZS);
+        // includeMarks = false, and it must stay false: an "already paid" mark moves no tracked
+        // money, so folding it into taggedUzs would shrink everydayUzs = totalSpentUzs − taggedUzs
+        // by money that never left a wallet — permanently, since a closed month can't be reopened.
+        // getMonthSummary adds the marks back on TOP of these columns when it reads the month
+        // again, so nothing the user is looking at changes; only the arithmetic stays honest.
+        OverviewService.BucketPaid paid = overviewService.computePaidThisMonth(month, Currency.UZS, false);
 
         MonthClose close = new MonthClose();
         close.setMonth(monthFirst);
@@ -170,7 +183,7 @@ public class MonthCloseService {
             close.addWallet(walletRow("CARD", card.getId(), card.getCurrency(), computed, enteredBal, delta, txId));
             leftoverUzs = leftoverUzs.add(enteredBal);
         }
-        for (Currency c : Currency.values()) {
+        for (Currency c : Currency.reporting()) {
             BigDecimal cashSum = nz(cashBalanceRepository.sumCashlessTransactionsUpTo(c, monthEnd));
             var pot = cashBalanceRepository.findByCurrency(c);
             boolean requested = entered.containsKey(walletKey("CASH", null, c));
@@ -183,8 +196,7 @@ public class MonthCloseService {
             leftoverUzs = leftoverUzs.add(enteredBal);
         }
 
-        BigDecimal taggedUzs = paid.donation().add(paid.emergency()).add(paid.investments())
-                .add(paid.stocks()).add(paid.savings());
+        BigDecimal taggedUzs = sumBuckets(paid);
         BigDecimal totalSpentUzs = startUzs.add(incomeUzs).subtract(leftoverUzs);
         BigDecimal everydayUzs = totalSpentUzs.subtract(taggedUzs);
 
@@ -210,48 +222,77 @@ public class MonthCloseService {
 
     // ── Monthly-envelope summary (the "earned / spent / left" view) ────────────
 
+    /**
+     * The envelope view for one month. Open and closed months differ in ONE thing — where the
+     * recorded bucket totals come from (live sums vs the frozen snapshot) — and in nothing else.
+     * Marks are folded in on top either way, so closing a month never changes a bucket figure the
+     * user is reading, and the Plan, Home, the bucket tabs and this page cannot disagree.
+     *
+     * <p>Marks are safe to add to a frozen snapshot because they are frozen too: both
+     * {@code FinanceService.markPaid} and {@code FinanceService.deleteMark} go through
+     * {@link #assertMonthOpen}, so a closed month's marks can be neither created nor removed. No
+     * stored MonthClose row is read differently, let alone rewritten — the snapshot keeps its
+     * recorded-only meaning and is reported as {@code taggedRecorded}, which is what
+     * {@code everydaySpend = totalSpent − taggedRecorded} balances against.
+     */
     @Transactional(readOnly = true)
     public MonthSummaryResponse getMonthSummary(YearMonth month, Currency display) {
-        var income = overviewService.getIncome(month, display);
         var closeOpt = monthCloseRepository.findByMonth(month.atDay(1));
+        OverviewService.BucketPaid marks = overviewService.computeBucketMarks(month);
 
+        // Recorded-only bucket totals — real wallet movement. Frozen once the month is closed;
+        // recomputed live while it is open. The rest of this method treats the two identically.
+        OverviewService.BucketPaid recorded;
+        BigDecimal startBalance, income, everydaySpend, totalSpent, leftover;
         if (closeOpt.isPresent()) {
             MonthClose m = closeOpt.get();
-            BigDecimal donation = nz(m.getDonationUzs());
-            BigDecimal emergency = nz(m.getEmergencyUzs());
-            BigDecimal investments = nz(m.getInvestmentsUzs());
-            BigDecimal stocks = nz(m.getStocksUzs());
-            BigDecimal savings = nz(m.getSavingsUzs());
-            return MonthSummaryResponse.builder()
-                    .month(month.toString()).currency(display).closed(true)
-                    .startBalance(nz(m.getStartBalanceUzs()))
-                    .income(nz(m.getIncomeUzs()))
-                    .donation(donation).emergency(emergency).investments(investments)
-                    .stocks(stocks).savings(savings)
-                    .taggedTotal(donation.add(emergency).add(investments).add(stocks).add(savings))
-                    .everydaySpend(nz(m.getEverydaySpendUzs()))
-                    .totalSpent(nz(m.getTotalSpentUzs()))
-                    .leftover(nz(m.getLeftoverUzs()))
-                    .build();
+            recorded = new OverviewService.BucketPaid(
+                    nz(m.getDonationUzs()), nz(m.getEmergencyUzs()), nz(m.getInvestmentsUzs()),
+                    nz(m.getStocksUzs()), nz(m.getSavingsUzs()));
+            startBalance = nz(m.getStartBalanceUzs());
+            income = nz(m.getIncomeUzs());
+            everydaySpend = nz(m.getEverydaySpendUzs());
+            totalSpent = nz(m.getTotalSpentUzs());
+            leftover = nz(m.getLeftoverUzs());
+        } else {
+            recorded = overviewService.computePaidThisMonth(month, display, false);
+            startBalance = walletBalanceUpTo(month.atDay(1).minusDays(1), display);
+            income = nz(overviewService.getIncome(month, display).getActualIncome());
+            // Unknown until the user enters their real end-of-month balances at close.
+            everydaySpend = null;
+            totalSpent = null;
+            leftover = null;
         }
 
-        // Open month — everyday/total/leftover are unknown until close.
-        LocalDate priorEnd = month.atDay(1).minusDays(1);
-        OverviewService.BucketPaid paid = overviewService.computePaidThisMonth(month, display);
-        BigDecimal tagged = paid.donation().add(paid.emergency()).add(paid.investments())
-                .add(paid.stocks()).add(paid.savings());
+        OverviewService.BucketPaid shown = OverviewService.withBucketMarks(recorded, marks);
+
         return MonthSummaryResponse.builder()
-                .month(month.toString()).currency(display).closed(false)
-                .startBalance(walletBalanceUpTo(priorEnd, display))
-                .income(nz(income.getActualIncome()))
-                .donation(paid.donation()).emergency(paid.emergency()).investments(paid.investments())
-                .stocks(paid.stocks()).savings(paid.savings())
-                .taggedTotal(tagged)
-                .everydaySpend(null).totalSpent(null).leftover(null)
+                .month(month.toString()).currency(display).closed(closeOpt.isPresent())
+                .startBalance(startBalance)
+                .income(income)
+                .donation(shown.donation()).emergency(shown.emergency()).investments(shown.investments())
+                .stocks(shown.stocks()).savings(shown.savings())
+                .taggedTotal(sumBuckets(shown))
+                .taggedRecorded(sumBuckets(recorded))
+                .markedDonation(marks.donation())
+                .markedEmergency(marks.emergency())
+                .markedInvestments(marks.investments())
+                .markedNotMoved(OverviewService.markedTotal(marks))
+                .everydaySpend(everydaySpend)
+                .totalSpent(totalSpent)
+                .leftover(leftover)
                 .build();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Σ of a month's five bucket figures. The preview, the close and the summary all quote this
+     * sum; writing it out three times is how one of them once ended up dropping a bucket.
+     */
+    private static BigDecimal sumBuckets(OverviewService.BucketPaid p) {
+        return p.donation().add(p.emergency()).add(p.investments()).add(p.stocks()).add(p.savings());
+    }
 
     /** Returns the reason this month cannot be closed, or null when it can. */
     private String closeBlockedReason(YearMonth month, boolean alreadyClosed) {
@@ -272,7 +313,7 @@ public class MonthCloseService {
                     .add(nz(cardRepository.sumTransactionsByCardIdUpTo(card.getId(), end)));
             total = total.add(bal);
         }
-        for (Currency c : Currency.values()) {
+        for (Currency c : Currency.reporting()) {
             BigDecimal cashSum = nz(cashBalanceRepository.sumCashlessTransactionsUpTo(c, end));
             BigDecimal init = cashBalanceRepository.findByCurrency(c)
                     .map(p -> nz(p.getInitialBalance())).orElse(BigDecimal.ZERO);

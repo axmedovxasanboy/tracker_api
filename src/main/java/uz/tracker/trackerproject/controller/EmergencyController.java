@@ -18,9 +18,11 @@ public class EmergencyController {
 
     private final EmergencyService service;
 
+    /** @param month YYYY-MM to scope the list to; blank → all time (the previous behaviour). */
     @GetMapping
-    public ResponseEntity<List<EmergencyResponse>> getAll() {
-        return ResponseEntity.ok(service.getAll());
+    public ResponseEntity<List<EmergencyResponse>> getAll(
+            @RequestParam(required = false) String month) {
+        return ResponseEntity.ok(service.getAll(month));
     }
 
     @PostMapping

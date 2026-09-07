@@ -22,6 +22,12 @@ public class AllocationLedgerResponse {
     private boolean missingStableIncome;
     private boolean beforeTrackingStart; // viewed month precedes the configured tracking start
     private String trackingStartMonth;   // YYYY-MM the ledger will start from (null when unset)
+    /**
+     * True when the viewed month still has unpaid mandatory subscriptions. The tier withholds
+     * its whole allocation in that state, so the ledger withholds its dues too — otherwise the
+     * header prints a concrete monthly ask directly above "guidance unavailable".
+     */
+    private boolean subscriptionsPending;
 
     private BigDecimal stableIncome;     // selected month, display currency
     private BigDecimal bonusThisMonth;   // bonus-tagged income received in the selected month
@@ -49,7 +55,9 @@ public class AllocationLedgerResponse {
         private String label;
         private BigDecimal percent;       // selected month % (null = not recommended this month)
         private BigDecimal recommended;   // selected month target (stable + bonus) × %
-        private BigDecimal paid;          // paid in the selected month
+        private BigDecimal paid;          // paid in the selected month (recorded + marks)
+        /** Portion of {@link #paid} that came from "already paid" marks — no money moved. */
+        private BigDecimal marked;
         private BigDecimal carried;       // net balance from previous months (negative = ahead)
         private BigDecimal outstanding;   // max(0, running balance through selected month)
         private BigDecimal effectivePercent; // paid ÷ (stable + bonus) this month, as a % (null when nothing paid)

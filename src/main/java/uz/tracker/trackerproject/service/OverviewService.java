@@ -47,7 +47,10 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
@@ -94,7 +97,7 @@ public class OverviewService {
         // Sum this month's INCOME transactions. Iterating the enum keeps this working
         // unchanged if more currencies are ever reintroduced.
         BigDecimal actual = BigDecimal.ZERO;
-        for (Currency c : Currency.values()) {
+        for (Currency c : Currency.reporting()) {
             BigDecimal sum = transactionRepository.sumByTypeCurrencyDateRange(
                     TransactionType.INCOME, c, start, end);
             if (sum == null || sum.signum() == 0) continue;
@@ -143,6 +146,7 @@ public class OverviewService {
         BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(today);
         BigDecimal loanTaken34Uzs = sumLoanTaken34Uzs(month);
         BigDecimal debtRows34Uzs = sumDebtRows34Uzs(month);
+        BigDecimal plannedSetAsideUzs = sumLoanTakenPlannedUzs(month);
         BigDecimal loanInstallmentsUzs = bankUzs;
         BigDecimal debt34Uzs = loanTaken34Uzs.add(debtRows34Uzs);
         BigDecimal debtPaymentsUzs = loanInstallmentsUzs.add(debt34Uzs);
@@ -165,7 +169,10 @@ public class OverviewService {
         BigDecimal allocBaseUzs = clampZero(leftMoneyUzs.subtract(debtPaymentsUzs));
 
         // Paid-this-month per bucket (display currency), including "already paid" bucket marks.
-        BucketPaid paid = withBucketMarks(computePaidThisMonth(month, displayCurrency), month, displayCurrency);
+        // The marks are also carried on their own so each line can say how much of its "paid"
+        // figure never left a wallet — the one number the month view legitimately reports lower.
+        BucketPaid marks = computeBucketMarks(month);
+        BucketPaid paid = withBucketMarks(computePaidThisMonth(month, displayCurrency, false), marks);
 
         // Paid-this-month for the two debt-pay actions, so the guidance card can show
         // "you've paid X of Y this month" without the tier itself shifting.
@@ -187,19 +194,22 @@ public class OverviewService {
 
         TierAllocation allocation;
         if (missingIncome) {
-            allocation = notDefinedAllocation("Set monthly income to see allocation guidance.");
+            allocation = notDefinedAllocation("page.plan.note.setIncome", Map.of(),
+                    "Set monthly income to see allocation guidance.");
         } else if (beforeTrackingStart) {
-            allocation = notDefinedAllocation(
+            allocation = notDefinedAllocation("page.plan.note.trackingStarts",
+                    Map.of("month", trackingStart.toString()),
                     "Allocation tracking starts " + monthLabel(trackingStart)
                             + " — guidance is paused until then.");
         } else if (subscriptionsPending) {
-            allocation = notDefinedAllocation(
+            allocation = notDefinedAllocation("page.plan.note.subscriptionsPending",
+                    Map.of("month", month.toString()),
                     "Pay your mandatory subscription(s) for " + monthLabel(month)
                             + " first — your level and allocation unlock once they're covered.");
         } else {
             allocation = computeAllocation(level, subLevel, incomeUzs, allocBaseUzs, mandatoryUzs,
-                    bankUzs, debt34Uzs, debtRatio, personalLoansRemainingUzs,
-                    displayCurrency, paid, monthPaid);
+                    bankUzs, debt34Uzs, debtRatio, personalLoansRemainingUzs, plannedSetAsideUzs,
+                    displayCurrency, paid, marks, monthPaid, upcomingChargeActions(month, displayCurrency));
         }
 
         return OverviewTierResponse.builder()
@@ -260,8 +270,16 @@ public class OverviewService {
     // ── Allocation ledger (cross-month backlog) ────────────────────────────────
 
     private static final BigDecimal HUNDRED = new BigDecimal("100");
-    private static final String[] LEDGER_BUCKETS = {"DONATION", "EMERGENCY", "INVESTMENTS", "STOCKS"};
-    private static final String[] LEDGER_LABELS = {"Donation", "Emergency", "Investments", "Stocks"};
+    private static final String[] LEDGER_BUCKETS = {"DONATION", "EMERGENCY", "INVESTMENTS"};
+    private static final String[] LEDGER_LABELS = {"Donation", "Emergency", "Investments"};
+    /**
+     * Ledger width. The percentage arrays produced by {@link #computeLevel1Plan} and
+     * {@link #bucketPercents} are still 4 wide — index 3 is the retired Stocks slot, kept
+     * because AllocationRule still has the column — so every ledger loop must be bounded by
+     * THIS, never by the length of a pct array. Hard-coding the bound is what broke the page
+     * when Stocks was dropped from LEDGER_BUCKETS.
+     */
+    private static final int LEDGER_WIDTH = LEDGER_BUCKETS.length;
 
     /**
      * Running allocation ledger from the configured start month to {@code selected}. For each
@@ -309,17 +327,32 @@ public class OverviewService {
                     .build();
         }
 
+        // Mandatory subscriptions gate the tier's whole allocation (getTier), so they must gate
+        // the ledger's dues too — otherwise the Overview header prints a concrete monthly ask
+        // directly above the cards saying guidance is unavailable. Called once, never per month.
+        if (!pendingSubscriptions(selected).isEmpty()) {
+            return AllocationLedgerResponse.builder()
+                    .currency(display)
+                    .startMonth(start.toString())
+                    .selectedMonth(selected.toString())
+                    .subscriptionsPending(true)
+                    .buckets(List.of())
+                    .months(List.of())
+                    .build();
+        }
+
         BigDecimal stableUzs = s.getMonthlyStableIncome();
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
         Integer level = computeLevel(stableUzs.subtract(mandatoryUzs));
         LocalDate today = LocalDate.now();
 
-        BigDecimal[] totalRec = {BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO};
-        BigDecimal[] totalPaid = {BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO};
-        BigDecimal[] prevBalance = {BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO};
-        BigDecimal[] recSelected = {BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO};
-        BigDecimal[] paidSelected = {BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO};
-        String[] pctSelected = new String[4];
+        BigDecimal[] totalRec = zeros();
+        BigDecimal[] totalPaid = zeros();
+        BigDecimal[] prevBalance = zeros();
+        BigDecimal[] recSelected = zeros();
+        BigDecimal[] paidSelected = zeros();
+        BigDecimal[] markedSelected = zeros();
+        String[] pctSelected = new String[LEDGER_WIDTH];
         BigDecimal bonusSelectedUzs = BigDecimal.ZERO;
         BigDecimal allocBaseSelectedUzs = BigDecimal.ZERO;
         String subLevelSelected = null;
@@ -351,15 +384,18 @@ public class OverviewService {
             }
             BigDecimal allocBaseUzs = clampZero(stableUzs.subtract(mandatoryUzs).subtract(debtPaymentsUzs));
 
-            BucketPaid paidUzs = withBucketMarks(computePaidThisMonth(m, Currency.UZS), m, Currency.UZS);
-            BigDecimal[] paidArr = {paidUzs.donation(), paidUzs.emergency(), paidUzs.investments(), paidUzs.stocks()};
+            // Marks read once per month and folded in here, so the loop never queries them twice.
+            BucketPaid marksUzs = computeBucketMarks(m);
+            BucketPaid paidUzs = withBucketMarks(computePaidThisMonth(m, Currency.UZS, false), marksUzs);
+            BigDecimal[] paidArr = {paidUzs.donation(), paidUzs.emergency(), paidUzs.investments()};
+            BigDecimal[] markedArr = {marksUzs.donation(), marksUzs.emergency(), marksUzs.investments()};
 
             boolean isSelected = m.equals(selected);
             boolean monthHasActivity = false;
             BigDecimal monthNetUzs = BigDecimal.ZERO;
-            List<MonthBucketLine> lines = new ArrayList<>(4);
+            List<MonthBucketLine> lines = new ArrayList<>(LEDGER_WIDTH);
 
-            for (int b = 0; b < 4; b++) {
+            for (int b = 0; b < LEDGER_WIDTH; b++) {
                 BigDecimal recUzs = pct[b] == null ? BigDecimal.ZERO
                         : allocBaseUzs.multiply(new BigDecimal(pct[b]), MC).divide(HUNDRED, MC);
                 BigDecimal paidB = paidArr[b];
@@ -371,6 +407,7 @@ public class OverviewService {
                 else {
                     recSelected[b] = recUzs;
                     paidSelected[b] = paidB;
+                    markedSelected[b] = markedArr[b];
                     pctSelected[b] = pct[b];
                 }
                 monthNetUzs = monthNetUzs.add(net);
@@ -412,12 +449,12 @@ public class OverviewService {
 
         // Effective-% denominator is the selected month's allocation base (= available / left balance).
         BigDecimal incomeBaseSelUzs = allocBaseSelectedUzs;
-        List<BucketLedger> buckets = new ArrayList<>(4);
+        List<BucketLedger> buckets = new ArrayList<>(LEDGER_WIDTH);
         BigDecimal totalDueNowUzs = BigDecimal.ZERO;
         BigDecimal carriedPrevUzs = BigDecimal.ZERO;
         BigDecimal dueThisMonthUzs = BigDecimal.ZERO;
 
-        for (int b = 0; b < 4; b++) {
+        for (int b = 0; b < LEDGER_WIDTH; b++) {
             BigDecimal balance = totalRec[b].subtract(totalPaid[b]);          // net through selected
             BigDecimal outstanding = balance.signum() > 0 ? balance : BigDecimal.ZERO;
             BigDecimal carried = prevBalance[b];                              // can be negative (ahead)
@@ -432,6 +469,7 @@ public class OverviewService {
                     .percent(pctSelected[b] == null ? null : new BigDecimal(pctSelected[b]))
                     .recommended(recSelected[b])
                     .paid(paidSelected[b])
+                    .marked(markedSelected[b])
                     .carried(carried)
                     .outstanding(outstanding)
                     .effectivePercent(effPct)
@@ -465,6 +503,13 @@ public class OverviewService {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    /** A ledger-width accumulator seeded with zeros. */
+    private static BigDecimal[] zeros() {
+        BigDecimal[] a = new BigDecimal[LEDGER_WIDTH];
+        Arrays.fill(a, BigDecimal.ZERO);
+        return a;
+    }
+
     private BigDecimal sumActiveSubscriptionsUzs() {
         BigDecimal total = BigDecimal.ZERO;
         for (MonthlyPayment m : monthlyPaymentRepository.findAll()) {
@@ -480,7 +525,7 @@ public class OverviewService {
         LocalDate start = month.atDay(1);
         LocalDate end = month.atEndOfMonth();
         BigDecimal total = BigDecimal.ZERO;
-        for (Currency c : Currency.values()) {
+        for (Currency c : Currency.reporting()) {
             BigDecimal sum = transactionRepository.sumBonusIncomeByCurrencyDateRange(c, start, end);
             if (sum != null && sum.signum() != 0) {
                 total = total.add(sum);
@@ -514,12 +559,93 @@ public class OverviewService {
     private BigDecimal sumLoanTaken34Uzs(YearMonth month) {
         BigDecimal total = BigDecimal.ZERO;
         for (LoanTaken l : loanTakenRepository.findAll()) {
-            BigDecimal charge = debtMonthlyCharge(l.getTotalAmount(), l.getPaidAmount());
+            // A loan with an agreed monthly plan costs that, not 34% of the whole sum. Still
+            // capped at what is actually left, so the final month tops out and the debt clears.
+            BigDecimal charge = plannedOrDefaultCharge(l);
             if (charge.signum() <= 0) continue;
             if (!hasStartedBy(l.getPaymentStartDate(), month)) continue;
             total = total.add(charge);
         }
         return total;
+    }
+
+    /**
+     * The monthly charge for one borrowed loan: the user's own repayment plan when they set one
+     * (capped at the residual), otherwise the default 34%-of-original rule.
+     */
+    static BigDecimal plannedOrDefaultCharge(LoanTaken l) {
+        BigDecimal planned = l.getPlannedMonthlyPayment();
+        if (planned == null || planned.signum() <= 0) {
+            return debtMonthlyCharge(l.getTotalAmount(), l.getPaidAmount());
+        }
+        BigDecimal residual = nullToZero(l.getTotalAmount()).subtract(nullToZero(l.getPaidAmount()));
+        if (residual.signum() <= 0) return BigDecimal.ZERO;
+        return planned.min(residual);
+    }
+
+    /**
+     * This month's total across loans the user has put on a repayment PLAN. This is the
+     * "set aside" figure: it belongs in the allocation as its own ask, not folded into the
+     * 34% pay-down, because it is a number the user chose rather than one the rule imposed.
+     */
+    private BigDecimal sumLoanTakenPlannedUzs(YearMonth month) {
+        BigDecimal total = BigDecimal.ZERO;
+        for (LoanTaken l : loanTakenRepository.findAll()) {
+            if (l.getPlannedMonthlyPayment() == null || l.getPlannedMonthlyPayment().signum() <= 0) continue;
+            if (!hasStartedBy(l.getPaymentStartDate(), month)) continue;
+            total = total.add(plannedOrDefaultCharge(l));
+        }
+        return total;
+    }
+
+    /**
+     * Repayments that exist but have not STARTED yet, as informational action items.
+     *
+     * <p>A loan whose payment-start month is still in the future is excluded from every figure
+     * on this page — no 34% charge, no set-aside. That is correct, but silently correct: the
+     * user sets a 500,000/mo plan, sees nothing appear anywhere, and reasonably concludes the
+     * plan was not saved. Naming the money and the month it begins costs one line and removes
+     * the whole class of confusion.
+     *
+     * <p>These carry no {@code action}, so they never lock the allocation or ask to be paid.
+     */
+    private List<ActionItem> upcomingChargeActions(YearMonth month, Currency cur) {
+        List<ActionItem> upcoming = new ArrayList<>();
+        for (LoanTaken l : loanTakenRepository.findAll()) {
+            LocalDate startsOn = l.getPaymentStartDate();
+            if (startsOn == null || hasStartedBy(startsOn, month)) continue;
+            BigDecimal charge = plannedOrDefaultCharge(l);
+            if (charge.signum() <= 0) continue;
+            boolean planned = l.getPlannedMonthlyPayment() != null
+                    && l.getPlannedMonthlyPayment().signum() > 0;
+            String name = orEmpty(l.getLenderName());
+            String amount = formatNumber(charge) + " " + cur;
+            YearMonth starts = YearMonth.from(startsOn);
+            upcoming.add(info(
+                    planned ? "page.plan.note.loanPlanNotStarted" : "page.plan.note.loanChargeNotStarted",
+                    Map.of("name", name, "amount", amount, "month", starts.toString()),
+                    name + ": "
+                    + (planned ? "your plan of " : "the 34% charge of ")
+                    + amount + "/mo starts "
+                    + monthLabel(starts)
+                    + " — not counted this month. Edit the loan to start it sooner."));
+        }
+        for (Debt d : debtRepository.findAll()) {
+            LocalDate startsOn = d.getPaymentStartDate();
+            if (startsOn == null || hasStartedBy(startsOn, month)) continue;
+            BigDecimal charge = debtMonthlyCharge(d.getTotalAmount(), d.getPaidAmount());
+            if (charge.signum() <= 0) continue;
+            String name = orEmpty(d.getCreditorName());
+            String amount = formatNumber(charge) + " " + cur;
+            YearMonth starts = YearMonth.from(startsOn);
+            upcoming.add(info("page.plan.note.debtChargeNotStarted",
+                    Map.of("name", name, "amount", amount, "month", starts.toString()),
+                    name + ": the 34% charge of "
+                    + amount + "/mo starts "
+                    + monthLabel(starts)
+                    + " — not counted this month. Edit the debt to start it sooner."));
+        }
+        return upcoming;
     }
 
     /** 34% of original (capped) across active Debt rows. */
@@ -608,6 +734,9 @@ public class OverviewService {
     private BigDecimal sumPersonalLoansRemainingUzs(YearMonth month) {
         BigDecimal total = BigDecimal.ZERO;
         for (LoanTaken l : loanTakenRepository.findAll()) {
+            // A loan on a plan is asked for at its plan amount instead; charging 34% of its
+            // remaining here as well would demand the money twice.
+            if (l.getPlannedMonthlyPayment() != null && l.getPlannedMonthlyPayment().signum() > 0) continue;
             BigDecimal remaining = nullToZero(l.getTotalAmount()).subtract(nullToZero(l.getPaidAmount()));
             if (remaining.signum() <= 0) continue;
             if (!hasStartedBy(l.getPaymentStartDate(), month)) continue;
@@ -642,7 +771,7 @@ public class OverviewService {
         LocalDate end = month.atEndOfMonth();
         BigDecimal bank = BigDecimal.ZERO;
         BigDecimal personal = BigDecimal.ZERO;
-        for (Currency c : Currency.values()) {
+        for (Currency c : Currency.reporting()) {
             BigDecimal bankSum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.BANK_LOAN_PAYMENT, c, start, end);
             if (bankSum != null && bankSum.signum() > 0) {
@@ -669,13 +798,16 @@ public class OverviewService {
     // ── "Already paid" marks ──────────────────────────────────────────────────
 
     /**
-     * Fold "already paid" BUCKET marks for {@code month} into a BucketPaid (display currency).
-     * Applied only at the tier / ledger layer — the month-close reconciliation uses the raw
-     * (transaction-based) figures, since a mark moves no tracked money.
+     * The "already paid" BUCKET marks for {@code month}, on their own — money the user declared
+     * settled without recording a transaction. Every screen that quotes a bucket total needs
+     * this same sum, either folded in (the plan's figure) or named beside the recorded figure
+     * (the month view), so it lives in one place rather than being re-derived per caller.
+     *
+     * <p>Savings is always zero: SAVINGS is not a markable bucket (see FinanceService.MARK_BUCKETS).
      */
-    private BucketPaid withBucketMarks(BucketPaid base, YearMonth month, Currency display) {
-        BigDecimal donation = base.donation(), emergency = base.emergency();
-        BigDecimal investments = base.investments(), stocks = base.stocks();
+    BucketPaid computeBucketMarks(YearMonth month) {
+        BigDecimal donation = BigDecimal.ZERO, emergency = BigDecimal.ZERO;
+        BigDecimal investments = BigDecimal.ZERO, stocks = BigDecimal.ZERO;
         for (MarkPaid m : markPaidRepository.findByMonth(month.atDay(1))) {
             if (!"BUCKET".equals(m.getKind()) || m.getBucket() == null) continue;
             BigDecimal amt = m.getAmount();
@@ -687,7 +819,27 @@ public class OverviewService {
                 default -> { }
             }
         }
-        return new BucketPaid(donation, emergency, investments, stocks, base.savings());
+        return new BucketPaid(donation, emergency, investments, stocks, BigDecimal.ZERO);
+    }
+
+    /** Σ of every BUCKET mark for a month — the part of a bucket total that moved no money. */
+    static BigDecimal markedTotal(BucketPaid marks) {
+        return marks.donation().add(marks.emergency()).add(marks.investments()).add(marks.stocks());
+    }
+
+    /**
+     * Fold "already paid" BUCKET marks into a recorded-payments BucketPaid. Package-private and
+     * static because {@link MonthCloseService} folds the same marks onto a CLOSED month's frozen
+     * snapshot columns — the fold has to be one piece of code, or the plan and the month view
+     * drift apart again the moment they each write their own addition.
+     */
+    static BucketPaid withBucketMarks(BucketPaid base, BucketPaid marks) {
+        return new BucketPaid(
+                base.donation().add(marks.donation()),
+                base.emergency().add(marks.emergency()),
+                base.investments().add(marks.investments()),
+                base.stocks().add(marks.stocks()),
+                base.savings());
     }
 
     /** One INVESTMENT transaction rendered as a bucket-history row. */
@@ -707,11 +859,24 @@ public class OverviewService {
 
     /**
      * Does this INVESTMENT transaction fund a savings goal (rather than a plain investment)?
-     * A contribution row carries investmentId; the row that CREATED the holding is instead
-     * referenced by the investment's originatingTransactionId. Unlinked rows (a bare
-     * INVESTMENT transaction whose auto-created record is gone) count as a plain investment.
+     *
+     * <p>The answer is whatever was RECORDED on the row when the money moved. It used to be
+     * re-derived here from the holding's current savingsGoal flag, which stays editable for the
+     * whole life of a holding — so ticking that one checkbox emptied the Investments bucket of a
+     * month that was already closed, on Plan, on the Investments tab and on Home, while Months
+     * went on quoting the frozen month-close snapshot. Ticking "emergency fund" did the same in
+     * reverse (it clears savingsGoal). See {@link AllocationBucket}.
      */
     private boolean isSavingsGoalTx(Transaction t) {
+        if (t.getAllocationBucket() != null) {
+            return AllocationBucket.SAVINGS.equals(t.getAllocationBucket());
+        }
+        // Rows written before the column existed: `ddl-auto=update` adds a column but never fills
+        // it, so DataSeeder back-fills the history on boot and this derivation stays as the
+        // permanent safety net for anything that escapes it — never the normal path.
+        // A contribution row carries investmentId; the row that CREATED the holding is instead
+        // referenced by the investment's originatingTransactionId. Unlinked rows (a bare
+        // INVESTMENT transaction whose auto-created record is gone) count as a plain investment.
         Investment target = null;
         if (t.getInvestmentId() != null) {
             target = investmentRepository.findById(t.getInvestmentId()).orElse(null);
@@ -734,7 +899,7 @@ public class OverviewService {
         return switch (subType) {
             case DONATION -> "DONATION";
             case EMERGENCY_CONTRIBUTION -> "EMERGENCY";
-            case STOCK_PURCHASE -> "STOCKS";
+            case STOCK_PURCHASE -> null; // stocks are no longer an allocation bucket
             case INVESTMENT -> {
                 Investment target = investmentId == null ? null
                         : investmentRepository.findById(investmentId).orElse(null);
@@ -815,7 +980,22 @@ public class OverviewService {
                 .build();
     }
 
+    /**
+     * Paid-this-month per bucket, marks included. This is the figure every screen quotes, so it
+     * is the default; the ONE caller that must not see marks (the irreversible month-close
+     * snapshot) opts out explicitly via the three-argument form below.
+     */
     BucketPaid computePaidThisMonth(YearMonth month, Currency displayCurrency) {
+        return computePaidThisMonth(month, displayCurrency, true);
+    }
+
+    /**
+     * @param includeMarks fold this month's "already paid" BUCKET marks in. True for anything the
+     *        user reads as "paid" (tier, ledger, month summary, close preview). False only for the
+     *        month-close snapshot: a mark moves no tracked money, so counting it there would
+     *        overstate taggedTotal and silently shrink {@code everydaySpend = totalSpent − tagged}.
+     */
+    BucketPaid computePaidThisMonth(YearMonth month, Currency displayCurrency, boolean includeMarks) {
         LocalDate start = month.atDay(1);
         LocalDate end = month.atEndOfMonth();
 
@@ -829,7 +1009,7 @@ public class OverviewService {
         // plus emergency-fund-flagged investments below. Counting the tx (not the Emergency entity)
         // means a contribution recorded via the transaction modal is no longer missed.
         BigDecimal emergency = BigDecimal.ZERO;
-        for (Currency c : Currency.values()) {
+        for (Currency c : Currency.reporting()) {
             BigDecimal sum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.EMERGENCY_CONTRIBUTION, c, start, end);
             if (sum != null && sum.signum() > 0) emergency = emergency.add(sum);
@@ -855,19 +1035,22 @@ public class OverviewService {
 
         // Stocks are tracked in a separate app — the bucket is funded by STOCK_PURCHASE transactions.
         BigDecimal stocks = BigDecimal.ZERO;
-        for (Currency c : Currency.values()) {
+        for (Currency c : Currency.reporting()) {
             BigDecimal sum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.STOCK_PURCHASE, c, start, end);
             if (sum != null && sum.signum() > 0) stocks = stocks.add(sum);
         }
 
-        return new BucketPaid(donation, emergency, investments, stocks, savings);
+        BucketPaid recorded = new BucketPaid(donation, emergency, investments, stocks, savings);
+        return includeMarks ? withBucketMarks(recorded, computeBucketMarks(month)) : recorded;
     }
 
     /**
      * Per-bucket payment history for a month. Returns transactions in the entity's
      * "natural" date field (donationDate / date / purchaseDate), normalised into a
-     * common BucketPayment row shape so the frontend can render uniformly.
+     * common BucketPayment row shape so the frontend can render uniformly, plus the
+     * month's "already paid" marks — the rows must add up to the bucket total shown
+     * above them, and the plan's total counts marks.
      */
     @Transactional(readOnly = true)
     public List<uz.tracker.trackerproject.dto.response.BucketPayment> getBucketPayments(
@@ -875,8 +1058,9 @@ public class OverviewService {
         LocalDate start = month.atDay(1);
         LocalDate end = month.atEndOfMonth();
         List<uz.tracker.trackerproject.dto.response.BucketPayment> rows = new ArrayList<>();
+        String key = bucket.toUpperCase();
 
-        switch (bucket.toUpperCase()) {
+        switch (key) {
             case "DONATION" -> donationRepository.findByDonationDateBetweenOrderByDonationDateDesc(start, end)
                     .forEach(d -> rows.add(uz.tracker.trackerproject.dto.response.BucketPayment.builder()
                             .id(d.getId())
@@ -905,8 +1089,8 @@ public class OverviewService {
                 // transactions, already listed above — no separate by-entity listing needed.
             }
             // Both read the SAME source as computePaidThisMonth (INVESTMENT transactions by
-            // transaction date, split by the target's savingsGoal flag) so the history rows always
-            // add up to the bucket total shown above them.
+            // transaction date, split by the bucket each row recorded when it was written) so the
+            // history rows always add up to the bucket total shown above them.
             case "INVESTMENTS" -> transactionRepository
                     .findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
                             uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT, start, end)
@@ -931,6 +1115,28 @@ public class OverviewService {
                             .build()));
             default -> throw new IllegalArgumentException("Unknown bucket: " + bucket);
         }
+
+        // The marks the tier folds into "Paid" belong here too: without them the panel's rows can
+        // never reach the figure on the card above, which is the whole reason the user opened it.
+        // They carry a MarkPaid id and moved no money, so `marked` tells the client not to treat
+        // the row as an editable Donation / Transaction.
+        for (MarkPaid m : markPaidRepository.findByMonth(start)) {
+            if (!"BUCKET".equals(m.getKind()) || !key.equals(m.getBucket())) continue;
+            rows.add(uz.tracker.trackerproject.dto.response.BucketPayment.builder()
+                    .id(m.getId())
+                    .bucket(key)
+                    .date(m.getMonth())
+                    .amount(m.getAmount())
+                    .nativeAmount(m.getAmount())
+                    .nativeCurrency(m.getCurrency())
+                    .label("Marked as already paid")
+                    .description(m.getNote())
+                    .marked(true)
+                    .build());
+        }
+        rows.sort(Comparator.comparing(
+                uz.tracker.trackerproject.dto.response.BucketPayment::getDate,
+                Comparator.nullsLast(Comparator.reverseOrder())));
         return rows;
     }
 
@@ -946,14 +1152,18 @@ public class OverviewService {
             BigDecimal incomeUzs, BigDecimal allocBaseUzs, BigDecimal mandatoryUzs,
             BigDecimal bankMonthlyUzs,
             BigDecimal debt34Uzs, BigDecimal debtRatio, BigDecimal personalLoansRemainingUzs,
-            Currency displayCurrency, BucketPaid paid, MonthPaid monthPaid) {
+            BigDecimal plannedSetAsideUzs,
+            Currency displayCurrency, BucketPaid paid, BucketPaid marks, MonthPaid monthPaid,
+            List<ActionItem> upcoming) {
 
         if (level == null) {
-            return notDefinedAllocation("You're above the current tier ceiling — guidance not defined yet.");
+            return notDefinedAllocation("page.plan.note.aboveTierCeiling", Map.of(),
+                    "You're above the current tier ceiling — guidance not defined yet.");
         }
         if (level != 1) {
             return computeConfiguredAllocation(level, subLevel, allocBaseUzs, displayCurrency,
-                    bankMonthlyUzs, personalLoansRemainingUzs, paid, monthPaid);
+                    bankMonthlyUzs, personalLoansRemainingUzs, plannedSetAsideUzs, paid, marks,
+                    monthPaid, upcoming);
         }
 
         // Level-1 engine: the SCENARIO (case A/B/C, tight-vs-comfortable split, bucket %s) is still
@@ -964,8 +1174,8 @@ public class OverviewService {
         Level1Plan plan = computeLevel1Plan(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
                 debt34Uzs, debtRatio, minLeftoverUzs(1));
         String[] p = plan.pct();
-        List<AllocationLine> lines = percentLines(allocBaseUzs, displayCurrency, paid,
-                p[0], p[1], p[2], p[3]);
+        List<AllocationLine> lines = percentLines(allocBaseUzs, displayCurrency, paid, marks,
+                p[0], p[1], p[2]);
 
         // Action targets (display currency). Bank installments pay via PayBankInstallmentModal; the
         // 34%-of-debt action (borrowed money + debts) pays via PayPersonalLoanModal.
@@ -974,7 +1184,7 @@ public class OverviewService {
         BigDecimal personalTarget = personalUzs;
 
         List<ActionItem> actions = level1Actions(plan, monthPaid, bankTarget,
-                bankMonthlyUzs, personalTarget, personalUzs, displayCurrency);
+                bankMonthlyUzs, personalTarget, personalUzs, plannedSetAsideUzs, displayCurrency, upcoming);
 
         return TierAllocation.builder()
                 .scenarioKey(plan.scenarioKey())
@@ -1043,35 +1253,52 @@ public class OverviewService {
     /** Level-1 action items per scenario (keeps PAY_BANK / PAY_PERSONAL_LOAN keys for the UI). */
     private List<ActionItem> level1Actions(Level1Plan plan, MonthPaid monthPaid,
             BigDecimal bankTarget, BigDecimal bankMonthlyUzs,
-            BigDecimal personalTarget, BigDecimal personalUzs, Currency cur) {
+            BigDecimal personalTarget, BigDecimal personalUzs,
+            BigDecimal plannedSetAsideUzs, Currency cur, List<ActionItem> upcoming) {
         String key = plan.scenarioKey();
-        if ("1.1".equals(key)) return List.of();
+        // 1.1 is the debt-free scenario, so it asks for nothing — but a repayment that merely
+        // has not STARTED yet is still worth showing, or the money looks as if it vanished.
+        if ("1.1".equals(key)) return List.copyOf(upcoming);
         List<ActionItem> actions = new ArrayList<>();
         if (bankMonthlyUzs.signum() > 0) {
             actions.add(payBank(monthPaid, bankTarget));
         }
-        if (personalUzs.signum() > 0) {
+        // The set-aside is money the user committed to themselves; the 34% pay-down is the
+        // rule's demand on everything else. Showing them as one number hid the plan entirely.
+        if (plannedSetAsideUzs.signum() > 0) {
+            actions.add(setAside(plannedSetAsideUzs, cur, monthPaid));
+        }
+        BigDecimal ruleTarget = personalTarget.subtract(plannedSetAsideUzs);
+        if (personalUzs.signum() > 0 && ruleTarget.signum() > 0) {
+            String amount = formatNumber(ruleTarget) + " " + cur;
             actions.add(ActionItem.builder()
                     .text("Pay at least 34% of your debts / borrowed money (~ "
-                            + formatNumber(personalTarget) + " " + cur + ") this month.")
+                            + amount + ") this month.")
+                    .code("page.plan.action.payDebts34")
+                    .params(Map.of("amount", amount))
                     .action("PAY_PERSONAL_LOAN")
                     .paid(monthPaid.personalLoanRepayments())
-                    .target(personalTarget)
-                    .unlockThreshold(personalTarget)
+                    .target(ruleTarget)
+                    .unlockThreshold(ruleTarget)
                     .build());
         }
         switch (key) {
             case "1.2.1.tight", "1.2.2.tight" ->
-                    actions.add(info("Less than 5M UZS remains after debt — slim allocations until things ease up."));
+                    actions.add(info("page.plan.note.tight", Map.of(),
+                            "Less than 5M UZS remains after debt — slim allocations until things ease up."));
             case "1.2.1.comfortable", "1.2.2.comfortable" ->
-                    actions.add(info("5M+ UZS remains after debt — higher allocations apply."));
+                    actions.add(info("page.plan.note.comfortable", Map.of(),
+                            "5M+ UZS remains after debt — higher allocations apply."));
             case "1.2.3" ->
-                    actions.add(info("Both loan and debt — emergency & stocks are skipped this tier; focus on debt."));
+                    actions.add(info("page.plan.note.loanAndDebt", Map.of(),
+                            "Both loan and debt — emergency & stocks are skipped this tier; focus on debt."));
             case "1.3" ->
-                    actions.add(info("Heavy debt (> 70% of income): only a 2% donation this month. "
+                    actions.add(info("page.plan.note.heavyDebt", Map.of(),
+                            "Heavy debt (> 70% of income): only a 2% donation this month. "
                             + "You may withdraw from the emergency fund if the situation gets really bad."));
             default -> { }
         }
+        actions.addAll(upcoming);
         return actions;
     }
 
@@ -1099,15 +1326,20 @@ public class OverviewService {
     private TierAllocation computeConfiguredAllocation(
             Integer level, String subLevel, BigDecimal incomeBaseUzs, Currency displayCurrency,
             BigDecimal bankMonthlyUzs, BigDecimal personalLoansRemainingUzs,
-            BucketPaid paid, MonthPaid monthPaid) {
+            BigDecimal plannedSetAsideUzs, BucketPaid paid, BucketPaid marks, MonthPaid monthPaid,
+            List<ActionItem> upcoming) {
 
         if (level < 2 || level > 6 || subLevel == null) {
-            return notDefinedAllocation(
+            return notDefinedAllocation("page.plan.note.levelRulesUnset",
+                    Map.of("level", String.valueOf(level)),
                     "Allocation rules for Level " + level + " will be configured by you once you reach this tier.");
         }
         LevelAllocationRule rule = ruleRepository.findBySubLevel(subLevel).orElse(null);
         if (rule == null) {
-            return notDefinedAllocation(
+            // The debt band is in `text` only: it is English prose the client cannot re-derive, and
+            // the tier card already names the band right above this note.
+            return notDefinedAllocation("page.plan.note.subLevelRulesUnset",
+                    Map.of("subLevel", subLevel),
                     "Allocation for Level " + subLevel + " (" + subLevelDebtLabel(subLevel)
                             + ") isn't set yet — open the rules editor from the tier card to define it.");
         }
@@ -1116,20 +1348,24 @@ public class OverviewService {
                 toPctStr(rule.getDonationPercent()), toPctStr(rule.getEmergencyPercent()),
                 toPctStr(rule.getInvestmentsPercent()), toPctStr(rule.getStocksPercent())
         };
-        List<AllocationLine> lines = percentLines(incomeBaseUzs, displayCurrency, paid,
-                p[0], p[1], p[2], p[3]);
+        List<AllocationLine> lines = percentLines(incomeBaseUzs, displayCurrency, paid, marks,
+                p[0], p[1], p[2]);
 
         List<ActionItem> actions = new ArrayList<>();
         if (bankMonthlyUzs.signum() > 0) {
             actions.add(payBank(monthPaid, bankMonthlyUzs));
+        }
+        if (plannedSetAsideUzs.signum() > 0) {
+            actions.add(setAside(plannedSetAsideUzs, displayCurrency, monthPaid));
         }
         if (personalLoansRemainingUzs.signum() > 0) {
             BigDecimal personalTarget = personalLoansRemainingUzs.multiply(PERSONAL_LOAN_PAYDOWN_RATE, MC);
             actions.add(payPersonal(personalTarget, displayCurrency, monthPaid, personalTarget));
         }
         if (rule.getNote() != null && !rule.getNote().isBlank()) {
-            actions.add(info(rule.getNote()));
+            actions.add(userNote(rule.getNote()));
         }
+        actions.addAll(upcoming);
 
         return TierAllocation.builder()
                 .scenarioKey(subLevel)
@@ -1352,14 +1588,37 @@ public class OverviewService {
         }
     }
 
-    /** Action item helpers. */
-    private static ActionItem info(String text) {
+    /**
+     * Action item helpers.
+     *
+     * <p>Every sentence below is composed here, in English, so each carries the translation key
+     * and the values to interpolate alongside it: `text` is what an older client prints, `code` +
+     * `params` are what a current one renders in the viewer's language. Both are built from the
+     * same locals, so the two forms cannot drift apart.
+     */
+    private static ActionItem info(String code, Map<String, String> params, String text) {
+        return ActionItem.builder().text(text).code(code).params(params).build();
+    }
+
+    /**
+     * The user's OWN note from the allocation-rules editor. It carries no code deliberately: the
+     * sentence is theirs, in whichever language they typed it, so there is nothing to translate
+     * and a key would print somebody else's words in its place.
+     */
+    private static ActionItem userNote(String text) {
         return ActionItem.builder().text(text).build();
+    }
+
+    /** Map.of rejects null values, and a counterparty name reaches us from user data. */
+    private static String orEmpty(String s) {
+        return s == null ? "" : s;
     }
 
     private static ActionItem payBank(MonthPaid monthPaid, BigDecimal target) {
         return ActionItem.builder()
                 .text("Pay bank installments this month.")
+                .code("page.plan.actionPayBank")
+                .params(Map.of())
                 .action("PAY_BANK")
                 .paid(monthPaid.bankInstallments())
                 .target(target)
@@ -1369,14 +1628,34 @@ public class OverviewService {
 
     private static ActionItem payPersonal(BigDecimal targetDisplay, Currency displayCurrency,
                                           MonthPaid monthPaid, BigDecimal target) {
+        String amount = formatNumber(targetDisplay) + " " + displayCurrency;
         return ActionItem.builder()
-                .text("Pay at least 34% (~ " + formatNumber(targetDisplay) + " " + displayCurrency
-                        + ") of personal loans this month.")
+                .text("Pay at least 34% (~ " + amount + ") of personal loans this month.")
+                .code("page.plan.actionPayPersonal")
+                .params(Map.of("amount", amount))
                 .action("PAY_PERSONAL_LOAN")
                 .paid(monthPaid.personalLoanRepayments())
                 .target(target)
                 // Personal loans must reach the full 34% target to unlock.
                 .unlockThreshold(target)
+                .build();
+    }
+
+    /**
+     * The repayment plan as its own allocation ask. Same PAY_PERSONAL_LOAN action (it is paid
+     * the same way), but worded as the commitment the user made rather than as the 34% rule.
+     */
+    private static ActionItem setAside(BigDecimal targetDisplay, Currency displayCurrency,
+                                       MonthPaid monthPaid) {
+        String amount = formatNumber(targetDisplay) + " " + displayCurrency;
+        return ActionItem.builder()
+                .text("Set aside " + amount + " this month for your loan repayment plan.")
+                .code("page.plan.action.setAside")
+                .params(Map.of("amount", amount))
+                .action("PAY_PERSONAL_LOAN")
+                .paid(monthPaid.personalLoanRepayments())
+                .target(targetDisplay)
+                .unlockThreshold(targetDisplay)
                 .build();
     }
 
@@ -1401,26 +1680,36 @@ public class OverviewService {
      * that should render as "NO NEED" at this tier. Paid-this-month amounts (already in
      * display currency) come from the BucketPaid context.
      */
-    private List<AllocationLine> percentLines(BigDecimal incomeUzs, Currency displayCurrency, BucketPaid paid,
+    /**
+     * Stocks are no longer an allocation bucket — the owner does not allocate to stocks at all.
+     * The percentage is still computed upstream (it is part of the Level-1 scenario tuple) but
+     * nothing is emitted for it, so it cannot appear in the Overview, the ledger, or a month.
+     */
+    private List<AllocationLine> percentLines(BigDecimal incomeUzs, Currency displayCurrency,
+                                              BucketPaid paid, BucketPaid marks,
                                               String donationPct, String emergencyPct,
-                                              String investmentsPct, String stocksPct) {
-        List<AllocationLine> lines = new ArrayList<>(4);
-        lines.add(line("DONATION",    "Donation",    donationPct,    incomeUzs, displayCurrency, paid.donation()));
-        lines.add(line("EMERGENCY",   "Emergency",   emergencyPct,   incomeUzs, displayCurrency, paid.emergency()));
-        lines.add(line("INVESTMENTS", "Investments", investmentsPct, incomeUzs, displayCurrency, paid.investments()));
-        lines.add(line("STOCKS",      "Stocks",      stocksPct,      incomeUzs, displayCurrency, paid.stocks()));
+                                              String investmentsPct) {
+        List<AllocationLine> lines = new ArrayList<>(3);
+        lines.add(line("DONATION",    "Donation",    donationPct,    incomeUzs, displayCurrency,
+                paid.donation(), marks.donation()));
+        lines.add(line("EMERGENCY",   "Emergency",   emergencyPct,   incomeUzs, displayCurrency,
+                paid.emergency(), marks.emergency()));
+        lines.add(line("INVESTMENTS", "Investments", investmentsPct, incomeUzs, displayCurrency,
+                paid.investments(), marks.investments()));
         return lines;
     }
 
     private AllocationLine line(String bucket, String label, String pctStr,
-                                BigDecimal incomeUzs, Currency displayCurrency, BigDecimal paidDisplay) {
+                                BigDecimal incomeUzs, Currency displayCurrency,
+                                BigDecimal paidDisplay, BigDecimal markedDisplay) {
         if (pctStr == null) {
             // Not recommended at this tier. Still surface paidAmount so the frontend can
             // tell the user "you paid X here even though it's not recommended this month".
             return AllocationLine.builder()
                     .bucket(bucket).label(label).recommended(false)
                     .minPercent(null).minAmount(null)
-                    .paidAmount(paidDisplay).paidPercent(null).remainingAmount(null)
+                    .paidAmount(paidDisplay).markedAmount(markedDisplay)
+                    .paidPercent(null).remainingAmount(null)
                     .build();
         }
         BigDecimal pct = new BigDecimal(pctStr);
@@ -1438,17 +1727,18 @@ public class OverviewService {
                 .minPercent(pct)
                 .minAmount(minAmount)
                 .paidAmount(paidDisplay)
+                .markedAmount(markedDisplay)
                 .paidPercent(paidPercent)
                 .remainingAmount(remaining)
                 .build();
     }
 
-    private TierAllocation notDefinedAllocation(String note) {
+    private TierAllocation notDefinedAllocation(String code, Map<String, String> params, String note) {
         return TierAllocation.builder()
                 .scenarioKey(null)
                 .scenarioLabel("Guidance not yet defined for this tier")
                 .lines(List.of())
-                .actions(List.of(info(note)))
+                .actions(List.of(info(code, params, note)))
                 .build();
     }
 

@@ -11,6 +11,9 @@ public interface MarkPaidRepository extends JpaRepository<MarkPaid, Long> {
     /** All "already paid" marks for a given month (first-of-month). */
     List<MarkPaid> findByMonth(LocalDate month);
 
+    /** The same marks, newest first — the order the "what did I mark?" list is read in. */
+    List<MarkPaid> findByMonthOrderByIdDesc(LocalDate month);
+
     /** Marks for one target (subscription / loan / debt) within a month. */
     List<MarkPaid> findByKindAndRefIdAndMonth(String kind, Long refId, LocalDate month);
 }

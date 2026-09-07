@@ -24,4 +24,12 @@ public class BucketPayment {
     private Currency nativeCurrency;
     private String label;            // recipient name / investment name / "Emergency fund"
     private String description;
+
+    /**
+     * True for an "already paid" mark rather than a real payment: no money left a wallet and
+     * the month-close reconciliation ignores it. {@code id} is then a MarkPaid id, NOT a
+     * Donation / Transaction id — the client must branch on this before offering row actions,
+     * and delete such a row via {@code DELETE /api/v1/finance/mark-paid/{id}}.
+     */
+    private boolean marked;
 }

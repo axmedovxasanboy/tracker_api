@@ -99,6 +99,21 @@ public class FinanceService {
         return DebtResponse.from(debtRepository.save(d));
     }
 
+    /**
+     * Change ONLY the monthly repayment plan. Separate from updateLoanTaken so adjusting the
+     * amount can't touch the loan's terms — that path re-derives monthlyPayment whenever the
+     * total or due date look changed, which has nothing to do with the plan.
+     *
+     * @param amount null or non-positive clears the plan, reverting to the default 34% rule.
+     */
+    @Transactional
+    public LoanTakenResponse setLoanTakenPlan(Long id, BigDecimal amount) {
+        LoanTaken l = loanTakenRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("LoanTaken", id));
+        l.setPlannedMonthlyPayment(amount != null && amount.signum() > 0 ? amount : null);
+        return LoanTakenResponse.from(loanTakenRepository.save(l));
+    }
+
     @Transactional
     public void deleteDebt(Long id) {
         Debt d = debtRepository.findById(id)
@@ -137,6 +152,33 @@ public class FinanceService {
         l.setDescription(req.getDescription());
         if (transactionId != null) l.setOriginatingTransactionId(transactionId);
         return loanGivenRepository.save(l);
+    }
+
+    /**
+     * Lend more to a borrower who asked again. Raises the existing loan's total rather than
+     * opening a second record, so one borrower stays one row and the outstanding figure is
+     * the whole of what they owe.
+     */
+    @Transactional
+    public void addToLoanGiven(Long id, BigDecimal amount) {
+        LoanGiven l = loanGivenRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("LoanGiven", id));
+        BigDecimal current = l.getTotalAmount() != null ? l.getTotalAmount() : BigDecimal.ZERO;
+        l.setTotalAmount(current.add(amount));
+        // Lending again reopens a loan that had been fully repaid.
+        if (l.getStatus() == RecordStatus.PAID) l.setStatus(RecordStatus.PENDING);
+        loanGivenRepository.save(l);
+    }
+
+    /** Reverse of {@link #addToLoanGiven} — used when a top-up transaction is edited or deleted. */
+    @Transactional
+    public void removeFromLoanGiven(Long id, BigDecimal amount) {
+        LoanGiven l = loanGivenRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("LoanGiven", id));
+        BigDecimal current = l.getTotalAmount() != null ? l.getTotalAmount() : BigDecimal.ZERO;
+        BigDecimal next = current.subtract(amount);
+        l.setTotalAmount(next.signum() < 0 ? BigDecimal.ZERO : next);
+        loanGivenRepository.save(l);
     }
 
     @Transactional
@@ -187,6 +229,7 @@ public class FinanceService {
         l.setCurrency(req.getCurrency());
         l.setBorrowedDate(req.getBorrowedDate());
         l.setDueDate(req.getDueDate());
+        l.setPlannedMonthlyPayment(req.getPlannedMonthlyPayment());
         l.setPaymentStartDate(resolvePaymentStart(req.getPaymentStartDate(), req.getBorrowedDate()));
         l.setStatus(req.getStatus() != null ? req.getStatus() : RecordStatus.PENDING);
         l.setDescription(req.getDescription());
@@ -211,6 +254,7 @@ public class FinanceService {
         l.setCurrency(req.getCurrency());
         l.setBorrowedDate(req.getBorrowedDate());
         l.setDueDate(req.getDueDate());
+        l.setPlannedMonthlyPayment(req.getPlannedMonthlyPayment());
         if (req.getPaymentStartDate() != null) {
             l.setPaymentStartDate(req.getPaymentStartDate().withDayOfMonth(1));
         }
@@ -413,9 +457,20 @@ public class FinanceService {
 
     // ---- Donations ----
 
+    /**
+     * @param month YYYY-MM to scope the list to; blank → all time. The tab's headline can only
+     *              agree with the month's Donation bucket if it is reading the same month.
+     */
     @Transactional(readOnly = true)
-    public List<DonationResponse> getAllDonations() {
-        return donationRepository.findAllByOrderByDonationDateDesc().stream().map(DonationResponse::from).toList();
+    public List<DonationResponse> getAllDonations(String month) {
+        if (month == null || month.isBlank()) {
+            return donationRepository.findAllByOrderByDonationDateDesc().stream()
+                    .map(DonationResponse::from).toList();
+        }
+        YearMonth ym = parseMonth(month);
+        return donationRepository
+                .findByDonationDateBetweenOrderByDonationDateDesc(ym.atDay(1), ym.atEndOfMonth())
+                .stream().map(DonationResponse::from).toList();
     }
 
     @Transactional
@@ -427,7 +482,7 @@ public class FinanceService {
                 ? req.getDescription()
                 : "Donation to " + (Boolean.TRUE.equals(req.getAnonymous()) ? "Anonymous" : req.getRecipientName());
         Transaction tx = createBucketTransaction(
-                TransactionSubType.DONATION,
+                TransactionSubType.DONATION, false,
                 req.getAmount(), req.getCurrency(),
                 req.getDonationDate(), req.getCardId(), req.getCategoryId(),
                 description);
@@ -452,6 +507,12 @@ public class FinanceService {
     @Transactional
     public DonationResponse updateDonation(Long id, DonationRequest req) {
         Donation d = donationRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("Donation", id));
+        // Both dates, as TransactionService does: a donation may be edited neither OUT of a closed
+        // month nor INTO one. createDonation is already gated (via createBucketTransaction), and a
+        // closed month reports its frozen Donation total while the plan re-sums the rows live — so
+        // an ungated edit here is the one way left to make those two disagree for ever.
+        monthCloseService.assertMonthOpen(d.getDonationDate());
+        monthCloseService.assertMonthOpen(req.getDonationDate());
         d.setRecipientName(req.getRecipientName());
         d.setAmount(req.getAmount());
         d.setCurrency(req.getCurrency());
@@ -463,15 +524,29 @@ public class FinanceService {
 
     @Transactional
     public void deleteDonation(Long id) {
-        if (!donationRepository.existsById(id)) throw new ResourceNotFoundException("Donation", id);
-        donationRepository.deleteById(id);
+        Donation d = donationRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Donation", id));
+        monthCloseService.assertMonthOpen(d.getDonationDate());
+        donationRepository.delete(d);
     }
 
     // ---- Investments ----
 
+    /**
+     * @param month YYYY-MM to scope the list to; blank → all time. Investments are long-lived
+     *              holdings, so the all-time list stays the default — a month is only useful for
+     *              "what did I put aside in September", never for the portfolio itself.
+     */
     @Transactional(readOnly = true)
-    public List<InvestmentResponse> getAllInvestments() {
-        return investmentRepository.findAllByOrderByPurchaseDateDesc().stream().map(InvestmentResponse::from).toList();
+    public List<InvestmentResponse> getAllInvestments(String month) {
+        if (month == null || month.isBlank()) {
+            return investmentRepository.findAllByOrderByPurchaseDateDesc().stream()
+                    .map(InvestmentResponse::from).toList();
+        }
+        YearMonth ym = parseMonth(month);
+        return investmentRepository
+                .findByPurchaseDateBetweenOrderByPurchaseDateDesc(ym.atDay(1), ym.atEndOfMonth())
+                .stream().map(InvestmentResponse::from).toList();
     }
 
     @Transactional
@@ -491,7 +566,7 @@ public class FinanceService {
         TransactionSubType sub = Boolean.TRUE.equals(req.getEmergencyFund())
                 ? TransactionSubType.EMERGENCY_CONTRIBUTION : TransactionSubType.INVESTMENT;
         Transaction tx = createBucketTransaction(
-                sub,
+                sub, Boolean.TRUE.equals(req.getSavingsGoal()),
                 req.getInvestedAmount(), req.getCurrency(),
                 req.getPurchaseDate(), req.getCardId(), req.getCategoryId(),
                 description);
@@ -514,6 +589,20 @@ public class FinanceService {
         return investmentRepository.save(i);
     }
 
+    /**
+     * Edit a holding's own fields — name, broker, target, the emergency-fund / savings-goal flags.
+     *
+     * <p>Deliberately NOT gated on the month being open. A holding is a long-lived record spanning
+     * many months, most of them open, with no single date to gate on: a blanket gate would
+     * permanently block renaming or re-targeting a holding the moment any month closed. What made
+     * an ungated edit dangerous was that the Investments-vs-Savings split was re-derived on every
+     * read from these flags, so ticking one emptied a CLOSED month's bucket. The split is now
+     * recorded on each funding transaction as it is written (see {@link AllocationBucket}), so
+     * this edit only steers money added from here on. Every figure a month shows is computed from
+     * those transactions, and they are created, edited and deleted only by month-gated paths
+     * ({@link #createInvestment}, {@link #contributeToInvestment}, {@link #deleteInvestment},
+     * TransactionService).
+     */
     @Transactional
     public InvestmentResponse updateInvestment(Long id, InvestmentRequest req) {
         Investment i = investmentRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("Investment", id));
@@ -617,7 +706,7 @@ public class FinanceService {
             TransactionSubType sub = Boolean.TRUE.equals(i.getEmergencyFund())
                     ? TransactionSubType.EMERGENCY_CONTRIBUTION : TransactionSubType.INVESTMENT;
             Transaction tx = createBucketTransaction(
-                    sub,
+                    sub, Boolean.TRUE.equals(i.getSavingsGoal()),
                     req.getAmount(), req.getCurrency(),
                     req.getDate(), req.getCardId(), req.getCategoryId(),
                     description);
@@ -747,7 +836,7 @@ public class FinanceService {
         if (!MARK_KINDS.contains(kind)) {
             throw new IllegalArgumentException("Unknown mark kind: " + req.getKind());
         }
-        YearMonth ym = parseMarkMonth(req.getMonth());
+        YearMonth ym = parseMonth(req.getMonth());
         LocalDate monthFirst = ym.atDay(1);
         settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(monthFirst);
@@ -819,6 +908,61 @@ public class FinanceService {
         return MarkPaidResponse.from(markPaidRepository.save(mark));
     }
 
+    /**
+     * The marks recorded for a month. A mark is the only "paid" figure with no transaction behind
+     * it, so it is also the only one the user cannot find in any list — which is exactly how a
+     * mistyped amount ends up silently inflating the allocation forever. This is that list.
+     *
+     * @param month YYYY-MM; blank → the current month, same rule as {@link #markPaid}.
+     */
+    @Transactional(readOnly = true)
+    public List<MarkPaidResponse> listMarks(String month) {
+        return markPaidRepository.findByMonthOrderByIdDesc(parseMonth(month).atDay(1)).stream()
+                .map(MarkPaidResponse::from).toList();
+    }
+
+    /**
+     * Undo an "already paid" mark. BUCKET / SUBSCRIPTION / BANK marks are pure bookkeeping and just
+     * disappear, but a PERSONAL_LOAN / DEBT mark bumped the entity's paidAmount when it was created
+     * (mirroring a real repayment), so deleting it must back that bump out — otherwise the balance
+     * stays permanently understated and the 34% charge shrinks with it.
+     */
+    @Transactional
+    public void deleteMark(Long id) {
+        MarkPaid mark = markPaidRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("MarkPaid", id));
+        // The close snapshot never counted this mark, but the tier and ledger history for that
+        // month did — so a closed month stays locked here exactly as it is for transactions.
+        monthCloseService.assertMonthOpen(mark.getMonth());
+
+        if (mark.getRefId() != null) {
+            switch (mark.getKind() == null ? "" : mark.getKind()) {
+                case "PERSONAL_LOAN" -> loanTakenRepository.findById(mark.getRefId()).ifPresent(loan -> {
+                    loan.setPaidAmount(clampZero(loan.getPaidAmount().subtract(mark.getAmount())));
+                    loan.setStatus(repaymentStatus(loan.getPaidAmount(), loan.getTotalAmount()));
+                    loanTakenRepository.save(loan);
+                });
+                case "DEBT" -> debtRepository.findById(mark.getRefId()).ifPresent(debt -> {
+                    debt.setPaidAmount(clampZero(debt.getPaidAmount().subtract(mark.getAmount())));
+                    debt.setStatus(repaymentStatus(debt.getPaidAmount(), debt.getTotalAmount()));
+                    debtRepository.save(debt);
+                });
+                default -> { /* SUBSCRIPTION / BANK marks bumped nothing to reverse */ }
+            }
+        }
+        markPaidRepository.delete(mark);
+    }
+
+    /** Where a repayment total leaves a loan / debt after money is added or backed out. */
+    private static RecordStatus repaymentStatus(BigDecimal paid, BigDecimal total) {
+        if (paid.signum() <= 0) return RecordStatus.PENDING;
+        return paid.compareTo(total) >= 0 ? RecordStatus.PAID : RecordStatus.PARTIALLY_PAID;
+    }
+
+    private static BigDecimal clampZero(BigDecimal v) {
+        return v == null || v.signum() < 0 ? BigDecimal.ZERO : v;
+    }
+
     private static Long requireRef(Long refId, String what) {
         if (refId == null) throw new IllegalArgumentException("refId (the " + what + " id) is required.");
         return refId;
@@ -832,7 +976,7 @@ public class FinanceService {
         }
     }
 
-    private static YearMonth parseMarkMonth(String month) {
+    private static YearMonth parseMonth(String month) {
         if (month == null || month.isBlank()) return YearMonth.now();
         try {
             return YearMonth.parse(month.trim());
@@ -890,15 +1034,23 @@ public class FinanceService {
      * record into the Transaction stream so it shows up in the global transactions
      * list. NO {@code originatingTransactionId} loop — caller passes the new tx's
      * id into the bucket entity itself.
+     *
+     * @param savingsGoalTarget whether an INVESTMENT row funds a savings goal; ignored for every
+     *        other sub-type, whose bucket follows from the sub-type alone.
      */
     private Transaction createBucketTransaction(
-            TransactionSubType subType, BigDecimal amount, uz.tracker.trackerproject.enums.Currency currency,
+            TransactionSubType subType, boolean savingsGoalTarget,
+            BigDecimal amount, uz.tracker.trackerproject.enums.Currency currency,
             java.time.LocalDate date, Long cardId, Long categoryId, String description) {
         settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(date);
         Transaction tx = new Transaction();
         tx.setType(TransactionType.EXPENSE);
         tx.setSubType(subType);
+        // Record the bucket now, while the holding's flags are the ones the user is actually
+        // funding. Deriving it later from a flag that stays editable for the life of the holding
+        // is what let one checkbox move money out of a closed month (see AllocationBucket).
+        tx.setAllocationBucket(AllocationBucket.forSubType(subType, savingsGoalTarget));
         tx.setAmount(amount);
         tx.setCurrency(currency);
         tx.setDescription(description);

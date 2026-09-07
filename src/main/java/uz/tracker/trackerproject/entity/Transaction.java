@@ -57,6 +57,24 @@ public class Transaction {
     @Column(name = "investment_id")
     private Long investmentId;
 
+    /**
+     * Which allocation bucket this row credits (DONATION / EMERGENCY / INVESTMENTS / SAVINGS /
+     * STOCKS), decided once when the row is written — see
+     * {@link uz.tracker.trackerproject.service.AllocationBucket}. Null for a row that funds no
+     * bucket, and for rows written before this column existed: `ddl-auto=update` ADDS a column
+     * but never fills it, so DataSeeder back-fills the history once and the read path keeps a
+     * derivation fallback for anything that escapes the back-fill.
+     */
+    @Column(name = "allocation_bucket", length = 32)
+    private String allocationBucket;
+
+    /**
+     * Set when this transaction lends MORE to an existing LoanGiven instead of opening a new
+     * one. Mirrors investmentId: it is what lets a delete/edit back the amount out again.
+     */
+    @Column(name = "loan_given_id")
+    private Long loanGivenId;
+
     @Column(name = "transfer_pair_id")
     private Long transferPairId;
 

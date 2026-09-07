@@ -114,11 +114,13 @@ public class TransactionService {
         BigDecimal previousAmount = existing.getAmount();
         TransactionSubType previousSubType = existing.getSubType();
         Long previousInvestmentId = existing.getInvestmentId();
+        Long previousLoanGivenId = existing.getLoanGivenId();
 
         Transaction transaction = buildTransaction(existing, request);
         Transaction saved = transactionRepository.save(transaction);
 
-        syncFinanceRecordOnUpdate(saved, previousAmount, previousSubType, previousInvestmentId, request);
+        syncFinanceRecordOnUpdate(saved, previousAmount, previousSubType, previousInvestmentId,
+                previousLoanGivenId, request);
         return TransactionResponse.from(saved);
     }
 
@@ -153,22 +155,39 @@ public class TransactionService {
     public List<TransactionResponse> transferBalance(BalanceTransferRequest request) {
         settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(request.getTransactionDate());
-        if (request.getFromCardId().equals(request.getToCardId())) {
+        // A null card id on either side means the CASH pot. Cash is modelled as a
+        // transaction with no card, so a cash↔card transfer is the same expense/income
+        // pair as card↔card — one of the two rows simply has card == null.
+        Long fromId = request.getFromCardId();
+        Long toId = request.getToCardId();
+        if (fromId == null && toId == null) {
+            throw new IllegalArgumentException("A transfer needs a card on at least one side.");
+        }
+        if (fromId != null && fromId.equals(toId)) {
             throw new IllegalArgumentException("Source and destination cards must be different");
         }
-        Card fromCard = cardRepository.findById(request.getFromCardId())
-                .orElseThrow(() -> new ResourceNotFoundException("Card", request.getFromCardId()));
-        Card toCard = cardRepository.findById(request.getToCardId())
-                .orElseThrow(() -> new ResourceNotFoundException("Card", request.getToCardId()));
 
-        if (fromCard.getCurrency() != toCard.getCurrency()) {
+        Card fromCard = fromId == null ? null : cardRepository.findById(fromId)
+                .orElseThrow(() -> new ResourceNotFoundException("Card", fromId));
+        Card toCard = toId == null ? null : cardRepository.findById(toId)
+                .orElseThrow(() -> new ResourceNotFoundException("Card", toId));
+
+        if (fromCard != null && toCard != null && fromCard.getCurrency() != toCard.getCurrency()) {
             throw new IllegalArgumentException(
                     "Cannot transfer between cards with different currencies (" +
                             fromCard.getCurrency() + " → " + toCard.getCurrency() +
                             "). Currency conversion is not supported yet.");
         }
 
-        checkCardBalance(request.getFromCardId(), request.getAmount(), TransactionType.EXPENSE, null);
+        // Cash pots are per-currency and nothing converts, so the cash side always takes
+        // the card side's currency — a transfer can never cross currencies.
+        Currency currency = fromCard != null ? fromCard.getCurrency() : toCard.getCurrency();
+
+        if (fromCard != null) {
+            checkCardBalance(fromId, request.getAmount(), TransactionType.EXPENSE, null);
+        } else {
+            checkCashBalance(currency, request.getAmount());
+        }
 
         String desc = (request.getDescription() != null && !request.getDescription().isBlank())
                 ? request.getDescription() : "Balance transfer";
@@ -176,22 +195,25 @@ public class TransactionService {
         Transaction expense = new Transaction();
         expense.setType(TransactionType.EXPENSE);
         expense.setAmount(request.getAmount());
-        expense.setCurrency(fromCard.getCurrency());
+        expense.setCurrency(currency);
         expense.setCard(fromCard);
+        // Cardless rows must carry cashAmount = amount (see CashBalanceRepository).
+        if (fromCard == null) expense.setCashAmount(request.getAmount());
         expense.setDescription(desc);
         expense.setTransactionDate(request.getTransactionDate());
         expense.setSubType(TransactionSubType.TRANSFER_OUT);
-        expense.setNote("Transfer to " + toCard.getName() + " (•••• " + toCard.getLastFourDigits() + ")");
+        expense.setNote("Transfer to " + walletLabel(toCard));
 
         Transaction income = new Transaction();
         income.setType(TransactionType.INCOME);
         income.setAmount(request.getAmount());
-        income.setCurrency(toCard.getCurrency());
+        income.setCurrency(currency);
         income.setCard(toCard);
+        if (toCard == null) income.setCashAmount(request.getAmount());
         income.setDescription(desc);
         income.setTransactionDate(request.getTransactionDate());
         income.setSubType(TransactionSubType.TRANSFER_IN);
-        income.setNote("Transfer from " + fromCard.getName() + " (•••• " + fromCard.getLastFourDigits() + ")");
+        income.setNote("Transfer from " + walletLabel(fromCard));
 
         Transaction savedExpense = transactionRepository.save(expense);
         Transaction savedIncome = transactionRepository.save(income);
@@ -235,6 +257,9 @@ public class TransactionService {
     private BigDecimal computeNetWorth(Currency display) {
         BigDecimal total = computeAvailableBalance(display);
         for (Investment i : investmentRepository.findAll()) {
+            // Defensive: investments are created in UZS, but adding a foreign one raw would
+            // corrupt net worth silently (nothing converts). Null currency = legacy row.
+            if (i.getCurrency() != null && i.getCurrency() != display) continue;
             BigDecimal value = i.getCurrentValue() != null ? i.getCurrentValue() : i.getInvestedAmount();
             if (value != null) total = total.add(value);
         }
@@ -366,6 +391,12 @@ public class TransactionService {
                 financeService.createLoanTakenFromTransaction(lt, transactionId);
             }
             case LOAN_GIVEN -> {
+                // "He asked again" — add to the borrower's existing loan rather than
+                // creating a duplicate record for the same person.
+                if (req.getLoanGivenId() != null) {
+                    financeService.addToLoanGiven(req.getLoanGivenId(), req.getAmount());
+                    break;
+                }
                 LoanGivenRequest lg = new LoanGivenRequest();
                 lg.setDebtorName(firstNonBlank(name, desc, "Borrower"));
                 lg.setTotalAmount(req.getAmount());
@@ -427,6 +458,7 @@ public class TransactionService {
             BigDecimal previousAmount,
             TransactionSubType previousSubType,
             Long previousInvestmentId,
+            Long previousLoanGivenId,
             TransactionRequest req
     ) {
         // If sub-type changed (or moved away from an auto-create sub-type), reverse the old
@@ -434,8 +466,10 @@ public class TransactionService {
         if (previousSubType != req.getSubType()
                 || ((req.getSubType() == TransactionSubType.INVESTMENT
                         || req.getSubType() == TransactionSubType.EMERGENCY_CONTRIBUTION)
-                    && !java.util.Objects.equals(previousInvestmentId, req.getInvestmentId()))) {
-            reverseAutoCreated(tx, previousAmount, previousSubType, previousInvestmentId);
+                    && !java.util.Objects.equals(previousInvestmentId, req.getInvestmentId()))
+                || (req.getSubType() == TransactionSubType.LOAN_GIVEN
+                    && !java.util.Objects.equals(previousLoanGivenId, req.getLoanGivenId()))) {
+            reverseAutoCreated(tx, previousAmount, previousSubType, previousInvestmentId, previousLoanGivenId);
             autoCreateFinanceRecord(req, tx.getId());
             return;
         }
@@ -453,7 +487,15 @@ public class TransactionService {
                         if (req.getCounterpartyName() != null) l.setLenderName(req.getCounterpartyName());
                         loanTakenRepository.save(l);
                     });
-            case LOAN_GIVEN -> loanGivenRepository.findByOriginatingTransactionId(tx.getId())
+            case LOAN_GIVEN -> {
+                if (req.getLoanGivenId() != null) {
+                    // Top-up of an existing loan: diff the amount, same as investments.
+                    BigDecimal diff = req.getAmount().subtract(previousAmount);
+                    if (diff.signum() > 0) financeService.addToLoanGiven(req.getLoanGivenId(), diff);
+                    else if (diff.signum() < 0) financeService.removeFromLoanGiven(req.getLoanGivenId(), diff.abs());
+                    break;
+                }
+                loanGivenRepository.findByOriginatingTransactionId(tx.getId())
                     .ifPresent(l -> {
                         l.setTotalAmount(req.getAmount());
                         l.setCurrency(req.getCurrency());
@@ -462,6 +504,7 @@ public class TransactionService {
                         if (req.getCounterpartyName() != null) l.setDebtorName(req.getCounterpartyName());
                         loanGivenRepository.save(l);
                     });
+            }
             case DONATION -> donationRepository.findByOriginatingTransactionId(tx.getId())
                     .ifPresent(d -> {
                         boolean anonymous = isAnonymousCategory(req.getCategoryId());
@@ -501,16 +544,24 @@ public class TransactionService {
     }
 
     private void reverseFinanceRecordOnDelete(Transaction tx) {
-        reverseAutoCreated(tx, tx.getAmount(), tx.getSubType(), tx.getInvestmentId());
+        reverseAutoCreated(tx, tx.getAmount(), tx.getSubType(), tx.getInvestmentId(), tx.getLoanGivenId());
     }
 
-    private void reverseAutoCreated(Transaction tx, BigDecimal amount, TransactionSubType subType, Long investmentId) {
+    private void reverseAutoCreated(Transaction tx, BigDecimal amount, TransactionSubType subType,
+                                    Long investmentId, Long loanGivenId) {
         if (subType == null) return;
         switch (subType) {
             case LOAN_RECEIVED -> loanTakenRepository.findByOriginatingTransactionId(tx.getId())
                     .ifPresent(loanTakenRepository::delete);
+            // Same shape as INVESTMENT below: a tx that ORIGINATED the loan deletes the
+            // record; a top-up tx just backs its amount out of the borrower's total.
             case LOAN_GIVEN -> loanGivenRepository.findByOriginatingTransactionId(tx.getId())
-                    .ifPresent(loanGivenRepository::delete);
+                    .ifPresentOrElse(loanGivenRepository::delete,
+                            () -> {
+                                if (loanGivenId != null) {
+                                    financeService.removeFromLoanGiven(loanGivenId, amount);
+                                }
+                            });
             case DONATION -> donationRepository.findByOriginatingTransactionId(tx.getId())
                     .ifPresent(donationRepository::delete);
             case INVESTMENT, EMERGENCY_CONTRIBUTION -> {
@@ -565,6 +616,14 @@ public class TransactionService {
         t.setNote(req.getNote());
         t.setSubType(req.getSubType());
         t.setInvestmentId(req.getInvestmentId());
+        t.setLoanGivenId(req.getLoanGivenId());
+        // The allocation bucket this payment funds is recorded HERE, once, rather than re-derived
+        // on every read from the target holding's savingsGoal flag: that flag outlives the month
+        // the money moved in, so flipping it used to re-bucket months that were already closed
+        // (see AllocationBucket). An edit re-decides it, which is correct — editing a transaction
+        // is gated on both its old and its new month being open, so a genuine mis-categorisation
+        // stays correctable while a closed month cannot move.
+        t.setAllocationBucket(AllocationBucket.forSubType(req.getSubType(), fundsASavingsGoal(req)));
         // Pure-cash transactions (no card) ALWAYS book the full amount as cash so the
         // cash-balance query can attribute them. Card-linked rows honour whatever the
         // request specified (0 = pure card, > 0 = split payment).
@@ -591,6 +650,21 @@ public class TransactionService {
             t.setCard(null);
         }
         return t;
+    }
+
+    /**
+     * Does this request's INVESTMENT row put money into a savings goal rather than a plain
+     * investment? Only a top-up carries an investmentId; a row that CREATES the holding cannot,
+     * because the holding is created from the transaction afterwards — and a holding created that
+     * way is never a goal (see {@code autoCreateFinanceRecord}), so "no id" means "not a goal".
+     */
+    private boolean fundsASavingsGoal(TransactionRequest req) {
+        if (req.getSubType() != TransactionSubType.INVESTMENT || req.getInvestmentId() == null) {
+            return false;
+        }
+        return investmentRepository.findById(req.getInvestmentId())
+                .map(i -> Boolean.TRUE.equals(i.getSavingsGoal()))
+                .orElse(false);
     }
 
     private static String emptyToNull(String s) {
@@ -679,6 +753,29 @@ public class TransactionService {
      * @param type          income/expense of the new/edited transaction
      * @param existing      the row currently in DB (when editing) so its effect can be reversed
      */
+    /** Human label for either side of a transfer; null is the cash pot. */
+    private static String walletLabel(Card card) {
+        return card == null ? "Cash" : card.getName() + " (•••• " + card.getLastFourDigits() + ")";
+    }
+
+    /**
+     * Guards the cash side of a transfer. Ordinary cash expenses are deliberately not
+     * balance-checked, but a transfer OUT of cash credits a card, so letting it overdraw
+     * would fabricate money rather than merely record an overspend.
+     */
+    private void checkCashBalance(Currency currency, BigDecimal amount) {
+        BigDecimal initial = cashBalanceRepository.findByCurrency(currency)
+                .map(cb -> nullToZero(cb.getInitialBalance()))
+                .orElse(BigDecimal.ZERO);
+        BigDecimal balance = initial.add(nullToZero(cashBalanceRepository.sumCashlessTransactions(currency)));
+        if (amount.compareTo(balance) > 0) {
+            throw new IllegalArgumentException(
+                    String.format("Insufficient cash balance. Available: %s %s, required: %s %s",
+                            balance.setScale(2, RoundingMode.HALF_UP), currency,
+                            amount.setScale(2, RoundingMode.HALF_UP), currency));
+        }
+    }
+
     private void checkCardBalance(Long cardId, BigDecimal cardAmount, TransactionType type, Transaction existing) {
         if (cardId == null || type != TransactionType.EXPENSE) return;
         if (cardAmount.signum() == 0) return; // 100% cash split — card not touched

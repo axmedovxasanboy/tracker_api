@@ -35,8 +35,27 @@ public class MonthClosePreviewResponse {
     private BigDecimal investments;
     private BigDecimal stocks;
     private BigDecimal savings;
-    private BigDecimal taggedTotal;    // donation+emergency+investments+stocks+savings
+    private BigDecimal taggedTotal;    // donation+emergency+investments+stocks+savings, marks included
+    /**
+     * The recorded-only half of {@link #taggedTotal} — the figure this close will freeze, stated
+     * outright so the dialog never has to derive it by subtraction.
+     * Always {@code taggedTotal − markedNotMoved}.
+     */
+    private BigDecimal taggedRecorded;
     private BigDecimal spendableNow;   // current total wallet balance (display currency)
+
+    // "Already paid" marks folded into the bucket figures above so the preview quotes the same
+    // number the plan does. The close itself books only the recorded part — everyday spending is
+    // derived from real wallet movement — so the UI must label this share before the user commits.
+    private BigDecimal markedDonation;
+    private BigDecimal markedEmergency;
+    private BigDecimal markedInvestments;
+    /**
+     * Σ of every BUCKET mark for this month. It is kept out of the snapshot's everyday-spend
+     * arithmetic (see {@link #taggedRecorded}), but the bucket figures above still count it — the
+     * close changes no number the user is reading, only what the frozen arithmetic is built on.
+     */
+    private BigDecimal markedNotMoved;
 
     @Getter @Builder
     public static class WalletLine {

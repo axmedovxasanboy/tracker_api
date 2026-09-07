@@ -27,6 +27,7 @@ public class LoanTakenResponse {
     private LocalDateTime createdAt;
     /** Frozen monthly installment (D3: a LoanTaken is a "loan", paid as a full installment). */
     private BigDecimal monthlyPayment;
+    private BigDecimal plannedMonthlyPayment;
 
     public static LoanTakenResponse from(LoanTaken l) {
         return LoanTakenResponse.builder()
@@ -43,6 +44,7 @@ public class LoanTakenResponse {
                 .description(l.getDescription())
                 .createdAt(l.getCreatedAt())
                 .monthlyPayment(l.getMonthlyPayment())
+                .plannedMonthlyPayment(l.getPlannedMonthlyPayment())
                 .build();
     }
 }

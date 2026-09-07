@@ -21,8 +21,10 @@ public interface CashBalanceRepository extends JpaRepository<CashBalance, Long> 
      *   – split rows (card_id NOT NULL, cashAmount > 0) contribute their t.cashAmount
      *   – pure-card rows (cashAmount = 0) contribute 0
      *
-     * Transfers stay excluded — they always have a card on BOTH sides, so they never
-     * touch the cash balance even without the filter (defensive only).
+     * Transfers are excluded only on the CARD side. A card↔card transfer must not move
+     * cash, and its rows contribute 0 anyway, so that filter is defence-in-depth. But a
+     * cash↔card transfer has a cardless row that DOES move real money in or out of the
+     * pot — excluding it would make the transferred amount vanish from the cash side.
      *
      * Exchanges are NOT excluded: a cash↔card exchange has a cash-side row with
      * card_id NULL that legitimately moves real money in/out of cash. Pure card↔card
@@ -42,7 +44,7 @@ public interface CashBalanceRepository extends JpaRepository<CashBalance, Long> 
             ), 0)
             FROM Transaction t
             WHERE t.currency = :currency
-              AND (t.subType IS NULL OR t.subType NOT IN (
+              AND (t.card IS NULL OR t.subType IS NULL OR t.subType NOT IN (
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_IN,
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT))
             """)
@@ -63,7 +65,7 @@ public interface CashBalanceRepository extends JpaRepository<CashBalance, Long> 
             FROM Transaction t
             WHERE t.currency = :currency
               AND t.transactionDate <= :end
-              AND (t.subType IS NULL OR t.subType NOT IN (
+              AND (t.card IS NULL OR t.subType IS NULL OR t.subType NOT IN (
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_IN,
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT))
             """)

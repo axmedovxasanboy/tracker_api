@@ -11,10 +11,10 @@ import java.time.LocalDate;
 @Getter @Setter
 public class BalanceTransferRequest {
 
-    @NotNull(message = "Source card is required")
+    /** Null means the cash pot — see {@code TransactionService.transferBalance}. */
     private Long fromCardId;
 
-    @NotNull(message = "Destination card is required")
+    /** Null means the cash pot. Both sides null is rejected in the service. */
     private Long toCardId;
 
     @NotNull(message = "Amount is required")

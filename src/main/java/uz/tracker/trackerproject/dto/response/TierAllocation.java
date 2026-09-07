@@ -5,6 +5,7 @@ import lombok.Getter;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Per-tier allocation recommendation. The bucket-level lines describe minimum
@@ -49,8 +50,29 @@ public class TierAllocation {
 
     @Getter @Builder
     public static class ActionItem {
-        /** Human-readable description shown to the user. */
+        /**
+         * The sentence in English. Kept as the fallback for a client that has no entry for
+         * {@link #code} — an older frontend, or the one item that deliberately has no code.
+         */
         private String text;
+
+        /**
+         * Translation key for {@link #text}, e.g. "page.plan.note.heavyDebt". Every sentence this
+         * service composes carries one, because the sentences are built here as English prose and
+         * a client cannot translate prose. Null for exactly one item: the user's OWN note from the
+         * allocation-rules editor — those are their words, in whichever language they typed them,
+         * and a key would print somebody else's sentence instead.
+         */
+        private String code;
+
+        /**
+         * Values to interpolate into {@code code}'s sentence by name ("{amount}", "{month}").
+         * Never English prose, so a client can render the whole sentence in its own language:
+         * amounts arrive already grouped and with their unit ("500 000 UZS"), months as ISO
+         * "YYYY-MM" for the client to spell out, names verbatim (they are the user's own data).
+         * Empty rather than null when the sentence takes no values.
+         */
+        private Map<String, String> params;
 
         /** Action key for the frontend: "PAY_BANK", "PAY_PERSONAL_LOAN", or null (informational only). */
         private String action;
@@ -90,9 +112,17 @@ public class TierAllocation {
         /**
          * Sum already paid this month for this bucket, in the requested display currency.
          * Donations / Emergencies / Investments(non-stocks) / Stocks sourced from their
-         * respective entities filtered by date.
+         * respective entities filtered by date, PLUS any "already paid" marks for the month.
          */
         private BigDecimal paidAmount;
+
+        /**
+         * The portion of {@link #paidAmount} the user declared "already paid" with no
+         * transaction behind it, so no tracked money moved. paidAmount = recorded + markedAmount.
+         * Surfaced separately so the UI can say which half of the figure left a wallet — the
+         * month-close snapshot only ever counts the recorded half.
+         */
+        private BigDecimal markedAmount;
 
         /** paidAmount / minAmount × 100. Can exceed 100. Null when not recommended. */
         private BigDecimal paidPercent;

@@ -30,6 +30,9 @@ public class LoanTakenRequest {
 
     private LocalDate dueDate;
 
+    /** Opt-in fixed monthly repayment plan; null keeps the default 34%-of-original charge. */
+    private BigDecimal plannedMonthlyPayment;
+
     /**
      * Month (any day; normalised to the 1st server-side) from which repayments start
      * counting toward the Overview tier. Optional — defaults to the month after
