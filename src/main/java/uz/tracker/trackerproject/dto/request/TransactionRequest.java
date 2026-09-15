@@ -67,13 +67,4 @@ public class TransactionRequest {
     /** Portion of {@link #amount} paid in physical cash. Service enforces 0 <= cashAmount <= amount. */
     @DecimalMin(value = "0.0", message = "Cash amount cannot be negative")
     private BigDecimal cashAmount;
-
-    /** Free-text "place" — surfaces for FOOD-kind categories. */
-    private String place;
-
-    /** Optional origin for TRANSPORT-kind categories. */
-    private String fromLocation;
-
-    /** Optional destination for TRANSPORT-kind categories. */
-    private String toLocation;
 }

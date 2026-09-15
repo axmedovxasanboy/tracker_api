@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Month-end close + per-wallet reconciliation for the monthly-envelope model.
@@ -88,23 +89,9 @@ public class MonthCloseService {
 
         List<WalletLine> lines = new ArrayList<>();
         BigDecimal spendableNow = BigDecimal.ZERO;
-        for (Card card : cardRepository.findAll()) {
-            BigDecimal computed = nz(card.getInitialBalance())
-                    .add(nz(cardRepository.sumTransactionsByCardIdUpTo(card.getId(), monthEnd)));
-            lines.add(WalletLine.builder()
-                    .walletType("CARD").cardId(card.getId()).label(card.getName())
-                    .currency(card.getCurrency()).computedBalance(computed).build());
-            spendableNow = spendableNow.add(computed);
-        }
-        for (Currency c : Currency.reporting()) {
-            BigDecimal cashSum = nz(cashBalanceRepository.sumCashlessTransactionsUpTo(c, monthEnd));
-            var pot = cashBalanceRepository.findByCurrency(c);
-            if (pot.isEmpty() && cashSum.signum() == 0) continue; // no cash activity in this currency
-            BigDecimal computed = pot.map(p -> nz(p.getInitialBalance())).orElse(BigDecimal.ZERO).add(cashSum);
-            lines.add(WalletLine.builder()
-                    .walletType("CASH").cardId(null).label("Cash")
-                    .currency(c).computedBalance(computed).build());
-            spendableNow = spendableNow.add(computed);
+        for (ComputedWallet w : computedWallets(monthEnd, Set.of())) {
+            lines.add(w.toLine());
+            spendableNow = spendableNow.add(w.computed());
         }
 
         var income = overviewService.getIncome(month, display);
@@ -174,25 +161,11 @@ public class MonthCloseService {
         close.setMonth(monthFirst);
         BigDecimal leftoverUzs = BigDecimal.ZERO;
 
-        for (Card card : cardRepository.findAll()) {
-            BigDecimal computed = nz(card.getInitialBalance())
-                    .add(nz(cardRepository.sumTransactionsByCardIdUpTo(card.getId(), monthEnd)));
-            BigDecimal enteredBal = entered.getOrDefault(walletKey("CARD", card.getId(), card.getCurrency()), computed);
-            BigDecimal delta = computed.subtract(enteredBal);
-            Long txId = bookAdjustment(card, card.getCurrency(), delta, monthEnd);
-            close.addWallet(walletRow("CARD", card.getId(), card.getCurrency(), computed, enteredBal, delta, txId));
-            leftoverUzs = leftoverUzs.add(enteredBal);
-        }
-        for (Currency c : Currency.reporting()) {
-            BigDecimal cashSum = nz(cashBalanceRepository.sumCashlessTransactionsUpTo(c, monthEnd));
-            var pot = cashBalanceRepository.findByCurrency(c);
-            boolean requested = entered.containsKey(walletKey("CASH", null, c));
-            if (pot.isEmpty() && cashSum.signum() == 0 && !requested) continue;
-            BigDecimal computed = pot.map(p -> nz(p.getInitialBalance())).orElse(BigDecimal.ZERO).add(cashSum);
-            BigDecimal enteredBal = entered.getOrDefault(walletKey("CASH", null, c), computed);
-            BigDecimal delta = computed.subtract(enteredBal);
-            Long txId = bookAdjustment(null, c, delta, monthEnd);
-            close.addWallet(walletRow("CASH", null, c, computed, enteredBal, delta, txId));
+        for (ComputedWallet w : computedWallets(monthEnd, entered.keySet())) {
+            BigDecimal enteredBal = entered.getOrDefault(w.key(), w.computed());
+            BigDecimal delta = w.computed().subtract(enteredBal);
+            Long txId = bookAdjustment(w.card(), w.currency(), delta, monthEnd, Reconciliation.MONTH_END);
+            close.addWallet(walletRow(w.type(), w.cardId(), w.currency(), w.computed(), enteredBal, delta, txId));
             leftoverUzs = leftoverUzs.add(enteredBal);
         }
 
@@ -258,7 +231,8 @@ public class MonthCloseService {
             recorded = overviewService.computePaidThisMonth(month, display, false);
             startBalance = walletBalanceUpTo(month.atDay(1).minusDays(1), display);
             income = nz(overviewService.getIncome(month, display).getActualIncome());
-            // Unknown until the user enters their real end-of-month balances at close.
+            // Unknown until the user enters their real end-of-month balances at close. What the
+            // wallet check-ins have recorded so far is reported separately, as everydaySoFar.
             everydaySpend = null;
             totalSpent = null;
             leftover = null;
@@ -279,6 +253,7 @@ public class MonthCloseService {
                 .markedInvestments(marks.investments())
                 .markedNotMoved(OverviewService.markedTotal(marks))
                 .everydaySpend(everydaySpend)
+                .everydaySoFar(closeOpt.isPresent() ? null : everydayRecorded(month.atDay(1), month.atEndOfMonth()))
                 .totalSpent(totalSpent)
                 .leftover(leftover)
                 .build();
@@ -324,13 +299,86 @@ public class MonthCloseService {
         return total;
     }
 
+    /** Whether {@code month} is closed. Closing is sequential, so everything up to the latest is. */
+    boolean isClosed(YearMonth month) {
+        YearMonth latest = latestClosedMonth();
+        return latest != null && !month.isAfter(latest);
+    }
+
+    /**
+     * Net everyday spending booked between two days: untracked spending minus any surplus a
+     * reconciliation found. Nets because a surplus is the same correction in the other
+     * direction — the close's own arithmetic (everydaySpend = totalSpent − taggedRecorded) is
+     * lowered by money that turned up, so a running figure must be too.
+     */
+    BigDecimal everydayRecorded(LocalDate start, LocalDate end) {
+        return nz(transactionRepository.netEverydaySpend(
+                TransactionSubType.EVERYDAY_SPENDING, TransactionType.EXPENSE, Currency.UZS, start, end));
+    }
+
+    /**
+     * A wallet and the balance the app computes for it as of one day. Package-private because the
+     * month close and the wallet check-in must reconcile exactly the same wallets the same way;
+     * this used to be written out separately in the preview and the close.
+     */
+    record ComputedWallet(String type, Card card, Currency currency, String label, BigDecimal computed) {
+        Long cardId() {
+            return card == null ? null : card.getId();
+        }
+
+        String key() {
+            return walletKey(type, cardId(), currency);
+        }
+
+        WalletLine toLine() {
+            return WalletLine.builder().walletType(type).cardId(cardId()).label(label)
+                    .currency(currency).computedBalance(computed).build();
+        }
+    }
+
+    /**
+     * Every card, then the cash pot, with the balance each should hold at the end of {@code asOf}.
+     * A cash pot with no row and no activity is skipped — there is nothing to reconcile — unless
+     * its key is in {@code requested}, i.e. the user typed a balance for it anyway.
+     */
+    List<ComputedWallet> computedWallets(LocalDate asOf, Set<String> requested) {
+        List<ComputedWallet> wallets = new ArrayList<>();
+        for (Card card : cardRepository.findAll()) {
+            BigDecimal computed = nz(card.getInitialBalance())
+                    .add(nz(cardRepository.sumTransactionsByCardIdUpTo(card.getId(), asOf)));
+            wallets.add(new ComputedWallet("CARD", card, card.getCurrency(), card.getName(), computed));
+        }
+        for (Currency c : Currency.reporting()) {
+            BigDecimal cashSum = nz(cashBalanceRepository.sumCashlessTransactionsUpTo(c, asOf));
+            var pot = cashBalanceRepository.findByCurrency(c);
+            if (pot.isEmpty() && cashSum.signum() == 0 && !requested.contains(walletKey("CASH", null, c))) continue;
+            BigDecimal computed = pot.map(p -> nz(p.getInitialBalance())).orElse(BigDecimal.ZERO).add(cashSum);
+            wallets.add(new ComputedWallet("CASH", null, c, "Cash", computed));
+        }
+        return wallets;
+    }
+
+    /** Which reconciliation booked an adjustment — only its wording differs. */
+    enum Reconciliation {
+        MONTH_END("Everyday spending (month-end reconciliation)", "Month-end surplus (reconciliation)"),
+        CHECK_IN("Everyday spending (wallet check-in)", "Surplus found at wallet check-in");
+
+        final String spendDescription;
+        final String surplusDescription;
+
+        Reconciliation(String spendDescription, String surplusDescription) {
+            this.spendDescription = spendDescription;
+            this.surplusDescription = surplusDescription;
+        }
+    }
+
     /**
      * Book the EVERYDAY_SPENDING reconciliation transaction for one wallet. delta = computed −
      * entered: positive ⇒ untracked spend (EXPENSE), negative ⇒ surplus / unaccounted (INCOME).
      * Built directly (not via TransactionService.create) so the card balance check doesn't reject
      * it — it IS the spend that drained the wallet. Returns the new tx id, or null when delta == 0.
      */
-    private Long bookAdjustment(Card card, Currency currency, BigDecimal delta, LocalDate date) {
+    Long bookAdjustment(Card card, Currency currency, BigDecimal delta, LocalDate date, Reconciliation purpose) {
         if (delta == null || delta.signum() == 0) return null;
         BigDecimal amount = delta.abs();
         Transaction tx = new Transaction();
@@ -340,14 +388,14 @@ public class MonthCloseService {
         tx.setAmount(amount);
         if (delta.signum() > 0) {
             tx.setType(TransactionType.EXPENSE);
-            tx.setDescription("Everyday spending (month-end reconciliation)");
+            tx.setDescription(purpose.spendDescription);
             // Auto-pick the Everyday category so it shows in the category breakdown.
             List<Category> cats = categoryRepository.findByApplicableSubTypeAndParentIsNull(
                     TransactionSubType.EVERYDAY_SPENDING);
             if (cats.size() == 1) tx.setCategory(cats.get(0));
         } else {
             tx.setType(TransactionType.INCOME);
-            tx.setDescription("Month-end surplus (reconciliation)");
+            tx.setDescription(purpose.surplusDescription);
         }
         if (card != null) {
             tx.setCard(card);
@@ -372,7 +420,7 @@ public class MonthCloseService {
         return w;
     }
 
-    private static String walletKey(String type, Long cardId, Currency currency) {
+    static String walletKey(String type, Long cardId, Currency currency) {
         String t = type == null ? "" : type.trim().toUpperCase();
         return "CARD".equals(t) ? "CARD:" + cardId : "CASH:" + currency;
     }

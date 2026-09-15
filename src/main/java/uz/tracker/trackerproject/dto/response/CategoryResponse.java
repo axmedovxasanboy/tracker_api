@@ -3,7 +3,6 @@ package uz.tracker.trackerproject.dto.response;
 import lombok.Builder;
 import lombok.Getter;
 import uz.tracker.trackerproject.entity.Category;
-import uz.tracker.trackerproject.enums.CategoryKind;
 import uz.tracker.trackerproject.enums.CategoryType;
 import uz.tracker.trackerproject.enums.TransactionSubType;
 
@@ -19,7 +18,6 @@ public class CategoryResponse {
     private String color;
     private String icon;
     private TransactionSubType applicableSubType;
-    private CategoryKind kind;
     private String descriptionLabel;
     private Boolean descriptionRequired;
     private Boolean anonymizes;
@@ -36,7 +34,6 @@ public class CategoryResponse {
                 .color(c.getColor())
                 .icon(c.getIcon())
                 .applicableSubType(c.getApplicableSubType())
-                .kind(c.getKind() != null ? c.getKind() : CategoryKind.GENERIC)
                 .descriptionLabel(c.getDescriptionLabel())
                 .descriptionRequired(c.getDescriptionRequired() == null || c.getDescriptionRequired())
                 .anonymizes(Boolean.TRUE.equals(c.getAnonymizes()))
@@ -57,7 +54,6 @@ public class CategoryResponse {
                 .color(c.getColor())
                 .icon(c.getIcon())
                 .applicableSubType(c.getApplicableSubType())
-                .kind(c.getKind() != null ? c.getKind() : CategoryKind.GENERIC)
                 .descriptionLabel(c.getDescriptionLabel())
                 .descriptionRequired(c.getDescriptionRequired() == null || c.getDescriptionRequired())
                 .anonymizes(Boolean.TRUE.equals(c.getAnonymizes()))

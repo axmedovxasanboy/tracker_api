@@ -76,6 +76,12 @@ public class MonthSummaryResponse {
 
     /** Null until the month is closed. = totalSpent − taggedRecorded. */
     private BigDecimal everydaySpend;
+    /**
+     * Open months only (null once closed): net everyday spending the wallet check-ins have booked
+     * so far. Not a replacement for {@link #everydaySpend} — that is only known from the real
+     * balances entered at the close, which also catches whatever happened after the last check-in.
+     */
+    private BigDecimal everydaySoFar;
     /** Null until the month is closed. = startBalance + income − leftover. */
     private BigDecimal totalSpent;
     /** Null until the month is closed. The real balance entered at close (next month's start). */

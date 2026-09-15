@@ -83,12 +83,4 @@ public class TransactionController {
     ) {
         return ResponseEntity.ok(transactionService.getDescriptionSuggestions(categoryId, q));
     }
-
-    @GetMapping("/places")
-    public ResponseEntity<List<String>> getPlaceSuggestions(
-            @RequestParam(required = false) Long categoryId,
-            @RequestParam(defaultValue = "") String q
-    ) {
-        return ResponseEntity.ok(transactionService.getPlaceSuggestions(categoryId, q));
-    }
 }

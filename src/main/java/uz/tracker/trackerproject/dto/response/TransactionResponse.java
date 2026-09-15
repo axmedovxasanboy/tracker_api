@@ -31,9 +31,6 @@ public class TransactionResponse {
     private TransactionSubType subType;
     private Long investmentId;
     private Long loanGivenId;
-    private String place;
-    private String fromLocation;
-    private String toLocation;
     private Long transferPairId;
     private Long repaidLoanTakenId;
     private Long repaidLoanGivenId;
@@ -71,9 +68,6 @@ public class TransactionResponse {
                 .subType(t.getSubType())
                 .investmentId(t.getInvestmentId())
                 .loanGivenId(t.getLoanGivenId())
-                .place(t.getPlace())
-                .fromLocation(t.getFromLocation())
-                .toLocation(t.getToLocation())
                 .transferPairId(t.getTransferPairId())
                 .repaidLoanTakenId(t.getRepaidLoanTakenId())
                 .repaidLoanGivenId(t.getRepaidLoanGivenId())

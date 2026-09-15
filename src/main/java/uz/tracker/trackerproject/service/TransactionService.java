@@ -146,11 +146,6 @@ public class TransactionService {
         return transactionRepository.findDescriptionSuggestions(categoryId, query.trim());
     }
 
-    @Transactional(readOnly = true)
-    public List<String> getPlaceSuggestions(Long categoryId, String query) {
-        return transactionRepository.findDistinctPlaces(categoryId, query == null ? "" : query.trim());
-    }
-
     @Transactional
     public List<TransactionResponse> transferBalance(BalanceTransferRequest request) {
         settingsService.assertStableIncomeSet();
@@ -634,9 +629,6 @@ public class TransactionService {
             cash = BigDecimal.ZERO;
         }
         t.setCashAmount(cash);
-        t.setPlace(emptyToNull(req.getPlace()));
-        t.setFromLocation(emptyToNull(req.getFromLocation()));
-        t.setToLocation(emptyToNull(req.getToLocation()));
         if (req.getCategoryId() != null) {
             t.setCategory(categoryRepository.findById(req.getCategoryId())
                     .orElseThrow(() -> new ResourceNotFoundException("Category", req.getCategoryId())));
@@ -672,31 +664,37 @@ public class TransactionService {
     }
 
     /**
-     * Description is optional on the wire; if blank we synthesise one from the picked
-     * category and any kind-specific extras the user already provided.
+     * Description is optional on the wire. Left blank, a transaction is named after WHO it was
+     * with — the borrower of a loan given, the lender of a loan received, a donation's recipient,
+     * the holding an investment went into — and only failing that after its category.
+     *
+     * The name comes first because it is the one thing that tells two rows of the same category
+     * apart. The category is already on every row as its badge, so a list of loans named after
+     * their category was a column of identical "Loan Given" lines with the borrower nowhere on
+     * screen — the counterparty name reached the finance record and nothing else, since it is not
+     * stored on the transaction. Turning a category's description requirement off is what
+     * exposed it: until then the borrower was typed a second time into the description.
+     *
+     * An anonymous donation keeps the category name: "Anonymous" as a title says less than
+     * "Donation — Anonymous", and the category is what declares the anonymity.
      */
     private String resolveDescription(TransactionRequest req) {
         String desc = emptyToNull(req.getDescription());
         if (desc != null) return desc;
-        StringBuilder sb = new StringBuilder();
+        String counterparty = emptyToNull(req.getCounterpartyName());
+        if (counterparty != null && !"Anonymous".equalsIgnoreCase(counterparty)
+                && !isAnonymousCategory(req.getCategoryId())) {
+            return counterparty;
+        }
         if (req.getCategoryId() != null) {
-            categoryRepository.findById(req.getCategoryId())
-                    .ifPresent(cat -> {
-                        if (cat.getParent() != null) sb.append(cat.getParent().getName()).append(" — ");
-                        sb.append(cat.getName());
-                    });
+            String named = categoryRepository.findById(req.getCategoryId())
+                    .map(cat -> cat.getParent() != null
+                            ? cat.getParent().getName() + " — " + cat.getName()
+                            : cat.getName())
+                    .orElse(null);
+            if (named != null) return named;
         }
-        String place = emptyToNull(req.getPlace());
-        String from = emptyToNull(req.getFromLocation());
-        String to = emptyToNull(req.getToLocation());
-        if (place != null) {
-            if (sb.length() > 0) sb.append(" @ ");
-            sb.append(place);
-        } else if (from != null || to != null) {
-            if (sb.length() > 0) sb.append(": ");
-            sb.append(from != null ? from : "—").append(" → ").append(to != null ? to : "—");
-        }
-        return sb.length() > 0 ? sb.toString() : "Transaction";
+        return "Transaction";
     }
 
     private void validateCashAmount(TransactionRequest req) {

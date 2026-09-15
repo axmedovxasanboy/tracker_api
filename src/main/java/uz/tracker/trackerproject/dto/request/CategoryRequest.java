@@ -4,7 +4,6 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.Getter;
 import lombok.Setter;
-import uz.tracker.trackerproject.enums.CategoryKind;
 import uz.tracker.trackerproject.enums.CategoryType;
 import uz.tracker.trackerproject.enums.TransactionSubType;
 
@@ -27,9 +26,6 @@ public class CategoryRequest {
     private TransactionSubType applicableSubType;
 
     private Long parentId;
-
-    /** Optional — null means inherit from parent on the server (or GENERIC for root). */
-    private CategoryKind kind;
 
     /** Custom label for the description field on transactions in this category. */
     private String descriptionLabel;

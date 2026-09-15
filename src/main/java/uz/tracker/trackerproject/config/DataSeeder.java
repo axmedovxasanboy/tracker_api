@@ -10,7 +10,6 @@ import uz.tracker.trackerproject.entity.CashBalance;
 import uz.tracker.trackerproject.entity.Card;
 import uz.tracker.trackerproject.entity.Category;
 import uz.tracker.trackerproject.enums.CardType;
-import uz.tracker.trackerproject.enums.CategoryKind;
 import uz.tracker.trackerproject.enums.CategoryType;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.TransactionSubType;
@@ -72,13 +71,14 @@ public class DataSeeder implements CommandLineRunner {
         // a closed month, already snapshotted.
         backfillAllocationBuckets();
 
-        // Back-fill kind on any pre-existing categories so the new column has a value everywhere.
-        categoryRepository.findAll().forEach(c -> {
-            if (c.getKind() == null) {
-                c.setKind(inferKind(c.getName()));
-                categoryRepository.save(c);
-            }
-        });
+        // Category kinds (and the place / From / To fields they added to the add form) are gone.
+        // What those fields held survives in the description, which is now the only place any
+        // of it is shown.
+        foldRetiredCategoryExtras();
+
+        // A transaction left without a description is named after its counterparty now, not its
+        // category. Rows saved before that still carry the category name the old default wrote.
+        nameTransactionsAfterCounterparty();
 
         // Ensure an "Anonymous" sub-category exists under Donation. Seeded for everyone,
         // regardless of whether they already have other categories.
@@ -182,27 +182,27 @@ public class DataSeeder implements CommandLineRunner {
     private List<Category> defaultCategories() {
         return List.of(
                 // INCOME
-                cat("Salary",          CategoryType.INCOME,  "#10b981", "briefcase",   TransactionSubType.REGULAR_INCOME,      CategoryKind.GENERIC),
-                cat("Freelance",       CategoryType.INCOME,  "#06b6d4", "laptop",      TransactionSubType.REGULAR_INCOME,      CategoryKind.GENERIC),
-                cat("Loan Received",   CategoryType.INCOME,  "#f59e0b", "hand-coins",  TransactionSubType.LOAN_RECEIVED,       CategoryKind.GENERIC),
-                cat("Loan Returned",   CategoryType.INCOME,  "#84cc16", "refresh-cw",  TransactionSubType.LOAN_RETURNED_TO_ME, CategoryKind.GENERIC),
-                cat("Investment Return", CategoryType.INCOME,"#8b5cf6", "trending-up", null,                                   CategoryKind.GENERIC),
-                cat("Other Income",    CategoryType.INCOME,  "#6b7280", "plus-circle", null,                                   CategoryKind.GENERIC),
+                cat("Salary",          CategoryType.INCOME,  "#10b981", "briefcase",   TransactionSubType.REGULAR_INCOME),
+                cat("Freelance",       CategoryType.INCOME,  "#06b6d4", "laptop",      TransactionSubType.REGULAR_INCOME),
+                cat("Loan Received",   CategoryType.INCOME,  "#f59e0b", "hand-coins",  TransactionSubType.LOAN_RECEIVED),
+                cat("Loan Returned",   CategoryType.INCOME,  "#84cc16", "refresh-cw",  TransactionSubType.LOAN_RETURNED_TO_ME),
+                cat("Investment Return", CategoryType.INCOME,"#8b5cf6", "trending-up", null),
+                cat("Other Income",    CategoryType.INCOME,  "#6b7280", "plus-circle", null),
                 // EXPENSE
-                cat("Food & Dining",   CategoryType.EXPENSE, "#ef4444", "utensils",      TransactionSubType.REGULAR_EXPENSE,   CategoryKind.FOOD),
-                cat("Transport",       CategoryType.EXPENSE, "#f97316", "car",           TransactionSubType.REGULAR_EXPENSE,   CategoryKind.TRANSPORT),
-                cat("Housing",         CategoryType.EXPENSE, "#eab308", "home",          TransactionSubType.REGULAR_EXPENSE,   CategoryKind.GENERIC),
-                cat("Healthcare",      CategoryType.EXPENSE, "#ec4899", "heart",         TransactionSubType.REGULAR_EXPENSE,   CategoryKind.GENERIC),
-                cat("Entertainment",   CategoryType.EXPENSE, "#a855f7", "music",         TransactionSubType.REGULAR_EXPENSE,   CategoryKind.GENERIC),
-                cat("Shopping",        CategoryType.EXPENSE, "#14b8a6", "shopping-bag",  TransactionSubType.REGULAR_EXPENSE,   CategoryKind.GENERIC),
-                cat("Education",       CategoryType.EXPENSE, "#3b82f6", "book",          TransactionSubType.REGULAR_EXPENSE,   CategoryKind.GENERIC),
-                cat("Loan Given",      CategoryType.EXPENSE, "#f43f5e", "hand-coins",    TransactionSubType.LOAN_GIVEN,        CategoryKind.GENERIC),
-                cat("Loan Repayment",  CategoryType.EXPENSE, "#f59e0b", "refresh-cw",    TransactionSubType.LOAN_REPAYMENT,    CategoryKind.GENERIC),
-                cat("Bank Instalment", CategoryType.EXPENSE, "#6366f1", "building",      TransactionSubType.BANK_LOAN_PAYMENT, CategoryKind.GENERIC),
-                cat("Donation",        CategoryType.EXPENSE, "#d946ef", "heart-handshake", TransactionSubType.DONATION,        CategoryKind.GENERIC),
-                cat("Investment",      CategoryType.EXPENSE, "#0ea5e9", "trending-up",   TransactionSubType.INVESTMENT,        CategoryKind.GENERIC),
-                cat("Emergency Fund",  CategoryType.EXPENSE, "#f43f5e", "shield-alert",  TransactionSubType.EMERGENCY_CONTRIBUTION, CategoryKind.GENERIC),
-                cat("Everyday Spending", CategoryType.EXPENSE, "#94a3b8", "wallet",      TransactionSubType.EVERYDAY_SPENDING, CategoryKind.GENERIC)
+                cat("Food & Dining",   CategoryType.EXPENSE, "#ef4444", "utensils",      TransactionSubType.REGULAR_EXPENSE),
+                cat("Transport",       CategoryType.EXPENSE, "#f97316", "car",           TransactionSubType.REGULAR_EXPENSE),
+                cat("Housing",         CategoryType.EXPENSE, "#eab308", "home",          TransactionSubType.REGULAR_EXPENSE),
+                cat("Healthcare",      CategoryType.EXPENSE, "#ec4899", "heart",         TransactionSubType.REGULAR_EXPENSE),
+                cat("Entertainment",   CategoryType.EXPENSE, "#a855f7", "music",         TransactionSubType.REGULAR_EXPENSE),
+                cat("Shopping",        CategoryType.EXPENSE, "#14b8a6", "shopping-bag",  TransactionSubType.REGULAR_EXPENSE),
+                cat("Education",       CategoryType.EXPENSE, "#3b82f6", "book",          TransactionSubType.REGULAR_EXPENSE),
+                cat("Loan Given",      CategoryType.EXPENSE, "#f43f5e", "hand-coins",    TransactionSubType.LOAN_GIVEN),
+                cat("Loan Repayment",  CategoryType.EXPENSE, "#f59e0b", "refresh-cw",    TransactionSubType.LOAN_REPAYMENT),
+                cat("Bank Instalment", CategoryType.EXPENSE, "#6366f1", "building",      TransactionSubType.BANK_LOAN_PAYMENT),
+                cat("Donation",        CategoryType.EXPENSE, "#d946ef", "heart-handshake", TransactionSubType.DONATION),
+                cat("Investment",      CategoryType.EXPENSE, "#0ea5e9", "trending-up",   TransactionSubType.INVESTMENT),
+                cat("Emergency Fund",  CategoryType.EXPENSE, "#f43f5e", "shield-alert",  TransactionSubType.EMERGENCY_CONTRIBUTION),
+                cat("Everyday Spending", CategoryType.EXPENSE, "#94a3b8", "wallet",      TransactionSubType.EVERYDAY_SPENDING)
         );
     }
 
@@ -218,7 +218,7 @@ public class DataSeeder implements CommandLineRunner {
 
     private void ensureCategoryForSubType(String name, String color, String icon, TransactionSubType subType) {
         if (!categoryRepository.findByApplicableSubType(subType).isEmpty()) return;
-        categoryRepository.save(cat(name, CategoryType.EXPENSE, color, icon, subType, CategoryKind.GENERIC));
+        categoryRepository.save(cat(name, CategoryType.EXPENSE, color, icon, subType));
     }
 
     /**
@@ -303,6 +303,160 @@ public class DataSeeder implements CommandLineRunner {
         } catch (Exception ignored) {
             // Tables not created yet on a virgin DB — there is nothing to back-fill.
         }
+    }
+
+    /**
+     * One-shot, idempotent: move whatever the retired category extras held into the description.
+     *
+     * Two generations of data, two shapes. The current one composed a TRANSPORT route INTO the
+     * description — "From >>> To", plus "\n&lt;note&gt;" when there was one — and the list parsed
+     * it back out, showing the note as the title and the route beneath it. Nothing parses that
+     * format any more, so it is rewritten as the line the list used to show: "note · From → To",
+     * or just "From → To". Only TRANSPORT categories are touched, exactly as the parser only ever
+     * read them, so a description that merely happens to contain " >>> " is left alone.
+     *
+     * The older generation kept `place` / `from_location` / `to_location` in their own columns.
+     * Those are no longer mapped, so their contents are appended to the description unless it
+     * already says the same thing — the old default description spelled them out when nothing
+     * else was typed. The columns themselves are left intact rather than cleared: this reads
+     * them, it never destroys them.
+     *
+     * Each half checks its columns exist before touching them. `run()` is a single transaction,
+     * and on Postgres one failed statement aborts it for every statement after — a database
+     * created after this change never gets these columns, so an unguarded query would take the
+     * rest of the seeding down with it.
+     */
+    @SuppressWarnings("unchecked")
+    private void foldRetiredCategoryExtras() {
+        int routes = 0, columns = 0;
+        if (columnExists("categories", "kind")) {
+            List<Object[]> rows = entityManager.createNativeQuery("""
+                    SELECT t.id, t.description FROM transactions t
+                      JOIN categories c ON c.id = t.category_id
+                     WHERE c.kind = 'TRANSPORT' AND t.description LIKE '% >>> %'
+                    """).getResultList();
+            for (Object[] row : rows) {
+                String rewritten = unfoldRoute((String) row[1]);
+                if (rewritten != null) routes += setDescription(((Number) row[0]).longValue(), rewritten);
+            }
+        }
+        if (columnExists("transactions", "place") && columnExists("transactions", "from_location")
+                && columnExists("transactions", "to_location")) {
+            List<Object[]> rows = entityManager.createNativeQuery("""
+                    SELECT id, description, place, from_location, to_location FROM transactions
+                     WHERE coalesce(btrim(place), '') <> ''
+                        OR coalesce(btrim(from_location), '') <> ''
+                        OR coalesce(btrim(to_location), '') <> ''
+                    """).getResultList();
+            for (Object[] row : rows) {
+                String description = row[1] == null ? "" : ((String) row[1]).trim();
+                String place = blankToNull((String) row[2]);
+                String from = blankToNull((String) row[3]);
+                String to = blankToNull((String) row[4]);
+                String extra = place != null ? place
+                        : (from != null ? from : "—") + " → " + (to != null ? to : "—");
+                // Contains, not equals: the old default wrote "Category @ place" and
+                // "Category: from → to", which already carry it. It is also what makes a second
+                // boot a no-op without having to clear the columns.
+                if (description.toLowerCase().contains(extra.toLowerCase())) continue;
+                columns += setDescription(((Number) row[0]).longValue(),
+                        description.isEmpty() ? extra : description + " · " + extra);
+            }
+        }
+        if (routes + columns > 0) {
+            System.out.println("[DataSeeder] Folded the retired place / From / To fields into the description of "
+                    + (routes + columns) + " transaction(s).");
+        }
+    }
+
+    /** `"A >>> B\nnote"` → `"note · A → B"`; `"A >>> B"` → `"A → B"`. Null when it is not a route. */
+    static String unfoldRoute(String description) {
+        if (description == null) return null;
+        int newline = description.indexOf('\n');
+        String first = newline >= 0 ? description.substring(0, newline) : description;
+        String note = newline >= 0 ? description.substring(newline + 1).trim() : "";
+        int sep = first.indexOf(" >>> ");
+        if (sep < 0) return null;
+        String from = first.substring(0, sep).trim();
+        String to = first.substring(sep + " >>> ".length()).trim();
+        String route = (from.isEmpty() ? "—" : from) + " → " + (to.isEmpty() ? "—" : to);
+        return note.isEmpty() ? route : note + " · " + route;
+    }
+
+    /**
+     * One-shot, idempotent: give the rows the old default named after their category the name
+     * the new default gives them — the person or holding they were with.
+     *
+     * Only a description that is still exactly what the app wrote on its own is replaced — the
+     * category's name, "Parent — Category", or the bare "Transaction" fallback. Anything the user
+     * typed is left as it is. The name comes from the record the transaction created or topped
+     * up, and the generic names the backend falls back to when it has no name ("Borrower",
+     * "Lender", "Investment", "Anonymous") are skipped, since they would only swap one
+     * placeholder for another. An anonymous donation keeps its category name on purpose.
+     */
+    private void nameTransactionsAfterCounterparty() {
+        record Source(String subType, String nameQuery) {}
+        List<Source> sources = List.of(
+                new Source("LOAN_GIVEN", """
+                        SELECT lg.debtor_name FROM loans_given lg
+                         WHERE (lg.id = t.loan_given_id OR lg.originating_transaction_id = t.id)
+                           AND btrim(coalesce(lg.debtor_name, '')) NOT IN ('', 'Borrower')
+                         ORDER BY (lg.id = t.loan_given_id) DESC LIMIT 1"""),
+                new Source("LOAN_RECEIVED", """
+                        SELECT lt.lender_name FROM loans_taken lt
+                         WHERE lt.originating_transaction_id = t.id
+                           AND btrim(coalesce(lt.lender_name, '')) NOT IN ('', 'Lender')
+                         LIMIT 1"""),
+                new Source("DONATION", """
+                        SELECT d.recipient_name FROM donations d
+                         WHERE d.originating_transaction_id = t.id
+                           AND coalesce(d.anonymous, false) = false
+                           AND btrim(coalesce(d.recipient_name, '')) NOT IN ('', 'Anonymous', 'Donation')
+                         LIMIT 1"""),
+                new Source("INVESTMENT", """
+                        SELECT i.name FROM investments i
+                         WHERE (i.id = t.investment_id OR i.originating_transaction_id = t.id)
+                           AND btrim(coalesce(i.name, '')) NOT IN ('', 'Investment')
+                         ORDER BY (i.id = t.investment_id) DESC LIMIT 1"""));
+        int renamed = 0;
+        for (Source source : sources) {
+            try {
+                renamed += entityManager.createNativeQuery("""
+                        UPDATE transactions t SET description = (%s)
+                         WHERE t.sub_type = :subType
+                           AND (%s) IS NOT NULL
+                           AND (t.description = 'Transaction' OR EXISTS (
+                                SELECT 1 FROM categories c LEFT JOIN categories p ON p.id = c.parent_id
+                                 WHERE c.id = t.category_id
+                                   AND (t.description = c.name OR t.description = p.name || ' — ' || c.name)))
+                        """.formatted(source.nameQuery(), source.nameQuery()))
+                        .setParameter("subType", source.subType())
+                        .executeUpdate();
+            } catch (Exception ignored) {
+                // Every column referenced is mapped, so the tables exist by the time this runs.
+            }
+        }
+        if (renamed > 0) {
+            System.out.println("[DataSeeder] Named " + renamed
+                    + " transaction(s) after the borrower, lender, recipient or holding instead of their category.");
+        }
+    }
+
+    private boolean columnExists(String table, String column) {
+        Number n = (Number) entityManager.createNativeQuery("""
+                SELECT count(*) FROM information_schema.columns
+                 WHERE table_schema = current_schema() AND table_name = :table AND column_name = :column
+                """).setParameter("table", table).setParameter("column", column).getSingleResult();
+        return n.longValue() > 0;
+    }
+
+    private int setDescription(long transactionId, String description) {
+        return entityManager.createNativeQuery("UPDATE transactions SET description = :d WHERE id = :id")
+                .setParameter("d", description).setParameter("id", transactionId).executeUpdate();
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s.trim();
     }
 
     private void migrateLegacyInvestmentTypes() {
@@ -428,31 +582,20 @@ public class DataSeeder implements CommandLineRunner {
         anon.setColor("#64748b");
         anon.setIcon("user-x");
         anon.setApplicableSubType(donationRoot.getApplicableSubType());
-        anon.setKind(donationRoot.getKind());
         anon.setParent(donationRoot);
         anon.setAnonymizes(true);
         anon.setDescriptionRequired(false);
         categoryRepository.save(anon);
     }
 
-    /** Best-effort inference for legacy rows that pre-date the kind column. */
-    private CategoryKind inferKind(String name) {
-        if (name == null) return CategoryKind.GENERIC;
-        String n = name.toLowerCase();
-        if (n.contains("food") || n.contains("dining") || n.contains("restaurant") || n.contains("cafe")) return CategoryKind.FOOD;
-        if (n.contains("transport") || n.contains("taxi") || n.contains("metro") || n.contains("bus") || n.contains("travel")) return CategoryKind.TRANSPORT;
-        return CategoryKind.GENERIC;
-    }
-
     private Category cat(String name, CategoryType type, String color, String icon,
-                         TransactionSubType subType, CategoryKind kind) {
+                         TransactionSubType subType) {
         Category c = new Category();
         c.setName(name);
         c.setType(type);
         c.setColor(color);
         c.setIcon(icon);
         c.setApplicableSubType(subType);
-        c.setKind(kind);
         return c;
     }
 

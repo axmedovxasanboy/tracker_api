@@ -86,17 +86,11 @@ public class Transaction {
     @Column(name = "cash_amount", precision = 19, scale = 4)
     private BigDecimal cashAmount;
 
-    /** Free-text "place" — populated for FOOD-kind categories ("Evos", "Rayhon", ...). */
-    @Column(name = "place")
-    private String place;
-
-    /** Origin location for TRANSPORT-kind categories ("Kvartira"). */
-    @Column(name = "from_location")
-    private String fromLocation;
-
-    /** Destination location for TRANSPORT-kind categories ("Chilonzor metro"). */
-    @Column(name = "to_location")
-    private String toLocation;
+    // The `place`, `from_location` and `to_location` columns that used to follow here fed the
+    // FOOD- and TRANSPORT-kind extras on the add form, which were removed along with category
+    // kinds. They are deliberately left in the database rather than dropped (ddl-auto=update
+    // could not drop them anyway): nothing maps them any more, and DataSeeder folds whatever
+    // they held into the description once, so no route or place a user typed is lost.
 
     /**
      * Foreign-key columns linking a LOAN_REPAYMENT / LOAN_RETURNED_TO_ME transaction back

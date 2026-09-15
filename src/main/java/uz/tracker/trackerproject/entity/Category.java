@@ -4,7 +4,6 @@ import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
-import uz.tracker.trackerproject.enums.CategoryKind;
 import uz.tracker.trackerproject.enums.CategoryType;
 import uz.tracker.trackerproject.enums.TransactionSubType;
 
@@ -44,14 +43,10 @@ public class Category {
     @Column(name = "applicable_sub_type")
     private TransactionSubType applicableSubType;
 
-    /**
-     * Drives category-specific UI extras (e.g. FOOD shows "place", TRANSPORT shows from/to).
-     * Nullable in the DB so the column add via ddl-auto=update doesn't fail on existing rows;
-     * service/DTO layers treat null as GENERIC.
-     */
-    @Enumerated(EnumType.STRING)
-    @Column(name = "kind")
-    private CategoryKind kind;
+    // A `kind` column (GENERIC / FOOD / TRANSPORT) used to follow here. Its only job was to add
+    // category-specific fields to the add form — a place for FOOD, From/To for TRANSPORT — and
+    // those were removed, so the concept went with them. The column is left in the database,
+    // unmapped and nullable, which is also why its CHECK constraint is harmless: NULL passes it.
 
     /**
      * Custom label for the transaction-modal "Description" field when this category is

@@ -78,6 +78,24 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
             @Param("end") java.time.LocalDate end);
 
     /**
+     * Net amount of one sub-type in a date range: EXPENSE rows count up, INCOME rows count down.
+     * Used for EVERYDAY_SPENDING, where a reconciliation books untracked spending as an expense and
+     * a surplus it found as income — the running figure is the difference.
+     */
+    @Query("""
+            SELECT COALESCE(SUM(CASE WHEN t.type = :expense THEN t.amount ELSE -t.amount END), 0)
+            FROM Transaction t
+            WHERE t.subType = :subType AND t.currency = :currency
+              AND t.transactionDate >= :start AND t.transactionDate <= :end
+            """)
+    BigDecimal netEverydaySpend(
+            @Param("subType") uz.tracker.trackerproject.enums.TransactionSubType subType,
+            @Param("expense") uz.tracker.trackerproject.enums.TransactionType expense,
+            @Param("currency") Currency currency,
+            @Param("start") java.time.LocalDate start,
+            @Param("end") java.time.LocalDate end);
+
+    /**
      * Sum of INCOME tagged as "bonus" in a month + currency. A transaction counts when
      * its own category — or that category's parent — has bonusIncome = true (so flagging
      * a parent like "Salary" covers all its children). Drives the allocation top-up.
@@ -133,19 +151,6 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
             """, nativeQuery = true)
     List<String> findDescriptionSuggestions(@Param("categoryId") Long categoryId,
                                             @Param("prefix") String prefix);
-
-    /** Distinct non-null places, optionally scoped to a category root and filtered by prefix. */
-    @Query(value = """
-            SELECT DISTINCT t.place
-            FROM transactions t
-            LEFT JOIN categories c ON c.id = t.category_id
-            WHERE t.place IS NOT NULL AND t.place <> ''
-              AND (CAST(:categoryId AS bigint) IS NULL OR t.category_id = :categoryId OR c.parent_id = :categoryId)
-              AND (:prefix IS NULL OR :prefix = '' OR t.place ILIKE '%' || :prefix || '%')
-            ORDER BY t.place
-            LIMIT 15
-            """, nativeQuery = true)
-    List<String> findDistinctPlaces(@Param("categoryId") Long categoryId, @Param("prefix") String prefix);
 
     @Modifying
     @Query("UPDATE Transaction t SET t.card = NULL WHERE t.card.id = :cardId")

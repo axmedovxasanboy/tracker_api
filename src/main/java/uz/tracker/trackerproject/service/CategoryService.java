@@ -6,7 +6,6 @@ import org.springframework.transaction.annotation.Transactional;
 import uz.tracker.trackerproject.dto.request.CategoryRequest;
 import uz.tracker.trackerproject.dto.response.CategoryResponse;
 import uz.tracker.trackerproject.entity.Category;
-import uz.tracker.trackerproject.enums.CategoryKind;
 import uz.tracker.trackerproject.enums.CategoryType;
 import uz.tracker.trackerproject.enums.TransactionSubType;
 import uz.tracker.trackerproject.exception.ResourceNotFoundException;
@@ -102,21 +101,6 @@ public class CategoryService {
                     .orElseThrow(() -> new ResourceNotFoundException("Category", req.getParentId()));
         }
         c.setParent(parent);
-
-        // Sub-categories inherit the parent's kind by default. The client may override.
-        // On update with no explicit kind, preserve the category's existing kind so editing a
-        // non-GENERIC root (e.g. a FOOD/TRANSPORT seed) for any reason doesn't reset it to GENERIC.
-        CategoryKind kind = req.getKind();
-        if (kind == null) {
-            if (parent != null && parent.getKind() != null) {
-                kind = parent.getKind();
-            } else if (c.getKind() != null) {
-                kind = c.getKind();
-            } else {
-                kind = CategoryKind.GENERIC;
-            }
-        }
-        c.setKind(kind);
 
         // descriptionLabel + descriptionRequired: explicit request value wins; otherwise
         // inherit from parent if present; otherwise leave null (default "Description", required).
