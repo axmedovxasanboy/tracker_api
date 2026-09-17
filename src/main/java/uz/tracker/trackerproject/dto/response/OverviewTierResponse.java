@@ -8,8 +8,8 @@ import java.math.BigDecimal;
 import java.util.List;
 
 /**
- * Snapshot of the user's monthly financial tier. All monetary values are converted
- * into {@link #currency} from their native currencies using the FX rates in Settings.
+ * Snapshot of the user's monthly financial tier. Every amount is UZS, the reporting currency —
+ * nothing converts, and foreign cash pots never enter these figures.
  *
  * Level math (driven by leftMoney = income − mandatorySubscriptions, evaluated in UZS):
  *   < 15M    → level 1
@@ -20,19 +20,19 @@ import java.util.List;
  *   < 90M    → level 6
  *   >= 90M   → null (above tier ceiling)
  *
- * Sub-level (Level 1 only, for now):
- *   1.1 → debtPayments == 0
- *   1.2 → 0 < debtPayments/income < 0.70
- *   1.3 → debtPayments/income >= 0.70
+ * Sub-level (every level):
+ *   X.1 → debtPayments == 0
+ *   X.2 → 0 < debtPayments/income <= 0.70
+ *   X.3 → debtPayments/income > 0.70
  *
- * Levels 2-6 return subLevel = null until the rules are defined.
+ * Level 1's percentages are built in; Levels 2–6 read the rule configured for the sub-level.
  */
 @Getter @Builder
 public class OverviewTierResponse {
 
     private Currency currency;
 
-    /** Stable monthly income from Settings, converted into {@link #currency}. */
+    /** Stable monthly income from Settings. */
     private BigDecimal income;
 
     /** Sum of active MonthlyPayment amounts ("mandatory to self"). */
@@ -42,13 +42,17 @@ public class OverviewTierResponse {
     private BigDecimal leftMoney;
 
     /**
-     * "Left balance" = this month's available money (carryover + income earned this month). The
-     * bucket allocation percentages are applied to THIS, not to stable income. The tier level and
-     * tight/comfortable split still come from stable income.
+     * "Left balance" = max(0, leftMoney − debtPayments): stable income minus subscriptions minus
+     * this month's debt charge. The bucket percentages are applied to THIS. Income actually
+     * earned this month (and bonus income) is display-only and never moves it.
      */
     private BigDecimal allocationBase;
 
-    /** bankLoans + loansTaken + debts — used for the sub-level debt-ratio rule. */
+    /**
+     * This month's debt charge: bank installments + the monthly charge on borrowed money and
+     * debts (a loan's repayment plan when it has one, else 34% of its original total, capped at
+     * what is left). Drives the sub-level ratio and is subtracted from the left balance.
+     */
     private BigDecimal debtPayments;
 
     private DebtBreakdown debtBreakdown;

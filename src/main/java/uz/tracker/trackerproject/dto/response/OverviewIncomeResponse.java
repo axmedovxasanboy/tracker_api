@@ -16,14 +16,14 @@ public class OverviewIncomeResponse {
     private Currency currency;
 
     /**
-     * Sum of INCOME-type transactions in the requested month, converted into the
-     * display currency. Transfers and exchanges are excluded.
+     * Sum of INCOME-type transactions in the requested month, in UZS. Transfers and
+     * everyday-spending reconciliation rows are excluded.
      */
     private BigDecimal actualIncome;
 
     /**
-     * The user's Settings.monthlyStableIncome, converted into the display currency.
-     * Drives the tier dashboard math (see /overview/tier). Null when not configured.
+     * The user's Settings.monthlyStableIncome. Drives the tier dashboard math (see
+     * /overview/tier). Null when not configured.
      */
     private BigDecimal stableIncome;
 

@@ -90,6 +90,7 @@ public class TransactionService {
     public TransactionResponse create(TransactionRequest request) {
         settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(request.getTransactionDate());
+        bookByHoldingKind(request);
         validateCashAmount(request);
         validateCurrencyMatchesCard(request.getCardId(), request.getCurrency());
         checkCardBalance(request.getCardId(), cardPortionOf(request), request.getType(), null);
@@ -107,6 +108,7 @@ public class TransactionService {
         settingsService.assertStableIncomeSet();
         monthCloseService.assertMonthOpen(existing.getTransactionDate());
         monthCloseService.assertMonthOpen(request.getTransactionDate());
+        bookByHoldingKind(request);
         validateCashAmount(request);
         validateCurrencyMatchesCard(request.getCardId(), request.getCurrency());
         checkCardBalance(request.getCardId(), cardPortionOf(request), request.getType(), existing);
@@ -456,9 +458,17 @@ public class TransactionService {
             Long previousLoanGivenId,
             TransactionRequest req
     ) {
+        // A top-up re-filed between INVESTMENT and EMERGENCY_CONTRIBUTION against the SAME holding is
+        // a relabel, not a different record: the label follows the holding's emergency-fund flag
+        // (see bookByHoldingKind), so it flips whenever that flag has changed since the row was
+        // written. Reversing and recreating would delete a holding whose own funding row this is.
+        boolean relabelledTopUp = fundsAHolding(previousSubType) && fundsAHolding(req.getSubType())
+                && req.getInvestmentId() != null
+                && java.util.Objects.equals(previousInvestmentId, req.getInvestmentId());
+
         // If sub-type changed (or moved away from an auto-create sub-type), reverse the old
         // record and recreate from scratch — simpler and avoids subtle field-by-field bugs.
-        if (previousSubType != req.getSubType()
+        if ((previousSubType != req.getSubType() && !relabelledTopUp)
                 || ((req.getSubType() == TransactionSubType.INVESTMENT
                         || req.getSubType() == TransactionSubType.EMERGENCY_CONTRIBUTION)
                     && !java.util.Objects.equals(previousInvestmentId, req.getInvestmentId()))
@@ -642,6 +652,27 @@ public class TransactionService {
             t.setCard(null);
         }
         return t;
+    }
+
+    /**
+     * File money put into an existing holding by what the holding IS: an emergency fund takes an
+     * EMERGENCY_CONTRIBUTION, any other holding an INVESTMENT — the rule the Investments tab and the
+     * Plan's Record button already follow (FinanceService.contributeToInvestment). This page and the
+     * bot let an emergency fund be picked under "Investment", and the row used to be saved as sent:
+     * the fund grew, the Investments bucket was credited and the Emergency bucket was not, while the
+     * allocation preview had promised Emergency. Runs before anything reads the sub-type, so the
+     * bucket stamp, the finance-record sync and the response all see the booked one.
+     */
+    private void bookByHoldingKind(TransactionRequest req) {
+        if (req.getInvestmentId() == null || !fundsAHolding(req.getSubType())) return;
+        investmentRepository.findById(req.getInvestmentId())
+                .ifPresent(holding -> req.setSubType(AllocationBucket.forHolding(req.getSubType(), holding)));
+    }
+
+    /** The two sub-types that can put money into an existing holding. */
+    private static boolean fundsAHolding(TransactionSubType subType) {
+        return subType == TransactionSubType.INVESTMENT
+                || subType == TransactionSubType.EMERGENCY_CONTRIBUTION;
     }
 
     /**

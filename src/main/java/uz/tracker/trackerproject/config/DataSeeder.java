@@ -44,13 +44,11 @@ public class DataSeeder implements CommandLineRunner {
     @Override
     @Transactional
     public void run(String... args) {
-        // MUST be first: the app is UZS-only now, and Hibernate throws
-        // "No enum constant Currency.USD" the moment it reads a legacy non-UZS row.
-        // This is raw SQL precisely so it runs before any JPA read below.
-        // USD/EUR cash pots are supported again (as standalone pots — nothing converts),
-        // so the CHECK constraints Hibernate generated when the enum held only UZS must be
-        // rebuilt, exactly as for sub_type below. `ddl-auto=update` never migrates them,
-        // and the stale constraint rejects the new values at the DB level.
+        // First, and raw SQL, so it runs before any JPA read or write below. The Currency enum
+        // holds UZS, USD and EUR (USD/EUR only as standalone cash pots — nothing converts), but a
+        // database created while it held UZS alone still carries Hibernate's original CHECK
+        // constraints, which reject the other two. `ddl-auto=update` never migrates them, so they
+        // are rebuilt from today's enum, exactly as for sub_type below.
         rebuildCurrencyCheckConstraints();
 
         // Also before any JPA read — and before the CHECK constraint below is rebuilt from
@@ -220,22 +218,6 @@ public class DataSeeder implements CommandLineRunner {
         if (!categoryRepository.findByApplicableSubType(subType).isEmpty()) return;
         categoryRepository.save(cat(name, CategoryType.EXPENSE, color, icon, subType));
     }
-
-    /**
-     * Legacy data: the STOCKS and CRYPTO investment types were removed. Migrate any existing
-     * rows to OTHER via native SQL — done BEFORE JPA reads them under the trimmed enum, which
-     * would otherwise throw. Idempotent; non-fatal if the table doesn't exist yet.
-     */
-    /**
-     * One-way migration to the UZS-only model: delete every row denominated in a currency
-     * that no longer exists. Runs before anything else in {@link #run} because Hibernate
-     * cannot even read a row whose currency is not a {@link Currency} constant.
-     *
-     * Children go before parents so foreign keys stay satisfied, and transactions attached
-     * to a doomed wallet/record are removed even if their own currency column looks fine.
-     * Idempotent: once the data is clean every statement matches zero rows, so this is a
-     * no-op on every later boot.
-     */
 
     /**
      * The wallet-to-wallet "exchange" feature was removed, along with its two sub-types.
@@ -459,6 +441,11 @@ public class DataSeeder implements CommandLineRunner {
         return s == null || s.isBlank() ? null : s.trim();
     }
 
+    /**
+     * Legacy data: the STOCKS and CRYPTO investment types were removed. Migrate any existing
+     * rows to OTHER via native SQL — done BEFORE JPA reads them under the trimmed enum, which
+     * would otherwise throw. Idempotent; non-fatal if the table doesn't exist yet.
+     */
     private void migrateLegacyInvestmentTypes() {
         try {
             entityManager.createNativeQuery(
@@ -468,15 +455,6 @@ public class DataSeeder implements CommandLineRunner {
         }
     }
 
-    /**
-     * Drop and recreate the CHECK constraint on transactions.sub_type so it includes
-     * every current TransactionSubType enum value. Hibernate's `ddl-auto=update` will
-     * happily ADD a constraint when none exists, but it does not REPLACE an existing
-     * one when the enum gains new members — leaving the DB to reject the new values.
-     *
-     * We do this defensively (catch + swallow) so it can't take the app down if the
-     * underlying DB engine isn't Postgres or has a different constraint name scheme.
-     */
     /**
      * Every currency column carries a Hibernate-generated CHECK constraint listing the enum
      * members that existed when the column was created. Adding USD/EUR does not update them,
@@ -516,6 +494,15 @@ public class DataSeeder implements CommandLineRunner {
         }
     }
 
+    /**
+     * Drop and recreate the CHECK constraint on transactions.sub_type so it includes
+     * every current TransactionSubType enum value. Hibernate's `ddl-auto=update` will
+     * happily ADD a constraint when none exists, but it does not REPLACE an existing
+     * one when the enum gains new members — leaving the DB to reject the new values.
+     *
+     * We do this defensively (catch + swallow) so it can't take the app down if the
+     * underlying DB engine isn't Postgres or has a different constraint name scheme.
+     */
     private void rebuildSubTypeCheckConstraint() {
         String inList = Arrays.stream(TransactionSubType.values())
                 .map(v -> "'" + v.name() + "'")

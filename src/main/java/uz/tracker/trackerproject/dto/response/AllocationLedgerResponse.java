@@ -10,8 +10,8 @@ import java.util.List;
 /**
  * Cross-month allocation ledger for the Overview page. Treats recommended-vs-paid as one
  * running balance from the configured start month to the selected month: overpaying later
- * clears earlier backlog. Every figure is broken down (income × level × %) so the user can
- * see exactly where it came from. All money fields are in the requested display currency.
+ * clears earlier backlog. Every figure is broken down (left balance × %) so the user can
+ * see exactly where it came from. All money fields are UZS.
  */
 @Getter @Builder
 public class AllocationLedgerResponse {
@@ -29,14 +29,14 @@ public class AllocationLedgerResponse {
      */
     private boolean subscriptionsPending;
 
-    private BigDecimal stableIncome;     // selected month, display currency
-    private BigDecimal bonusThisMonth;   // bonus-tagged income received in the selected month
-    private BigDecimal allocationBase;   // "left balance" = available (carryover + income) the %s apply to
+    private BigDecimal stableIncome;     // selected month
+    private BigDecimal bonusThisMonth;   // bonus-tagged income received in the selected month (display-only)
+    private BigDecimal allocationBase;   // "left balance" = stable income − subscriptions − debt charge; the %s apply to it
     private Integer level;               // selected month (level is stable across months)
     private String subLevel;             // selected month
 
-    // ── Headline totals (display currency) ──────────────────────────────────────
-    /** Σ of each bucket's recommended for the selected month (stable + bonus based). */
+    // ── Headline totals ──────────────────────────────────────────────────────────
+    /** Σ of each bucket's recommended for the selected month (% × left balance). */
     private BigDecimal dueThisMonth;
     /** Σ of each bucket's positive carried balance from months before the selected one. */
     private BigDecimal carriedFromPrevious;
@@ -60,7 +60,7 @@ public class AllocationLedgerResponse {
         private BigDecimal marked;
         private BigDecimal carried;       // net balance from previous months (negative = ahead)
         private BigDecimal outstanding;   // max(0, running balance through selected month)
-        private BigDecimal effectivePercent; // paid ÷ (stable + bonus) this month, as a % (null when nothing paid)
+        private BigDecimal effectivePercent; // paid ÷ left balance this month, as a % (null when nothing paid)
         private boolean overAllocated;    // paid more than recommended this month
     }
 
@@ -69,9 +69,9 @@ public class AllocationLedgerResponse {
         private String month;             // YYYY-MM
         private Integer level;
         private String subLevel;
-        private BigDecimal stableIncome;  // display currency
-        private BigDecimal bonus;         // display currency
-        private BigDecimal allocationBase; // "left balance" the %s apply to (display currency)
+        private BigDecimal stableIncome;
+        private BigDecimal bonus;         // display-only
+        private BigDecimal allocationBase; // "left balance" the %s apply to, with THAT month's debt charge
         private boolean selected;         // true for the month being viewed
         private List<MonthBucketLine> lines;
     }
@@ -80,8 +80,8 @@ public class AllocationLedgerResponse {
     public static class MonthBucketLine {
         private String bucket;
         private BigDecimal percent;       // null = not recommended that month
-        private BigDecimal recommended;   // % × (stable + bonus), display currency
-        private BigDecimal paid;          // display currency
+        private BigDecimal recommended;   // % × that month's left balance
+        private BigDecimal paid;
         private BigDecimal net;           // recommended − paid (positive = fell behind)
     }
 }

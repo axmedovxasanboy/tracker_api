@@ -67,7 +67,7 @@ public class OverviewService {
             new BigDecimal("90000000"),  // < this → level 6
     };
 
-    /** Threshold for "tight vs comfortable" within Level 1.2 / 1.3 (5M UZS). */
+    /** Default "tight vs comfortable" cutoff within Level 1.2 (5M UZS); LevelConfig can override it. */
     private static final BigDecimal FIVE_MILLION_UZS = new BigDecimal("5000000");
     /** Recommended personal-loan repayment portion ("at least 34% per month"). */
     private static final BigDecimal PERSONAL_LOAN_PAYDOWN_RATE = new BigDecimal("0.34");
@@ -94,8 +94,8 @@ public class OverviewService {
         LocalDate start = month.atDay(1);
         LocalDate end = month.atEndOfMonth();
 
-        // Sum this month's INCOME transactions. Iterating the enum keeps this working
-        // unchanged if more currencies are ever reintroduced.
+        // Sum this month's INCOME transactions in the reporting currency — a foreign cash pot
+        // never rolls into a UZS figure (see Currency.reporting).
         BigDecimal actual = BigDecimal.ZERO;
         for (Currency c : Currency.reporting()) {
             BigDecimal sum = transactionRepository.sumByTypeCurrencyDateRange(
@@ -121,11 +121,10 @@ public class OverviewService {
     // ── Tier ──────────────────────────────────────────────────────────────────
 
     /**
-     * Compute the user's financial tier for a given month. Level/sub-level reflect
-     * the CURRENT snapshot (debts, subscriptions, income) — we don't store historical
-     * snapshots — but the per-bucket "paid this month" math IS scoped to the requested
-     * month. So switching months shows the current tier with that month's payment
-     * progress.
+     * Compute the user's financial tier for a given month. Income and subscriptions are the
+     * CURRENT settings — no historical snapshots are stored — and so are the loan and debt
+     * balances; but which obligations count (a bank loan's dates, a loan or debt's payment-start
+     * month) and every "paid this month" figure are scoped to the requested month.
      */
     @Transactional(readOnly = true)
     public OverviewTierResponse getTier(YearMonth month, Currency displayCurrency) {
@@ -139,11 +138,10 @@ public class OverviewService {
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
         BigDecimal leftMoneyUzs = incomeUzs.subtract(mandatoryUzs);
 
-        LocalDate today = LocalDate.now();
         // The owner's model: the only "monthly loan installment" is a BANK loan. Money borrowed
         // from a person (LoanTaken) and money owed (Debt) are BOTH debt → paid at 34% of original.
         // Gated by payment-start so a not-yet-started obligation doesn't move this month's tier.
-        BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(today);
+        BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(month);
         BigDecimal loanTaken34Uzs = sumLoanTaken34Uzs(month);
         BigDecimal debtRows34Uzs = sumDebtRows34Uzs(month);
         BigDecimal plannedSetAsideUzs = sumLoanTakenPlannedUzs(month);
@@ -158,9 +156,6 @@ public class OverviewService {
         Integer level = missingIncome ? null : computeLevel(leftMoneyUzs);
         String subLevel = computeSubLevel(level, debtPaymentsUzs, debtRatio);
         String levelLabel = computeLevelLabel(level, subLevel, missingIncome);
-
-        // Remaining personal-loan balances still drive the Levels 2–6 configured 34% pay-down action.
-        BigDecimal personalLoansRemainingUzs = sumPersonalLoansRemainingUzs(month);
 
         // Allocation base = "left balance" = leftMoney − debtPayments: stable income minus
         // mandatory subscriptions, minus this month's monthly debt charge (bank installment +
@@ -208,7 +203,7 @@ public class OverviewService {
                             + " first — your level and allocation unlock once they're covered.");
         } else {
             allocation = computeAllocation(level, subLevel, incomeUzs, allocBaseUzs, mandatoryUzs,
-                    bankUzs, debt34Uzs, debtRatio, personalLoansRemainingUzs, plannedSetAsideUzs,
+                    bankUzs, debt34Uzs, debtRatio, plannedSetAsideUzs,
                     displayCurrency, paid, marks, monthPaid, upcomingChargeActions(month, displayCurrency));
         }
 
@@ -283,11 +278,11 @@ public class OverviewService {
 
     /**
      * Running allocation ledger from the configured start month to {@code selected}. For each
-     * month we recompute the tier scenario (so the % can vary as debts start/clear), apply it
-     * to that month's "left balance" — the available money (carryover + income earned that
-     * month) — to get the recommended amount, and net it against what was actually paid. The
-     * balance is cumulative — overpaying a later month clears an earlier shortfall. Level/
-     * sub-level stay anchored to stable income.
+     * month we recompute the tier scenario (so the % can vary as bank loans, loans and debts start
+     * or end), apply it to that month's "left balance" — stable income minus subscriptions minus
+     * that month's debt charge, the same base the tier card uses — to get the recommended amount,
+     * and net it against what was actually paid. The balance is cumulative — overpaying a later
+     * month clears an earlier shortfall. The level stays anchored to stable income.
      */
     @Transactional(readOnly = true)
     public AllocationLedgerResponse getAllocationLedger(YearMonth selected, Currency display) {
@@ -344,7 +339,6 @@ public class OverviewService {
         BigDecimal stableUzs = s.getMonthlyStableIncome();
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
         Integer level = computeLevel(stableUzs.subtract(mandatoryUzs));
-        LocalDate today = LocalDate.now();
 
         BigDecimal[] totalRec = zeros();
         BigDecimal[] totalPaid = zeros();
@@ -361,7 +355,10 @@ public class OverviewService {
         YearMonth earliestDue = null, latestDue = null;
 
         for (YearMonth m = start; !m.isAfter(selected); m = m.plusMonths(1)) {
-            BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(today);
+            // Each month is charged the bank loans that ran in IT. Asking about today instead
+            // charged July for a loan taken in September, and dropped a paid-off loan from the
+            // months it was still being paid in.
+            BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(m);
             BigDecimal loanInstallmentsUzs = bankUzs;
             BigDecimal debt34Uzs = sumDebt34Uzs(m);
             BigDecimal debtPaymentsUzs = loanInstallmentsUzs.add(debt34Uzs);
@@ -379,8 +376,7 @@ public class OverviewService {
                 pct = computeLevel1Plan(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
                         debt34Uzs, debtRatio, minLeftoverUzs(1)).pct();
             } else {
-                pct = bucketPercents(level, subLevel, stableUzs, mandatoryUzs, bankUzs,
-                        sumPersonalLoansRemainingUzs(m));
+                pct = bucketPercents(level, subLevel);
             }
             BigDecimal allocBaseUzs = clampZero(stableUzs.subtract(mandatoryUzs).subtract(debtPaymentsUzs));
 
@@ -447,7 +443,7 @@ public class OverviewService {
             }
         }
 
-        // Effective-% denominator is the selected month's allocation base (= available / left balance).
+        // Effective-% denominator is the selected month's allocation base (its left balance).
         BigDecimal incomeBaseSelUzs = allocBaseSelectedUzs;
         List<BucketLedger> buckets = new ArrayList<>(LEDGER_WIDTH);
         BigDecimal totalDueNowUzs = BigDecimal.ZERO;
@@ -520,7 +516,7 @@ public class OverviewService {
         return total;
     }
 
-    /** Bonus-tagged income received in {@code month}, normalised to UZS across currencies. */
+    /** Bonus-tagged income received in {@code month}, in the reporting currency. Display-only. */
     private BigDecimal sumBonusIncomeUzs(YearMonth month) {
         LocalDate start = month.atDay(1);
         LocalDate end = month.atEndOfMonth();
@@ -534,12 +530,19 @@ public class OverviewService {
         return total;
     }
 
-    private BigDecimal sumBankLoanMonthlyPaymentsUzs(LocalDate today) {
+    /**
+     * The bank installments due in {@code month}: every bank loan that ran during it — taken on or
+     * before its last day, and not ended before its first. A loan that ends mid-month still owes
+     * that month's installment.
+     */
+    private BigDecimal sumBankLoanMonthlyPaymentsUzs(YearMonth month) {
+        LocalDate first = month.atDay(1);
+        LocalDate last = month.atEndOfMonth();
         BigDecimal total = BigDecimal.ZERO;
         for (BankLoan b : bankLoanRepository.findAll()) {
             if (b.getMonthlyPayment() == null || b.getMonthlyPayment().signum() <= 0) continue;
-            // If the loan has ended, it no longer contributes.
-            if (b.getEndDate() != null && b.getEndDate().isBefore(today)) continue;
+            if (b.getTakenDate() != null && b.getTakenDate().isAfter(last)) continue;
+            if (b.getEndDate() != null && b.getEndDate().isBefore(first)) continue;
             total = total.add(b.getMonthlyPayment());
         }
         return total;
@@ -691,8 +694,8 @@ public class OverviewService {
     }
 
     /**
-     * Debt-based sub-level for ANY level: {level}.1 no debt, .2 manageable (ratio &lt; 70%),
-     * .3 heavy (≥ 70%). Level 1 keeps its hard-coded scenario logic downstream; Levels 2–6
+     * Debt-based sub-level for ANY level: {level}.1 no debt, .2 manageable (ratio ≤ 70%),
+     * .3 heavy (&gt; 70%). Level 1 keeps its hard-coded scenario logic downstream; Levels 2–6
      * use these sub-levels to look up the user-configured allocation rules.
      */
     private String computeSubLevel(Integer level, BigDecimal debtTotalUzs, BigDecimal debtRatio) {
@@ -725,32 +728,6 @@ public class OverviewService {
         return b == null ? BigDecimal.ZERO : b;
     }
 
-    /**
-     * Total REMAINING amount across LoanTaken + Debt records (personal loans only,
-     * not bank installments). Used to compute the recommended 34% pay-down for
-     * sub-levels 1.2.2 / 1.2.3 / 1.3 — distinct from the derived monthly contribution
-     * which drives the sub-level ratio.
-     */
-    private BigDecimal sumPersonalLoansRemainingUzs(YearMonth month) {
-        BigDecimal total = BigDecimal.ZERO;
-        for (LoanTaken l : loanTakenRepository.findAll()) {
-            // A loan on a plan is asked for at its plan amount instead; charging 34% of its
-            // remaining here as well would demand the money twice.
-            if (l.getPlannedMonthlyPayment() != null && l.getPlannedMonthlyPayment().signum() > 0) continue;
-            BigDecimal remaining = nullToZero(l.getTotalAmount()).subtract(nullToZero(l.getPaidAmount()));
-            if (remaining.signum() <= 0) continue;
-            if (!hasStartedBy(l.getPaymentStartDate(), month)) continue;
-            total = total.add(remaining);
-        }
-        for (Debt d : debtRepository.findAll()) {
-            BigDecimal remaining = nullToZero(d.getTotalAmount()).subtract(nullToZero(d.getPaidAmount()));
-            if (remaining.signum() <= 0) continue;
-            if (!hasStartedBy(d.getPaymentStartDate(), month)) continue;
-            total = total.add(remaining);
-        }
-        return total;
-    }
-
     // ── Per-bucket paid-this-month + history ──────────────────────────────────
 
     /**
@@ -761,16 +738,31 @@ public class OverviewService {
                       BigDecimal savings) {}
 
     /**
-     * Paid-this-month sums for the two debt-pay actions, in display currency.
-     * Drives the "Paid X of Y" progress strip under the action items.
+     * Paid-this-month sums for the debt actions, in display currency. Drives the "Paid X of Y"
+     * progress strip under each action and whether it still locks the buckets.
+     *
+     * @param ruleRepayments repayments toward every loan and debt WITHOUT a repayment plan, plus
+     *        repayment transactions not linked to any loan — what the 34% pay-down asks for
+     * @param planRepayments repayments toward loans ON a repayment plan — what the set-aside asks for
      */
-    record MonthPaid(BigDecimal bankInstallments, BigDecimal personalLoanRepayments) {}
+    record MonthPaid(BigDecimal bankInstallments, BigDecimal ruleRepayments, BigDecimal planRepayments) {}
 
     private MonthPaid computeMonthPaid(YearMonth month, Currency displayCurrency) {
         LocalDate start = month.atDay(1);
         LocalDate end = month.atEndOfMonth();
+        // The set-aside and the 34% pay-down are two separate asks, so a repayment must count toward
+        // the one it pays. Both used to read ALL of the month's repayments, which let paying only the
+        // larger ask satisfy the smaller one too and unlock the buckets while money was still owed.
+        // Split by the loan's plan as it stands now — the same test the two targets are built with.
+        java.util.Set<Long> plannedLoanIds = new java.util.HashSet<>();
+        for (LoanTaken l : loanTakenRepository.findAll()) {
+            if (l.getPlannedMonthlyPayment() != null && l.getPlannedMonthlyPayment().signum() > 0) {
+                plannedLoanIds.add(l.getId());
+            }
+        }
         BigDecimal bank = BigDecimal.ZERO;
-        BigDecimal personal = BigDecimal.ZERO;
+        BigDecimal repaid = BigDecimal.ZERO;
+        BigDecimal repaidToPlans = BigDecimal.ZERO;
         for (Currency c : Currency.reporting()) {
             BigDecimal bankSum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.BANK_LOAN_PAYMENT, c, start, end);
@@ -780,19 +772,33 @@ public class OverviewService {
             BigDecimal repaySum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.LOAN_REPAYMENT, c, start, end);
             if (repaySum != null && repaySum.signum() > 0) {
-                personal = personal.add(repaySum);
+                repaid = repaid.add(repaySum);
+            }
+            if (!plannedLoanIds.isEmpty()) {
+                BigDecimal planSum = transactionRepository.sumRepaymentsToLoansTaken(plannedLoanIds, c, start, end);
+                if (planSum != null && planSum.signum() > 0) {
+                    repaidToPlans = repaidToPlans.add(planSum);
+                }
             }
         }
+        BigDecimal rule = clampZero(repaid.subtract(repaidToPlans));
+        BigDecimal plan = repaidToPlans;
         // "Already paid" marks (no transaction) for bank installments and personal loans / debts.
         for (MarkPaid m : markPaidRepository.findByMonth(start)) {
             switch (m.getKind() == null ? "" : m.getKind()) {
                 case "BANK" -> bank = bank.add(m.getAmount());
-                case "PERSONAL_LOAN", "DEBT" ->
-                        personal = personal.add(m.getAmount());
+                case "PERSONAL_LOAN" -> {
+                    if (m.getRefId() != null && plannedLoanIds.contains(m.getRefId())) {
+                        plan = plan.add(m.getAmount());
+                    } else {
+                        rule = rule.add(m.getAmount());
+                    }
+                }
+                case "DEBT" -> rule = rule.add(m.getAmount());
                 default -> { }
             }
         }
-        return new MonthPaid(bank, personal);
+        return new MonthPaid(bank, rule, plan);
     }
 
     // ── "Already paid" marks ──────────────────────────────────────────────────
@@ -890,27 +896,23 @@ public class OverviewService {
     // ── Allocation preview (what would this draft transaction do?) ────────────
 
     /**
-     * Which bucket, if any, a sub-type funds. This is the SAME routing
-     * {@link #computePaidThisMonth} uses, kept in one place so the preview can never
-     * promise a bucket the accounting wouldn't actually credit.
+     * Which bucket, if any, a draft transaction would fund. It goes through the two helpers the
+     * write path itself uses — {@link AllocationBucket#forHolding} to decide the sub-type a top-up
+     * is booked as, then {@link AllocationBucket#forSubType} for the bucket that sub-type credits —
+     * so the preview can never promise a bucket the accounting wouldn't actually credit.
      */
     private String bucketForSubType(uz.tracker.trackerproject.enums.TransactionSubType subType, Long investmentId) {
         if (subType == null) return null;
-        return switch (subType) {
-            case DONATION -> "DONATION";
-            case EMERGENCY_CONTRIBUTION -> "EMERGENCY";
-            case STOCK_PURCHASE -> null; // stocks are no longer an allocation bucket
-            case INVESTMENT -> {
-                Investment target = investmentId == null ? null
-                        : investmentRepository.findById(investmentId).orElse(null);
-                // An emergency-flagged target books EMERGENCY_CONTRIBUTION at write time,
-                // so the preview must say Emergency, not Investments.
-                if (target != null && Boolean.TRUE.equals(target.getEmergencyFund())) yield "EMERGENCY";
-                yield (target != null && Boolean.TRUE.equals(target.getSavingsGoal()))
-                        ? "SAVINGS" : "INVESTMENTS";
-            }
-            default -> null;
-        };
+        // Recorded on the row as STOCKS, but stocks are no longer an allocation bucket.
+        if (subType == uz.tracker.trackerproject.enums.TransactionSubType.STOCK_PURCHASE) return null;
+        Investment holding = null;
+        if (investmentId != null && (subType == uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT
+                || subType == uz.tracker.trackerproject.enums.TransactionSubType.EMERGENCY_CONTRIBUTION)) {
+            holding = investmentRepository.findById(investmentId).orElse(null);
+        }
+        var booked = AllocationBucket.forHolding(subType, holding);
+        return AllocationBucket.forSubType(booked,
+                holding != null && Boolean.TRUE.equals(holding.getSavingsGoal()));
     }
 
     @Transactional(readOnly = true)
@@ -1143,15 +1145,15 @@ public class OverviewService {
     // ── Allocation guidance ───────────────────────────────────────────────────
 
     /**
-     * Compute the allocation recommendation for a tier. Level 1 has hard-coded rules
-     * per the owner's spec; Levels 2-6 return a "not yet defined" stub until the user
-     * configures their own percentages.
+     * Compute the allocation recommendation for a tier. Level 1 has hard-coded rules per the
+     * owner's spec; Levels 2–6 use the percentages the user configured for their sub-level, and
+     * return a "not yet defined" stub until they have.
      */
     private TierAllocation computeAllocation(
             Integer level, String subLevel,
             BigDecimal incomeUzs, BigDecimal allocBaseUzs, BigDecimal mandatoryUzs,
             BigDecimal bankMonthlyUzs,
-            BigDecimal debt34Uzs, BigDecimal debtRatio, BigDecimal personalLoansRemainingUzs,
+            BigDecimal debt34Uzs, BigDecimal debtRatio,
             BigDecimal plannedSetAsideUzs,
             Currency displayCurrency, BucketPaid paid, BucketPaid marks, MonthPaid monthPaid,
             List<ActionItem> upcoming) {
@@ -1162,29 +1164,26 @@ public class OverviewService {
         }
         if (level != 1) {
             return computeConfiguredAllocation(level, subLevel, allocBaseUzs, displayCurrency,
-                    bankMonthlyUzs, personalLoansRemainingUzs, plannedSetAsideUzs, paid, marks,
+                    bankMonthlyUzs, debt34Uzs, plannedSetAsideUzs, paid, marks,
                     monthPaid, upcoming);
         }
 
-        // Level-1 engine: the SCENARIO (case A/B/C, tight-vs-comfortable split, bucket %s) is still
-        // selected from stable income per the owner's spec (decisions D1–D4); but the base the
-        // percentages multiply is THIS MONTH'S AVAILABLE money ("left balance" = carryover + income),
-        // per the owner's 2026-06-07 change. loanInstallments = bank only → ZERO in the 4th slot,
-        // since borrowed money is debt (34%).
+        // Level-1 engine: the SCENARIO (case A/B/C, tight-vs-comfortable split, bucket %s) is
+        // selected from stable income per the owner's spec (decisions D1–D4), and the base the
+        // percentages multiply is the "left balance" = stable income − subscriptions − this
+        // month's debt charge (the owner's 2026-06-08 decision; for Level 1 it equals the plan's
+        // calc base). loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is
+        // debt (34%).
         Level1Plan plan = computeLevel1Plan(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
                 debt34Uzs, debtRatio, minLeftoverUzs(1));
         String[] p = plan.pct();
         List<AllocationLine> lines = percentLines(allocBaseUzs, displayCurrency, paid, marks,
                 p[0], p[1], p[2]);
 
-        // Action targets (display currency). Bank installments pay via PayBankInstallmentModal; the
-        // 34%-of-debt action (borrowed money + debts) pays via PayPersonalLoanModal.
-        BigDecimal bankTarget = bankMonthlyUzs;
-        BigDecimal personalUzs = nullToZero(debt34Uzs);
-        BigDecimal personalTarget = personalUzs;
-
-        List<ActionItem> actions = level1Actions(plan, monthPaid, bankTarget,
-                bankMonthlyUzs, personalTarget, personalUzs, plannedSetAsideUzs, displayCurrency, upcoming);
+        // Bank installments pay via PayBankInstallmentModal; the set-aside and the 34% pay-down
+        // (borrowed money + debts) via PayPersonalLoanModal.
+        List<ActionItem> actions = level1Actions(plan, monthPaid, bankMonthlyUzs,
+                nullToZero(debt34Uzs), plannedSetAsideUzs, displayCurrency, upcoming);
 
         return TierAllocation.builder()
                 .scenarioKey(plan.scenarioKey())
@@ -1252,8 +1251,7 @@ public class OverviewService {
 
     /** Level-1 action items per scenario (keeps PAY_BANK / PAY_PERSONAL_LOAN keys for the UI). */
     private List<ActionItem> level1Actions(Level1Plan plan, MonthPaid monthPaid,
-            BigDecimal bankTarget, BigDecimal bankMonthlyUzs,
-            BigDecimal personalTarget, BigDecimal personalUzs,
+            BigDecimal bankMonthlyUzs, BigDecimal debt34Uzs,
             BigDecimal plannedSetAsideUzs, Currency cur, List<ActionItem> upcoming) {
         String key = plan.scenarioKey();
         // 1.1 is the debt-free scenario, so it asks for nothing — but a repayment that merely
@@ -1261,27 +1259,9 @@ public class OverviewService {
         if ("1.1".equals(key)) return List.copyOf(upcoming);
         List<ActionItem> actions = new ArrayList<>();
         if (bankMonthlyUzs.signum() > 0) {
-            actions.add(payBank(monthPaid, bankTarget));
+            actions.add(payBank(monthPaid, bankMonthlyUzs));
         }
-        // The set-aside is money the user committed to themselves; the 34% pay-down is the
-        // rule's demand on everything else. Showing them as one number hid the plan entirely.
-        if (plannedSetAsideUzs.signum() > 0) {
-            actions.add(setAside(plannedSetAsideUzs, cur, monthPaid));
-        }
-        BigDecimal ruleTarget = personalTarget.subtract(plannedSetAsideUzs);
-        if (personalUzs.signum() > 0 && ruleTarget.signum() > 0) {
-            String amount = formatNumber(ruleTarget) + " " + cur;
-            actions.add(ActionItem.builder()
-                    .text("Pay at least 34% of your debts / borrowed money (~ "
-                            + amount + ") this month.")
-                    .code("page.plan.action.payDebts34")
-                    .params(Map.of("amount", amount))
-                    .action("PAY_PERSONAL_LOAN")
-                    .paid(monthPaid.personalLoanRepayments())
-                    .target(ruleTarget)
-                    .unlockThreshold(ruleTarget)
-                    .build());
-        }
+        addDebtActions(actions, debt34Uzs, plannedSetAsideUzs, cur, monthPaid);
         switch (key) {
             case "1.2.1.tight", "1.2.2.tight" ->
                     actions.add(info("page.plan.note.tight", Map.of(),
@@ -1291,7 +1271,7 @@ public class OverviewService {
                             "5M+ UZS remains after debt — higher allocations apply."));
             case "1.2.3" ->
                     actions.add(info("page.plan.note.loanAndDebt", Map.of(),
-                            "Both loan and debt — emergency & stocks are skipped this tier; focus on debt."));
+                            "Both loan and debt — emergency is skipped this tier; focus on debt."));
             case "1.3" ->
                     actions.add(info("page.plan.note.heavyDebt", Map.of(),
                             "Heavy debt (> 70% of income): only a 2% donation this month. "
@@ -1325,7 +1305,7 @@ public class OverviewService {
      */
     private TierAllocation computeConfiguredAllocation(
             Integer level, String subLevel, BigDecimal incomeBaseUzs, Currency displayCurrency,
-            BigDecimal bankMonthlyUzs, BigDecimal personalLoansRemainingUzs,
+            BigDecimal bankMonthlyUzs, BigDecimal debt34Uzs,
             BigDecimal plannedSetAsideUzs, BucketPaid paid, BucketPaid marks, MonthPaid monthPaid,
             List<ActionItem> upcoming) {
 
@@ -1355,13 +1335,10 @@ public class OverviewService {
         if (bankMonthlyUzs.signum() > 0) {
             actions.add(payBank(monthPaid, bankMonthlyUzs));
         }
-        if (plannedSetAsideUzs.signum() > 0) {
-            actions.add(setAside(plannedSetAsideUzs, displayCurrency, monthPaid));
-        }
-        if (personalLoansRemainingUzs.signum() > 0) {
-            BigDecimal personalTarget = personalLoansRemainingUzs.multiply(PERSONAL_LOAN_PAYDOWN_RATE, MC);
-            actions.add(payPersonal(personalTarget, displayCurrency, monthPaid, personalTarget));
-        }
+        // The same asks as Level 1. This used to charge 34% of what REMAINS on each loan and debt,
+        // while the sub-level and the left balance above were already built from 34% of the
+        // ORIGINAL total — so one page quoted two different monthly debt charges.
+        addDebtActions(actions, nullToZero(debt34Uzs), plannedSetAsideUzs, displayCurrency, monthPaid);
         if (rule.getNote() != null && !rule.getNote().isBlank()) {
             actions.add(userNote(rule.getNote()));
         }
@@ -1379,11 +1356,9 @@ public class OverviewService {
     /**
      * Percentages for a Levels 2–6 (level, sub-level) from configured rules. Level 1 is handled
      * by {@link #computeLevel1Plan} directly (it needs the per-case calc base, not just %), so
-     * this is only called for Levels 2–6. The extra params are kept for call-site symmetry.
+     * this is only called for Levels 2–6.
      */
-    private String[] bucketPercents(Integer level, String subLevel,
-            BigDecimal stableUzs, BigDecimal mandatoryUzs,
-            BigDecimal bankUzs, BigDecimal personalRemUzs) {
+    private String[] bucketPercents(Integer level, String subLevel) {
         if (level != null && level >= 2 && level <= 6 && subLevel != null) {
             return ruleRepository.findBySubLevel(subLevel)
                     .map(r -> new String[]{
@@ -1446,9 +1421,8 @@ public class OverviewService {
         String curSubLevel = null;
         if (curLevel != null && !missingIncome) {
             BigDecimal stableUzs = s.getMonthlyStableIncome();
-            LocalDate today = LocalDate.now();
             YearMonth now = YearMonth.now();
-            BigDecimal debtTotal = sumBankLoanMonthlyPaymentsUzs(today).add(sumDebt34Uzs(now));
+            BigDecimal debtTotal = sumBankLoanMonthlyPaymentsUzs(now).add(sumDebt34Uzs(now));
             BigDecimal ratio = stableUzs.signum() > 0 ? debtTotal.divide(stableUzs, MC) : null;
             curSubLevel = computeSubLevel(curLevel, debtTotal, ratio);
         }
@@ -1626,17 +1600,41 @@ public class OverviewService {
                 .build();
     }
 
-    private static ActionItem payPersonal(BigDecimal targetDisplay, Currency displayCurrency,
-                                          MonthPaid monthPaid, BigDecimal target) {
-        String amount = formatNumber(targetDisplay) + " " + displayCurrency;
+    /**
+     * The debt asks shared by every level: the set-aside for loans on a repayment plan, then the
+     * 34% pay-down on everything else — both paid through PayPersonalLoanModal. The set-aside is
+     * money the user committed to themselves and the 34% pay-down is the rule's demand on the
+     * rest; showing them as one number hid the plan entirely.
+     *
+     * @param debt34Uzs this month's whole debt charge: plan amounts plus 34% of every other
+     *        started loan and debt (see {@link #sumDebt34Uzs})
+     */
+    private static void addDebtActions(List<ActionItem> actions, BigDecimal debt34Uzs,
+                                       BigDecimal plannedSetAsideUzs, Currency cur, MonthPaid monthPaid) {
+        if (plannedSetAsideUzs.signum() > 0) {
+            actions.add(setAside(plannedSetAsideUzs, cur, monthPaid));
+        }
+        BigDecimal ruleTarget = debt34Uzs.subtract(plannedSetAsideUzs);
+        if (ruleTarget.signum() > 0) {
+            actions.add(payDebts34(ruleTarget, cur, monthPaid));
+        }
+    }
+
+    /**
+     * The 34% pay-down: 34% of the ORIGINAL total of every started loan and debt that has no
+     * repayment plan, capped at what is left on each. It must reach the full target to unlock.
+     */
+    private static ActionItem payDebts34(BigDecimal target, Currency cur, MonthPaid monthPaid) {
+        String amount = formatNumber(target) + " " + cur;
         return ActionItem.builder()
-                .text("Pay at least 34% (~ " + amount + ") of personal loans this month.")
-                .code("page.plan.actionPayPersonal")
+                .text("Pay at least 34% of your debts / borrowed money (~ " + amount + ") this month.")
+                .code("page.plan.action.payDebts34")
                 .params(Map.of("amount", amount))
                 .action("PAY_PERSONAL_LOAN")
-                .paid(monthPaid.personalLoanRepayments())
+                // Only repayments toward these loans and debts: money paid toward a planned loan
+                // counts for the set-aside and must not satisfy this ask as well.
+                .paid(monthPaid.ruleRepayments())
                 .target(target)
-                // Personal loans must reach the full 34% target to unlock.
                 .unlockThreshold(target)
                 .build();
     }
@@ -1653,7 +1651,8 @@ public class OverviewService {
                 .code("page.plan.action.setAside")
                 .params(Map.of("amount", amount))
                 .action("PAY_PERSONAL_LOAN")
-                .paid(monthPaid.personalLoanRepayments())
+                // Only repayments toward loans on a plan — see payDebts34.
+                .paid(monthPaid.planRepayments())
                 .target(targetDisplay)
                 .unlockThreshold(targetDisplay)
                 .build();
@@ -1676,12 +1675,11 @@ public class OverviewService {
     }
 
     /**
-     * Build the four bucket lines from minimum-percent strings. Pass null for a bucket
-     * that should render as "NO NEED" at this tier. Paid-this-month amounts (already in
-     * display currency) come from the BucketPaid context.
-     */
-    /**
-     * Stocks are no longer an allocation bucket — the owner does not allocate to stocks at all.
+     * Build the three bucket lines (Donation / Emergency / Investments) from minimum-percent
+     * strings. Pass null for a bucket that should render as "NO NEED" at this tier. Paid-this-month
+     * amounts come from the BucketPaid context.
+     *
+     * <p>Stocks are no longer an allocation bucket — the owner does not allocate to stocks at all.
      * The percentage is still computed upstream (it is part of the Level-1 scenario tuple) but
      * nothing is emitted for it, so it cannot appear in the Overview, the ledger, or a month.
      */

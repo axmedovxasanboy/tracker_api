@@ -78,6 +78,25 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
             @Param("end") java.time.LocalDate end);
 
     /**
+     * LOAN_REPAYMENT money paid in a date range toward the given borrowed loans. Used to tell the
+     * repayments that fund a loan's repayment plan apart from the ones that pay down everything
+     * else under the 34% rule — the Plan asks for the two separately, so it must count them
+     * separately. Callers must not pass an empty collection.
+     */
+    @Query("""
+            SELECT COALESCE(SUM(t.amount), 0) FROM Transaction t
+            WHERE t.subType = uz.tracker.trackerproject.enums.TransactionSubType.LOAN_REPAYMENT
+              AND t.repaidLoanTakenId IN :loanTakenIds
+              AND t.currency = :currency
+              AND t.transactionDate >= :start AND t.transactionDate <= :end
+            """)
+    BigDecimal sumRepaymentsToLoansTaken(
+            @Param("loanTakenIds") java.util.Collection<Long> loanTakenIds,
+            @Param("currency") Currency currency,
+            @Param("start") java.time.LocalDate start,
+            @Param("end") java.time.LocalDate end);
+
+    /**
      * Net amount of one sub-type in a date range: EXPENSE rows count up, INCOME rows count down.
      * Used for EVERYDAY_SPENDING, where a reconciliation books untracked spending as an expense and
      * a surplus it found as income — the running figure is the difference.

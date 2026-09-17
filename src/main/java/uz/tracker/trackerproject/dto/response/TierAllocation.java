@@ -8,28 +8,28 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Per-tier allocation recommendation. The bucket-level lines describe minimum
- * percentages of stable income to set aside; {@code notes} carries scenario-specific
- * action items (e.g. "pay at least 34% of personal loans this month").
+ * Per-tier allocation recommendation. The bucket-level lines describe minimum percentages of
+ * the left balance (stable income − subscriptions − this month's debt charge) to set aside;
+ * {@code actions} carries the debt asks and scenario notes (e.g. "pay at least 34% of your
+ * debts this month").
  *
- * For Level 1, the rules are hard-coded server-side per the owner's spec. For
- * Levels 2-6, the user will configure their own percentages — until then the
- * service returns scenarioKey = null + a note explaining that.
+ * For Level 1, the rules are hard-coded server-side per the owner's spec. For Levels 2–6, the
+ * user configures their own percentages — until then the service returns scenarioKey = null +
+ * a note explaining that.
  */
 @Getter @Builder
 public class TierAllocation {
 
     /**
-     * Short identifier for the rule branch hit (e.g. "1.1", "1.2.1.tight",
-     * "1.2.3.comfortable", "1.3"). Null when guidance hasn't been defined for
-     * the tier yet (Levels 2-6 today).
+     * Short identifier for the rule branch hit (e.g. "1.1", "1.2.1.tight", "1.2.3", "1.3", or a
+     * configured sub-level like "2.2"). Null when guidance isn't defined for the tier yet.
      */
     private String scenarioKey;
 
     /** Short human-readable label for the scenario. */
     private String scenarioLabel;
 
-    /** One line per bucket — Donation, Emergency, Investments, Stocks. */
+    /** One line per bucket — Donation, Emergency, Investments. Stocks is no longer a bucket. */
     private List<AllocationLine> lines;
 
     /**
@@ -77,24 +77,28 @@ public class TierAllocation {
         /** Action key for the frontend: "PAY_BANK", "PAY_PERSONAL_LOAN", or null (informational only). */
         private String action;
 
-        /** Sum already paid this month for the action's target, in the display currency. Null when irrelevant. */
+        /**
+         * Sum already paid this month toward THIS action, marks included. Each payment counts for
+         * exactly one action: a repayment to a loan on a repayment plan counts for the set-aside,
+         * every other loan or debt repayment for the 34% pay-down. Null when irrelevant.
+         */
         private BigDecimal paid;
 
-        /** Recommended amount this month for the action's target, in the display currency. Null when irrelevant. */
+        /** Recommended amount this month for the action's target. Null when irrelevant. */
         private BigDecimal target;
 
         /**
          * Amount that must be paid this month for this action to count as "met" and stop
-         * locking the allocation buckets, in the display currency. Bank installments unlock
-         * at 90% of {@link #target} (the average monthly amount); personal loans require the
-         * full {@link #target} (the 34% pay-down). Null for informational items.
+         * locking the allocation buckets. Bank installments unlock at 90% of {@link #target}
+         * (the average monthly amount); the set-aside and the 34% pay-down require their full
+         * {@link #target}. Null for informational items.
          */
         private BigDecimal unlockThreshold;
     }
 
     @Getter @Builder
     public static class AllocationLine {
-        /** Stable identifier for the bucket: DONATION / EMERGENCY / INVESTMENTS / STOCKS. */
+        /** Stable identifier for the bucket: DONATION / EMERGENCY / INVESTMENTS. */
         private String bucket;
 
         /** Human label — e.g. "Donation". */
@@ -103,16 +107,16 @@ public class TierAllocation {
         /** True → show with min %/amount; false → render as "NO NEED" (skipped at this tier). */
         private boolean recommended;
 
-        /** Minimum percent of stable income, e.g. 10.0 for 10%. Null when not recommended. */
+        /** Minimum percent of the left balance, e.g. 10.0 for 10%. Null when not recommended. */
         private BigDecimal minPercent;
 
-        /** Minimum amount in the requested display currency. Null when not recommended. */
+        /** Minimum amount (percent × left balance). Null when not recommended. */
         private BigDecimal minAmount;
 
         /**
-         * Sum already paid this month for this bucket, in the requested display currency.
-         * Donations / Emergencies / Investments(non-stocks) / Stocks sourced from their
-         * respective entities filtered by date, PLUS any "already paid" marks for the month.
+         * Sum already paid this month for this bucket: donations by donation date, EMERGENCY and
+         * INVESTMENTS from their transactions by transaction date, PLUS any "already paid" marks
+         * for the month.
          */
         private BigDecimal paidAmount;
 

@@ -22,6 +22,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -145,18 +146,53 @@ class TransactionServiceEmergencySyncTest {
         verify(transactionRepository, never()).delete(any(Transaction.class));
     }
 
+    /**
+     * A top-up of an emergency fund re-filed as "Investment" is still money put into the emergency
+     * fund: it stays an EMERGENCY_CONTRIBUTION in the Emergency bucket, and the fund's invested
+     * total must end unchanged — neither added to twice nor backed out.
+     */
     @Test
     void refilingEmergencyContributionToInvestmentDoesNotDoubleAdd() {
         Transaction tx = emergencyTx(12L, 7L, "300");
         when(transactionRepository.findById(12L)).thenReturn(Optional.of(tx));
+        when(investmentRepository.findById(7L)).thenReturn(Optional.of(fund()));
         when(investmentRepository.findByOriginatingTransactionId(12L)).thenReturn(Optional.empty());
         when(transactionRepository.save(any(Transaction.class))).thenAnswer(inv -> inv.getArgument(0));
 
         service.update(12L, cashRequest(TransactionSubType.INVESTMENT, 7L, "300"));
 
-        // The reversal and the re-create cancel out — the invested total must end unchanged.
-        verify(financeService).removeFundsFromInvestment(7L, new BigDecimal("300"));
-        verify(financeService).addFundsToInvestment(7L, new BigDecimal("300"));
+        assertThat(tx.getSubType()).isEqualTo(TransactionSubType.EMERGENCY_CONTRIBUTION);
+        assertThat(tx.getAllocationBucket()).isEqualTo("EMERGENCY");
+        verify(financeService, never()).addFundsToInvestment(anyLong(), any());
+        verify(financeService, never()).removeFundsFromInvestment(anyLong(), any());
+    }
+
+    /**
+     * The label follows the holding: once a fund is no longer flagged as the emergency fund, an edit
+     * files its row as an INVESTMENT. That flip must be a relabel of the same row — treated as a
+     * change of sub-type it reversed the row's record, and for the row that CREATED the fund that
+     * meant deleting the fund being edited.
+     */
+    @Test
+    void editingAFundsOwnRowAfterItStopsBeingTheEmergencyFundRelabelsItInPlace() {
+        Transaction originating = emergencyTx(11L, 7L, "500");
+        Investment formerFund = fund();
+        formerFund.setEmergencyFund(false);
+        formerFund.setOriginatingTransactionId(11L);
+        when(transactionRepository.findById(11L)).thenReturn(Optional.of(originating));
+        when(investmentRepository.findById(7L)).thenReturn(Optional.of(formerFund));
+        when(investmentRepository.findByOriginatingTransactionId(11L)).thenReturn(Optional.of(formerFund));
+        when(transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(7L))
+                .thenReturn(List.of(originating));
+        when(transactionRepository.save(any(Transaction.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.update(11L, cashRequest(TransactionSubType.EMERGENCY_CONTRIBUTION, 7L, "600"));
+
+        assertThat(originating.getSubType()).isEqualTo(TransactionSubType.INVESTMENT);
+        assertThat(originating.getAllocationBucket()).isEqualTo("INVESTMENTS");
+        verify(investmentRepository, never()).delete(any(Investment.class));
+        verify(financeService).addFundsToInvestment(7L, new BigDecimal("100"));
+        verify(financeService, never()).removeFundsFromInvestment(anyLong(), any());
     }
 
     @Test

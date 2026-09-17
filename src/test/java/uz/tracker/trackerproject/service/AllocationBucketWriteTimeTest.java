@@ -142,6 +142,24 @@ class AllocationBucketWriteTimeTest {
         assertThat(savedTransaction().getAllocationBucket()).isEqualTo("SAVINGS");
     }
 
+    /**
+     * The Transactions page and the bot list emergency funds under "Investment". A top-up picked
+     * that way is money into the emergency fund, so it is booked as one — it used to be saved as an
+     * INVESTMENT and credited to the Investments bucket, while the preview had promised Emergency.
+     */
+    @Test
+    void aTopUpOfAnEmergencyFundFromTheTransactionsPageIsBookedToTheEmergencyBucket() {
+        Investment fund = holding(9L, false);
+        fund.setEmergencyFund(true);
+        when(investmentRepository.findById(9L)).thenReturn(Optional.of(fund));
+
+        transactionService.create(topUp(9L));
+
+        Transaction saved = savedTransaction();
+        assertThat(saved.getSubType()).isEqualTo(TransactionSubType.EMERGENCY_CONTRIBUTION);
+        assertThat(saved.getAllocationBucket()).isEqualTo("EMERGENCY");
+    }
+
     @Test
     void aTopUpOfAPlainHoldingIsStampedInvestments() {
         when(investmentRepository.findById(7L)).thenReturn(Optional.of(holding(7L, false)));

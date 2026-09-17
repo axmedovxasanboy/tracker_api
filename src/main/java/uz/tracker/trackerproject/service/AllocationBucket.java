@@ -1,5 +1,6 @@
 package uz.tracker.trackerproject.service;
 
+import uz.tracker.trackerproject.entity.Investment;
 import uz.tracker.trackerproject.enums.TransactionSubType;
 
 /**
@@ -49,5 +50,24 @@ public final class AllocationBucket {
             case INVESTMENT -> savingsGoalTarget ? AllocationBucket.SAVINGS : AllocationBucket.INVESTMENTS;
             default -> null;
         };
+    }
+
+    /**
+     * The sub-type a payment INTO AN EXISTING HOLDING is booked as: EMERGENCY_CONTRIBUTION when the
+     * holding is an emergency fund, INVESTMENT when it is any other holding. Every other sub-type,
+     * and a payment with no holding behind it, keeps the sub-type it was sent with.
+     *
+     * <p>The Investments tab and the Plan's Record button already booked a top-up this way, but the
+     * Transactions page and the bot let an emergency fund be picked under "Investment" and saved the
+     * row as sent — so the money was counted in the Investments bucket while the fund grew and the
+     * allocation preview promised Emergency. Deciding it here, from the holding, is what makes the
+     * write paths and the preview agree.
+     */
+    public static TransactionSubType forHolding(TransactionSubType requested, Investment holding) {
+        if (holding == null) return requested;
+        if (requested != TransactionSubType.INVESTMENT
+                && requested != TransactionSubType.EMERGENCY_CONTRIBUTION) return requested;
+        return Boolean.TRUE.equals(holding.getEmergencyFund())
+                ? TransactionSubType.EMERGENCY_CONTRIBUTION : TransactionSubType.INVESTMENT;
     }
 }

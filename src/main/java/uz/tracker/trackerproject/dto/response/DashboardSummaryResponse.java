@@ -31,8 +31,8 @@ public class DashboardSummaryResponse {
     private BigDecimal spendableBalance;
 
     /**
-     * NET WORTH in this currency: spendable wallet money across ALL currencies plus the
-     * current value of every investment / savings goal, FX-converted into this currency.
+     * NET WORTH in this currency: spendable wallet money in it plus the current value of every
+     * investment / savings goal held in it. Nothing converts between currencies.
      * Money parked in investments/savings is still yours — just not spending-money.
      */
     private BigDecimal netWorth;

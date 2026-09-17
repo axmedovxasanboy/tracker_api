@@ -18,6 +18,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 @Service
@@ -478,14 +479,12 @@ public class FinanceService {
         // Direct creation (not via the Transaction modal). Mirror to a real EXPENSE
         // Transaction so the donation appears in the Transactions list and in the
         // bucket payment history together with txs created from the other side.
-        String description = (req.getDescription() != null && !req.getDescription().isBlank())
-                ? req.getDescription()
-                : "Donation to " + (Boolean.TRUE.equals(req.getAnonymous()) ? "Anonymous" : req.getRecipientName());
         Transaction tx = createBucketTransaction(
                 TransactionSubType.DONATION, false,
                 req.getAmount(), req.getCurrency(),
                 req.getDonationDate(), req.getCardId(), req.getCategoryId(),
-                description);
+                donationTitle(req.getDescription(), Boolean.TRUE.equals(req.getAnonymous()),
+                        req.getRecipientName()));
         return DonationResponse.from(saveDonation(new Donation(), req, tx.getId()));
     }
 
@@ -513,6 +512,14 @@ public class FinanceService {
         // an ungated edit here is the one way left to make those two disagree for ever.
         monthCloseService.assertMonthOpen(d.getDonationDate());
         monthCloseService.assertMonthOpen(req.getDonationDate());
+        // A donation is one payment recorded in two places: this row is what the Donation bucket
+        // sums, and its DONATION transaction is what the wallet balance and the Transactions list
+        // read. Editing only this row left those two on the old figure, so the transaction moves
+        // with it — the rule EmergencyService.update follows for the Emergencies tab.
+        boolean anonymous = req.getAnonymous() != null
+                ? req.getAnonymous() : Boolean.TRUE.equals(d.getAnonymous());
+        donationMirror(d).ifPresent(tx -> moveDonationMirror(tx, req,
+                donationTitle(req.getDescription(), anonymous, req.getRecipientName())));
         d.setRecipientName(req.getRecipientName());
         d.setAmount(req.getAmount());
         d.setCurrency(req.getCurrency());
@@ -527,7 +534,69 @@ public class FinanceService {
         Donation d = donationRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Donation", id));
         monthCloseService.assertMonthOpen(d.getDonationDate());
+        // Deleting the row alone dropped the payment from the Donation bucket but left it spent:
+        // the wallet stayed debited and the Transactions list kept it. The transaction goes too,
+        // which returns the money to the wallet it came from.
+        donationMirror(d).ifPresent(tx -> {
+            // Its own month, which an edit made before the two were kept together can have left
+            // different from the donation's — the wallet movement being undone happened there.
+            monthCloseService.assertMonthOpen(tx.getTransactionDate());
+            transactionRepository.delete(tx);
+        });
         donationRepository.delete(d);
+    }
+
+    /**
+     * The DONATION transaction a donation mirrors, when it has one. Rows created before the link
+     * existed have none and are edited list-only rather than refused. A transaction re-filed under
+     * another sub-type is no longer this donation's money (re-filing deletes the donation), so it is
+     * never touched from here.
+     */
+    private Optional<Transaction> donationMirror(Donation d) {
+        if (d.getOriginatingTransactionId() == null) return Optional.empty();
+        return transactionRepository.findById(d.getOriginatingTransactionId())
+                .filter(tx -> tx.getSubType() == TransactionSubType.DONATION);
+    }
+
+    /**
+     * Carry a Donations-tab edit onto the transaction behind it: amount, date and title. The wallet
+     * stays the one the money left — the Donations form offers no way to change it.
+     */
+    private void moveDonationMirror(Transaction tx, DonationRequest req, String title) {
+        monthCloseService.assertMonthOpen(tx.getTransactionDate());
+        Card card = tx.getCard();
+        BigDecimal cash = tx.getCashAmount() == null ? BigDecimal.ZERO : tx.getCashAmount();
+        boolean allCash = card == null || cash.compareTo(tx.getAmount()) >= 0;
+        boolean allCard = card != null && cash.signum() == 0;
+        if (!allCash && !allCard && req.getAmount().compareTo(tx.getAmount()) != 0) {
+            // A new total does not say whether the cash part or the card part changed.
+            throw new IllegalArgumentException(
+                    "This donation was paid partly in cash and partly by card, so its amount can't be "
+                            + "changed here. Edit it from Transactions, where both parts can be set.");
+        }
+        if (card != null) {
+            if (card.getCurrency() != req.getCurrency()) {
+                throw new IllegalArgumentException(
+                        "Card currency (" + card.getCurrency() + ") does not match payment currency (" + req.getCurrency() + ")");
+            }
+            // Growing the amount spends more from the same card, so re-check the difference.
+            if (allCard) cardService.assertSufficientBalance(card, req.getAmount().subtract(tx.getAmount()));
+        }
+        tx.setAmount(req.getAmount());
+        tx.setCurrency(req.getCurrency());
+        tx.setTransactionDate(req.getDonationDate());
+        tx.setDescription(title);
+        // Cash rows carry the whole amount as cash (the buildTransaction convention); a card row
+        // keeps none, and a split keeps its cash part because its total cannot have changed.
+        if (allCash) tx.setCashAmount(req.getAmount());
+        transactionRepository.save(tx);
+    }
+
+    /** How a donation's transaction is titled: the description typed, else who received it. */
+    private static String donationTitle(String description, boolean anonymous, String recipientName) {
+        return description != null && !description.isBlank()
+                ? description
+                : "Donation to " + (anonymous ? "Anonymous" : recipientName);
     }
 
     // ---- Investments ----
