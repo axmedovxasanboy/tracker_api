@@ -42,11 +42,20 @@ public class OverviewTierResponse {
     private BigDecimal leftMoney;
 
     /**
-     * "Left balance" = max(0, leftMoney − debtPayments): stable income minus subscriptions minus
-     * this month's debt charge. The bucket percentages are applied to THIS. Income actually
-     * earned this month (and bonus income) is display-only and never moves it.
+     * What the bucket percentages are applied to: the left balance, max(0, leftMoney − debtPayments)
+     * — stable income minus subscriptions minus this month's debt charge — PLUS {@link #bonusIncome},
+     * the month's income in bonus-flagged categories. Other income earned this month is display-only
+     * and never moves it.
      */
     private BigDecimal allocationBase;
+
+    /**
+     * Income received this month in a bonus-flagged category (or one whose parent is flagged). It is
+     * already inside {@link #allocationBase}, so each bucket's target rises by its percentage of the
+     * bonus; the level, sub-level and tight/comfortable split still come from stable income alone.
+     * Zero when there was none.
+     */
+    private BigDecimal bonusIncome;
 
     /**
      * This month's debt charge: bank installments + the monthly charge on borrowed money and

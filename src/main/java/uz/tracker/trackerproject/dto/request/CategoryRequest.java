@@ -36,6 +36,6 @@ public class CategoryRequest {
     /** When true (donation sub-category), selecting it triggers an anonymous donation flow. */
     private Boolean anonymizes;
 
-    /** When true (income category), its income tops up the month's allocation target (tier % of the bonus). */
+    /** When true (income category), its income adds the level's share of it to that month's targets — see Category.bonusIncome. */
     private Boolean bonusIncome;
 }

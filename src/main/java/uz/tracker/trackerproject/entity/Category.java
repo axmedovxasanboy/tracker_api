@@ -72,11 +72,12 @@ public class Category {
     private Boolean anonymizes;
 
     /**
-     * When true, INCOME transactions in this category (or any of its children) are
-     * treated as a "bonus" on top of the stable income: the Overview allocation
-     * guidance applies the same tier % to the bonus amount and adds it to that month's
-     * recommended allocation. Used for one-off income like holiday bonuses or a 13th
-     * salary. Null/false → ordinary income, no extra allocation.
+     * When true, INCOME transactions in this category (or any of its children) count as a one-off
+     * bonus — a holiday bonus, a 13th salary. A bonus is added to the allocation base of the month
+     * it is dated in, so every bucket's target rises by that bucket's percentage of it; the level,
+     * the sub-level and Level 1's tight/comfortable split still come from stable income alone.
+     * (Display-only from 2026-06-08 until the owner asked for the share back on 2026-09-17.)
+     * Null/false → ordinary income, no effect on the targets.
      */
     @Column(name = "bonus_income")
     private Boolean bonusIncome;

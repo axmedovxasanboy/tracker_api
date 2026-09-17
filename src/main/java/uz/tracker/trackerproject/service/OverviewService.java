@@ -124,7 +124,8 @@ public class OverviewService {
      * Compute the user's financial tier for a given month. Income and subscriptions are the
      * CURRENT settings — no historical snapshots are stored — and so are the loan and debt
      * balances; but which obligations count (a bank loan's dates, a loan or debt's payment-start
-     * month) and every "paid this month" figure are scoped to the requested month.
+     * month), the bonus income that raises the base, and every "paid this month" figure are
+     * scoped to the requested month.
      */
     @Transactional(readOnly = true)
     public OverviewTierResponse getTier(YearMonth month, Currency displayCurrency) {
@@ -157,11 +158,14 @@ public class OverviewService {
         String subLevel = computeSubLevel(level, debtPaymentsUzs, debtRatio);
         String levelLabel = computeLevelLabel(level, subLevel, missingIncome);
 
-        // Allocation base = "left balance" = leftMoney − debtPayments: stable income minus
-        // mandatory subscriptions, minus this month's monthly debt charge (bank installment +
-        // 34% debt). Clamped at zero. The level / sub-level / tight-vs-comfortable split share
-        // the same stable-income anchor, so the bucket %-amounts scale with what's left after debt.
-        BigDecimal allocBaseUzs = clampZero(leftMoneyUzs.subtract(debtPaymentsUzs));
+        // Allocation base = the "left balance" — stable income minus mandatory subscriptions, minus
+        // this month's debt charge (bank installment + 34% debt), clamped at zero — PLUS the income
+        // received this month in bonus-flagged categories, so a bonus raises every bucket's target by
+        // that bucket's share of it. The bonus moves nothing else: the level, the sub-level and the
+        // tight-vs-comfortable split stay on the stable-income anchor. (Display-only from 2026-06-08
+        // until the owner asked for the share back on 2026-09-17.)
+        BigDecimal bonusUzs = sumBonusIncomeUzs(month);
+        BigDecimal allocBaseUzs = clampZero(leftMoneyUzs.subtract(debtPaymentsUzs)).add(bonusUzs);
 
         // Paid-this-month per bucket (display currency), including "already paid" bucket marks.
         // The marks are also carried on their own so each line can say how much of its "paid"
@@ -213,6 +217,7 @@ public class OverviewService {
                 .mandatorySubscriptions(mandatoryUzs)
                 .leftMoney(leftMoneyUzs)
                 .allocationBase(allocBaseUzs)
+                .bonusIncome(bonusUzs)
                 .debtPayments(debtPaymentsUzs)
                 .debtBreakdown(OverviewTierResponse.DebtBreakdown.builder()
                         .bankLoans(bankUzs)
@@ -279,10 +284,11 @@ public class OverviewService {
     /**
      * Running allocation ledger from the configured start month to {@code selected}. For each
      * month we recompute the tier scenario (so the % can vary as bank loans, loans and debts start
-     * or end), apply it to that month's "left balance" — stable income minus subscriptions minus
-     * that month's debt charge, the same base the tier card uses — to get the recommended amount,
-     * and net it against what was actually paid. The balance is cumulative — overpaying a later
-     * month clears an earlier shortfall. The level stays anchored to stable income.
+     * or end), apply it to that month's base — the "left balance" (stable income minus
+     * subscriptions minus that month's debt charge) plus that month's bonus income, the same base
+     * the tier card uses — to get the recommended amount, and net it against what was actually
+     * paid. The balance is cumulative — overpaying a later month clears an earlier shortfall. The
+     * level stays anchored to stable income.
      */
     @Transactional(readOnly = true)
     public AllocationLedgerResponse getAllocationLedger(YearMonth selected, Currency display) {
@@ -369,8 +375,8 @@ public class OverviewService {
 
             // Bucket %s by scenario (Level 1 from stable income; Levels 2–6 from configured rules).
             // The base the %s multiply is the "left balance" = leftMoney − debtPayments (stable
-            // income minus mandatory subscriptions, minus the monthly debt charge) — consistent
-            // with the tier card.
+            // income minus mandatory subscriptions, minus the monthly debt charge) plus that
+            // month's bonus income — consistent with the tier card.
             String[] pct;
             if (level != null && level == 1) {
                 pct = computeLevel1Plan(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
@@ -378,7 +384,8 @@ public class OverviewService {
             } else {
                 pct = bucketPercents(level, subLevel);
             }
-            BigDecimal allocBaseUzs = clampZero(stableUzs.subtract(mandatoryUzs).subtract(debtPaymentsUzs));
+            BigDecimal allocBaseUzs = clampZero(stableUzs.subtract(mandatoryUzs).subtract(debtPaymentsUzs))
+                    .add(bonusUzs);
 
             // Marks read once per month and folded in here, so the loop never queries them twice.
             BucketPaid marksUzs = computeBucketMarks(m);
@@ -516,7 +523,10 @@ public class OverviewService {
         return total;
     }
 
-    /** Bonus-tagged income received in {@code month}, in the reporting currency. Display-only. */
+    /**
+     * Bonus-tagged income received in {@code month}, in the reporting currency: INCOME in a category
+     * flagged {@code bonusIncome}, or under a flagged parent. Added to that month's allocation base.
+     */
     private BigDecimal sumBonusIncomeUzs(YearMonth month) {
         LocalDate start = month.atDay(1);
         LocalDate end = month.atEndOfMonth();
@@ -1172,7 +1182,8 @@ public class OverviewService {
         // selected from stable income per the owner's spec (decisions D1–D4), and the base the
         // percentages multiply is the "left balance" = stable income − subscriptions − this
         // month's debt charge (the owner's 2026-06-08 decision; for Level 1 it equals the plan's
-        // calc base). loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is
+        // calc base) plus this month's bonus income, which never takes part in choosing the
+        // scenario. loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is
         // debt (34%).
         Level1Plan plan = computeLevel1Plan(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
                 debt34Uzs, debtRatio, minLeftoverUzs(1));

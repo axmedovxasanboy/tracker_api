@@ -9,7 +9,8 @@ import java.util.Map;
 
 /**
  * Per-tier allocation recommendation. The bucket-level lines describe minimum percentages of
- * the left balance (stable income − subscriptions − this month's debt charge) to set aside;
+ * the allocation base — the left balance (stable income − subscriptions − this month's debt charge)
+ * plus this month's bonus income — to set aside;
  * {@code actions} carries the debt asks and scenario notes (e.g. "pay at least 34% of your
  * debts this month").
  *
@@ -107,10 +108,10 @@ public class TierAllocation {
         /** True → show with min %/amount; false → render as "NO NEED" (skipped at this tier). */
         private boolean recommended;
 
-        /** Minimum percent of the left balance, e.g. 10.0 for 10%. Null when not recommended. */
+        /** Minimum percent of the allocation base, e.g. 10.0 for 10%. Null when not recommended. */
         private BigDecimal minPercent;
 
-        /** Minimum amount (percent × left balance). Null when not recommended. */
+        /** Minimum amount (percent × allocation base). Null when not recommended. */
         private BigDecimal minAmount;
 
         /**
