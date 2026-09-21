@@ -129,6 +129,21 @@ public class OverviewService {
      */
     @Transactional(readOnly = true)
     public OverviewTierResponse getTier(YearMonth month, Currency displayCurrency) {
+        return tier(month, displayCurrency, true);
+    }
+
+    /**
+     * The same tier with the allocation computed even while subscriptions are unpaid — for the
+     * advisor, which names what is still to set aside "after the bills" instead of hiding it.
+     * {@code subscriptionsPending} and {@code pendingSubscriptions} are still reported, so the
+     * caller knows the bills come first.
+     */
+    @Transactional(readOnly = true)
+    public OverviewTierResponse getTierIgnoringSubscriptions(YearMonth month, Currency displayCurrency) {
+        return tier(month, displayCurrency, false);
+    }
+
+    private OverviewTierResponse tier(YearMonth month, Currency displayCurrency, boolean subscriptionsGate) {
         Settings s = settingsService.getOrCreate();
         boolean missingIncome = s.getMonthlyStableIncome() == null
                 || s.getMonthlyStableIncome().signum() <= 0;
@@ -200,7 +215,7 @@ public class OverviewService {
                     Map.of("month", trackingStart.toString()),
                     "Allocation tracking starts " + monthLabel(trackingStart)
                             + " — guidance is paused until then.");
-        } else if (subscriptionsPending) {
+        } else if (subscriptionsPending && subscriptionsGate) {
             allocation = notDefinedAllocation("page.plan.note.subscriptionsPending",
                     Map.of("month", month.toString()),
                     "Pay your mandatory subscription(s) for " + monthLabel(month)

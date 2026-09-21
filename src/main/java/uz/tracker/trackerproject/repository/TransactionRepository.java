@@ -196,4 +196,7 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
 
     /** Contribution history for one investment / savings goal — newest first. */
     List<Transaction> findByInvestmentIdOrderByTransactionDateDesc(Long investmentId);
+
+    /** Whether anything at all was recorded on or before {@code date} — i.e. a month has data to close. */
+    boolean existsByTransactionDateLessThanEqual(java.time.LocalDate date);
 }
