@@ -26,12 +26,6 @@ public class CardRequest {
     @Pattern(regexp = "\\d{4}", message = "Must be exactly 4 digits")
     private String lastFourDigits;
 
-    // Optional — no @Size because empty string must be treated as absent
-    private String fullNumber;
-
-    // Optional — same reason
-    private String pin;
-
     @NotNull(message = "Initial balance is required")
     private BigDecimal initialBalance;
 

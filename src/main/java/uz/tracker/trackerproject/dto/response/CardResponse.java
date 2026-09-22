@@ -21,8 +21,6 @@ public class CardResponse {
     private BigDecimal currentBalance;
     private Currency currency;
     private String color;
-    private boolean hasFullNumber;
-    private boolean hasPin;
     private LocalDateTime createdAt;
 
     public static CardResponse from(Card c, BigDecimal txSum) {
@@ -37,8 +35,6 @@ public class CardResponse {
                 .currentBalance(current)
                 .currency(c.getCurrency())
                 .color(c.getColor())
-                .hasFullNumber(c.getFullNumber() != null && !c.getFullNumber().isBlank())
-                .hasPin(c.getPin() != null && !c.getPin().isBlank())
                 .createdAt(c.getCreatedAt())
                 .build();
     }

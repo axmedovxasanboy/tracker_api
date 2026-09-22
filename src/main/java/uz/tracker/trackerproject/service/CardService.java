@@ -9,9 +9,6 @@ import uz.tracker.trackerproject.entity.Card;
 import uz.tracker.trackerproject.exception.ResourceNotFoundException;
 import uz.tracker.trackerproject.repository.CardRepository;
 import uz.tracker.trackerproject.repository.TransactionRepository;
-import uz.tracker.trackerproject.security.CardNumberCipher;
-import uz.tracker.trackerproject.security.PinHasher;
-import uz.tracker.trackerproject.security.RevealAttemptTracker;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -23,9 +20,6 @@ public class CardService {
 
     private final CardRepository cardRepository;
     private final TransactionRepository transactionRepository;
-    private final PinHasher pinHasher;
-    private final CardNumberCipher cipher;
-    private final RevealAttemptTracker revealTracker;
 
     @Transactional(readOnly = true)
     public List<CardResponse> getAll() {
@@ -62,21 +56,6 @@ public class CardService {
         // throw — matches the warning shown to the user in the UI.
         transactionRepository.detachFromCard(id);
         cardRepository.deleteById(id);
-    }
-
-    @Transactional
-    public String revealFullNumber(Long id, String pin) {
-        revealTracker.checkAllowed(id);
-        Card card = findOrThrow(id);
-        if (card.getFullNumber() == null || card.getFullNumber().isBlank()) {
-            throw new IllegalArgumentException("No full card number stored for this card");
-        }
-        if (!pinHasher.matches(pin, card.getPin())) {
-            revealTracker.recordFailure(id);
-            throw new IllegalArgumentException("Incorrect PIN");
-        }
-        revealTracker.recordSuccess(id);
-        return cipher.decrypt(card.getFullNumber());
     }
 
     /**
@@ -118,14 +97,6 @@ public class CardService {
         card.setInitialBalance(req.getInitialBalance());
         card.setCurrency(req.getCurrency());
         card.setColor(req.getColor() != null ? req.getColor() : "#6366f1");
-        if (req.getFullNumber() != null && !req.getFullNumber().isBlank()) {
-            String cleaned = req.getFullNumber().replaceAll("\\s+", "");
-            card.setFullNumber(cipher.encrypt(cleaned));
-        }
-        if (req.getPin() != null && !req.getPin().isBlank()) {
-            String pin = req.getPin();
-            card.setPin(pinHasher.looksHashed(pin) ? pin : pinHasher.hash(pin));
-        }
     }
 
     private Card findOrThrow(Long id) {

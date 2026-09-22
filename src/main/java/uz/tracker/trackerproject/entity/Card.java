@@ -32,12 +32,6 @@ public class Card {
     @Column(nullable = false, length = 4)
     private String lastFourDigits;
 
-    @Column
-    private String fullNumber;
-
-    @Column
-    private String pin;
-
     @Column(nullable = false, precision = 19, scale = 4)
     private BigDecimal initialBalance;
 

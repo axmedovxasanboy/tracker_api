@@ -55,6 +55,10 @@ public class DataSeeder implements CommandLineRunner {
         // the current enum, which would otherwise fail against the very rows it forbids.
         purgeRemovedExchangeRows();
 
+        // Erase the retired card-number / PIN vault. Raw DDL, and the one migration here that
+        // deliberately destroys data.
+        dropCardSecrets();
+
         // Rebuild the sub_type CHECK constraint so it matches today's TransactionSubType
         // enum values. `ddl-auto=update` doesn't migrate Hibernate-generated CHECK
         // constraints when an enum gains or loses members —
@@ -421,6 +425,31 @@ public class DataSeeder implements CommandLineRunner {
         if (renamed > 0) {
             System.out.println("[DataSeeder] Named " + renamed
                     + " transaction(s) after the borrower, lender, recipient or holding instead of their category.");
+        }
+    }
+
+    /**
+     * Drop the card vault's two columns — and with them the stored card numbers and PINs.
+     *
+     * <p>The app used to keep an AES-GCM ciphertext of the full PAN plus a hash of the card's PIN
+     * so that a "reveal" screen could show the number back, rate-limited by
+     * {@code RevealAttemptTracker}. The owner asked for it gone (2026-09-22): a personal tracker
+     * has no use for a card number, and storing one is a risk with no return.
+     *
+     * <p>Unlike the other retired columns in this file — which are left in place because
+     * {@code ddl-auto=update} never drops anything and an unmapped column is harmless — these are
+     * DROPped, because dropping them IS the erasure. Idempotent: a no-op once they are gone.
+     */
+    private void dropCardSecrets() {
+        int dropped = 0;
+        for (String column : List.of("full_number", "pin")) {
+            if (!columnExists("cards", column)) continue;
+            entityManager.createNativeQuery("ALTER TABLE cards DROP COLUMN " + column).executeUpdate();
+            dropped++;
+        }
+        if (dropped > 0) {
+            System.out.println("[DataSeeder] Dropped the card vault (" + dropped
+                    + " column(s)) — stored card numbers and PINs are erased.");
         }
     }
 

@@ -10,7 +10,6 @@ import uz.tracker.trackerproject.dto.response.CardResponse;
 import uz.tracker.trackerproject.service.CardService;
 
 import java.util.List;
-import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/cards")
@@ -43,18 +42,5 @@ public class CardController {
     public ResponseEntity<Void> delete(@PathVariable Long id) {
         cardService.delete(id);
         return ResponseEntity.noContent().build();
-    }
-
-    @PostMapping("/{id}/reveal")
-    public ResponseEntity<Map<String, String>> revealFullNumber(
-            @PathVariable Long id,
-            @RequestBody Map<String, String> body
-    ) {
-        String pin = body.get("pin");
-        if (pin == null || pin.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "PIN is required"));
-        }
-        String fullNumber = cardService.revealFullNumber(id, pin);
-        return ResponseEntity.ok(Map.of("fullNumber", fullNumber));
     }
 }

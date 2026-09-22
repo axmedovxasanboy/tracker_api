@@ -19,7 +19,7 @@ import java.util.Date;
  * {@code refresh} (exchanged at /auth/refresh for a fresh access token).
  *
  * The signing key is SHA-256-derived from {@code app.jwt.secret}, so any secret length is
- * accepted (mirrors CardNumberCipher). Changing the secret invalidates all issued tokens.
+ * accepted. Changing the secret invalidates all issued tokens.
  */
 @Component
 public class JwtService {

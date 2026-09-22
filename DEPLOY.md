@@ -42,14 +42,11 @@ services:
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
       CORS_ALLOWED_ORIGINS: https://your.public.domain
-      APP_CARD_ENCRYPTION_KEY: ${APP_CARD_ENCRYPTION_KEY}
       APP_JWT_SECRET: ${APP_JWT_SECRET}
       # Optional overrides — defaults are sensible
       # SERVER_PORT: 8080
       # APP_JWT_ACCESS_TTL: 900
       # APP_JWT_REFRESH_TTL: 604800
-      # CARD_REVEAL_MAX_ATTEMPTS: 5
-      # CARD_REVEAL_LOCKOUT_SECONDS: 300
       # APP_MAX_PAGE_SIZE: 100
 
 networks:
@@ -61,9 +58,9 @@ The backend reaches Postgres on the host at `172.17.0.1:5432`. The frontend and
 bot reach the backend by service name at `http://backend:8080`. Don't publish
 ports — Caddy handles the public edge.
 
-> **Stable secrets.** Keep `APP_CARD_ENCRYPTION_KEY` constant per environment —
-> rotating it makes every previously-encrypted card number unreadable.
-> Rotating `APP_JWT_SECRET` just forces re-login.
+> **Stable secrets.** Rotating `APP_JWT_SECRET` forces a re-login (including the
+> bot's saved one). `APP_CARD_ENCRYPTION_KEY` is no longer read — the card-number
+> vault was removed on 2026-09-22 and the columns are dropped on the next boot.
 
 ## Manual trigger
 
