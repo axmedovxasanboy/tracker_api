@@ -59,6 +59,18 @@ public class Investment {
     @Column(name = "target_amount", precision = 19, scale = 4)
     private BigDecimal targetAmount;
 
+    /** Optional deadline for a savings goal. Shown with it; it does not change what is set aside. */
+    @Column(name = "target_date")
+    private LocalDate targetDate;
+
+    /**
+     * A savings goal's monthly payment. The advisor lists it with the month's savings and the daily
+     * figure sets it aside like the plan's buckets, until the target is reached. Null or 0 = none.
+     * Nullable: the bot creates goals without it, and rows from before it existed have none.
+     */
+    @Column(name = "monthly_contribution", precision = 19, scale = 4)
+    private BigDecimal monthlyContribution;
+
     /** Optional current/market value reflecting platform growth. When null it is treated as
         equal to {@link #investedAmount} (see InvestmentResponse.from + the contribute flow). */
     @Column(name = "current_value", precision = 19, scale = 4)

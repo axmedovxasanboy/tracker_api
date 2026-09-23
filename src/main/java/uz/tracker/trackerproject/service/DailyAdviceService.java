@@ -132,9 +132,26 @@ public class DailyAdviceService {
      * @param salaryComing what this month's salary still owes: stable income − non-bonus regular income this month
      * @param setAsideLeft this month's set-asides not yet made
      * @param pctSum       the current level's bucket percentages added up (Level 1 tight: 5 + 2 + 8)
+     * @param goals        savings goals with a monthly payment, still short of their target
      */
     public record Inputs(LocalDate today, BigDecimal have, BigDecimal stableIncome, BigDecimal salaryComing,
-                         BigDecimal setAsideLeft, BigDecimal pctSum) {}
+                         BigDecimal setAsideLeft, BigDecimal pctSum, List<Goal> goals) {
+        /** With no savings goal to set aside for. */
+        public Inputs(LocalDate today, BigDecimal have, BigDecimal stableIncome, BigDecimal salaryComing,
+                      BigDecimal setAsideLeft, BigDecimal pctSum) {
+            this(today, have, stableIncome, salaryComing, setAsideLeft, pctSum, List.of());
+        }
+    }
+
+    /**
+     * A savings goal's monthly payment, set aside like the plan's buckets (though outside their
+     * percentages). Its deadline plays no part: it is for display.
+     *
+     * @param monthly       the monthly payment (positive)
+     * @param paidThisMonth contributions to it this month, dated today or earlier
+     * @param toTarget      what is still missing to reach its target; null when it has none
+     */
+    public record Goal(Long id, BigDecimal monthly, BigDecimal paidThisMonth, BigDecimal toTarget) {}
 
     /**
      * @param surplus the least the owner would ever have in hand beyond their own pace: the minimum,
@@ -169,27 +186,48 @@ public class DailyAdviceService {
 
         // ── 4. Savings, set aside out of the salary that funds them ──
         NavigableMap<LocalDate, BigDecimal> savings = new TreeMap<>();
+        // Reserved before the salary arrives, they read as "short" every month until payday.
+        LocalDate thisMonthOn = salary.mainPartOn() != null ? salary.mainPartOn() : today;
         BigDecimal setAsideLeft = nz(in.setAsideLeft());
-        if (setAsideLeft.signum() > 0) {
-            // Reserved before the salary arrives, they read as "short" every month until payday.
-            savings.merge(salary.mainPartOn() != null ? salary.mainPartOn() : today, setAsideLeft, BigDecimal::add);
-        }
+        if (setAsideLeft.signum() > 0) savings.merge(thisMonthOn, setAsideLeft, BigDecimal::add);
         for (Transaction t : later) {
             if (isSaving(t)) savings.merge(t.getTransactionDate(), t.getAmount(), BigDecimal::add);
+        }
+        // Each later month in the horizon, on its main payday (the 1st without a salary history).
+        List<LocalDate> laterPaydays = new ArrayList<>();
+        List<YearMonth> laterMonths = new ArrayList<>();
+        for (YearMonth ym = current.plusMonths(1); !ym.atDay(1).isAfter(until); ym = ym.plusMonths(1)) {
+            LocalDate on = pattern == null ? ym.atDay(1) : dayIn(ym, pattern.mainDay());
+            if (on.isAfter(until)) continue;
+            laterPaydays.add(on);
+            laterMonths.add(ym);
         }
         BigDecimal pct = nz(in.pctSum());
         if (pct.signum() > 0) {
             BigDecimal monthlySalary = pattern == null ? stable : pattern.total();
-            for (YearMonth ym = current.plusMonths(1); !ym.atDay(1).isAfter(until); ym = ym.plusMonths(1)) {
-                LocalDate on = pattern == null ? ym.atDay(1) : dayIn(ym, pattern.mainDay());
-                if (on.isAfter(until)) continue;
+            for (int i = 0; i < laterMonths.size(); i++) {
+                YearMonth ym = laterMonths.get(i);
                 // The Plan's base without a bonus: salary − bills − (bank installments + debt asks).
                 BigDecimal base = clampZero(monthlySalary.subtract(due.billsMonthly())
                         .subtract(due.bankByMonth().getOrDefault(ym, BigDecimal.ZERO))
                         .subtract(due.asksByMonth().getOrDefault(ym, BigDecimal.ZERO)));
                 BigDecimal estimate = base.multiply(pct).divide(HUNDRED, 0, RoundingMode.HALF_UP);
-                if (estimate.signum() > 0) savings.merge(on, estimate, BigDecimal::add);
+                if (estimate.signum() > 0) savings.merge(laterPaydays.get(i), estimate, BigDecimal::add);
             }
+        }
+        // Savings goals' monthly payments, on the same days: what this month still owes (less what
+        // is recorded for a later day — the walk takes that on its own day), then the full payment
+        // each later month; all of it capped at what is still missing to reach the target.
+        for (Goal g : in.goals() == null ? List.<Goal>of() : in.goals()) {
+            BigDecimal monthly = nz(g.monthly());
+            if (monthly.signum() <= 0) continue;
+            BigDecimal recordedLater = later.stream()
+                    .filter(t -> isSaving(t) && Objects.equals(t.getInvestmentId(), g.id()))
+                    .map(Transaction::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal cap = g.toTarget();
+            cap = reserve(savings, thisMonthOn,
+                    clampZero(monthly.subtract(nz(g.paidThisMonth())).subtract(recordedLater)), cap);
+            for (LocalDate on : laterPaydays) cap = reserve(savings, on, monthly, cap);
         }
 
         // ── 5–7. Walk the days ──
@@ -721,6 +759,17 @@ public class DailyAdviceService {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Sets {@code amount} aside on {@code on}, but no more than {@code cap} allows (null: no cap).
+     * Returns what the cap has left for the next reservation.
+     */
+    private static BigDecimal reserve(NavigableMap<LocalDate, BigDecimal> savings, LocalDate on,
+                                      BigDecimal amount, BigDecimal cap) {
+        BigDecimal take = cap == null ? amount : amount.min(clampZero(cap));
+        if (take.signum() > 0) savings.merge(on, take, BigDecimal::add);
+        return cap == null ? null : cap.subtract(take);
+    }
 
     private static Breakdown breakdown(BigDecimal have, List<IncomePart> incomes, List<Upcoming> items,
                                        NavigableMap<LocalDate, BigDecimal> savings, LocalDate today, LocalDate to) {

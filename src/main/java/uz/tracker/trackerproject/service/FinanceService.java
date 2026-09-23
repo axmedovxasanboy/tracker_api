@@ -748,6 +748,11 @@ public class FinanceService {
         // A savings goal is never the emergency fund — emergencyFund wins if both are set.
         i.setSavingsGoal(Boolean.TRUE.equals(req.getSavingsGoal()) && !Boolean.TRUE.equals(req.getEmergencyFund()));
         i.setTargetAmount(req.getTargetAmount());
+        // A goal's deadline and monthly payment change only when the request carries them: the bot
+        // edits a holding by echoing the fields it knows, which predate these two, so "left out"
+        // must keep what is stored. Sent — null included — they are set; a null clears.
+        if (req.targetDateGiven()) i.setTargetDate(req.getTargetDate());
+        if (req.monthlyContributionGiven()) i.setMonthlyContribution(req.getMonthlyContribution());
         // currentValue is optional: null = "tracks investedAmount" (the response mapper falls back).
         i.setCurrentValue(req.getCurrentValue());
         i.setOpeningBalance(Boolean.TRUE.equals(req.getOpeningBalance()));

@@ -3,6 +3,7 @@ package uz.tracker.trackerproject.dto.request;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Setter;
 import uz.tracker.trackerproject.enums.Currency;
@@ -45,6 +46,50 @@ public class InvestmentRequest {
     /** Optional savings-goal target. */
     @DecimalMin("0")
     private BigDecimal targetAmount;
+
+    /**
+     * Optional savings-goal deadline. See {@link #targetDateGiven()}: leaving it out keeps the stored
+     * one, sending {@code null} clears it.
+     */
+    private LocalDate targetDate;
+
+    /**
+     * The savings goal's monthly payment. Optional here because the bot creates goals without it;
+     * the web requires it for a goal. See {@link #monthlyContributionGiven()}: leaving it out keeps
+     * the stored one, sending {@code null} clears it.
+     */
+    @DecimalMin("0")
+    private BigDecimal monthlyContribution;
+
+    // Whether each of the two was SENT. The bot edits a holding by sending back every field of the
+    // response as it knew it — a shape without these two — so an update must not read "left out" as
+    // "cleared", or every bot edit would wipe a goal's deadline and monthly payment. Jackson calls a
+    // setter only for a property present in the JSON (an explicit null included). Not bean
+    // properties, so no client can set them.
+    @Getter(AccessLevel.NONE) @Setter(AccessLevel.NONE)
+    private boolean targetDateSent;
+    @Getter(AccessLevel.NONE) @Setter(AccessLevel.NONE)
+    private boolean monthlyContributionSent;
+
+    public void setTargetDate(LocalDate targetDate) {
+        this.targetDate = targetDate;
+        this.targetDateSent = true;
+    }
+
+    public void setMonthlyContribution(BigDecimal monthlyContribution) {
+        this.monthlyContribution = monthlyContribution;
+        this.monthlyContributionSent = true;
+    }
+
+    /** True when the request carried {@code targetDate} at all — null included. */
+    public boolean targetDateGiven() {
+        return targetDateSent;
+    }
+
+    /** True when the request carried {@code monthlyContribution} at all — null included. */
+    public boolean monthlyContributionGiven() {
+        return monthlyContributionSent;
+    }
 
     /** Optional current/market value (platform growth). Null = treated as investedAmount. */
     @DecimalMin("0")

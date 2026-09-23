@@ -25,6 +25,10 @@ public class InvestmentResponse {
     private boolean emergencyFund;
     private boolean savingsGoal;
     private BigDecimal targetAmount;
+    /** A savings goal's optional deadline (display only). */
+    private LocalDate targetDate;
+    /** A savings goal's monthly payment; null when none was set. */
+    private BigDecimal monthlyContribution;
     /** Current/market value. Falls back to investedAmount when not explicitly set. */
     private BigDecimal currentValue;
     /** currentValue / targetAmount as a percentage; null when there is no target. */
@@ -53,6 +57,8 @@ public class InvestmentResponse {
                 .emergencyFund(Boolean.TRUE.equals(i.getEmergencyFund()))
                 .savingsGoal(Boolean.TRUE.equals(i.getSavingsGoal()))
                 .targetAmount(i.getTargetAmount())
+                .targetDate(i.getTargetDate())
+                .monthlyContribution(i.getMonthlyContribution())
                 .currentValue(value)
                 .progressPercent(progress)
                 .openingBalance(Boolean.TRUE.equals(i.getOpeningBalance()))

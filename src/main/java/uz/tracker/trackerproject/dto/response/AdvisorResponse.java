@@ -93,7 +93,9 @@ public class AdvisorResponse {
 
     /**
      * Every allocation bucket with a target this month, INCLUDING the ones already met — the same
-     * figures as {@link #setAside}, which lists only what is still to put aside. Empty while the
+     * figures as {@link #setAside}, which lists only what is still to put aside — then one GOAL row
+     * per savings goal with a monthly payment that has not reached its target (goals are outside
+     * the plan's percentages, so {@link #setAside} and {@link #free} leave them out). Empty while the
      * stable income is unset.
      */
     private List<SavingsRow> savingsThisMonth;
@@ -141,13 +143,23 @@ public class AdvisorResponse {
         private BigDecimal remaining;
     }
 
-    /** One bucket's set-aside this month, met or not. */
+    /**
+     * One bucket's set-aside this month, met or not — or one savings goal's monthly payment
+     * ({@code bucket} GOAL), listed after the buckets while the goal is short of its target.
+     */
     @Getter @Builder
     public static class SavingsRow {
-        /** DONATION | EMERGENCY | INVESTMENTS */
+        /** DONATION | EMERGENCY | INVESTMENTS | GOAL */
         private String bucket;
+        /** GOAL: the goal's (Investment) id; null for a bucket. */
+        private Long refId;
+        /** GOAL: the goal's name; null for a bucket. */
+        private String name;
+        /** The bucket's percentage; null for a GOAL, whose payment is a set amount. */
         private BigDecimal percent;
+        /** GOAL: the monthly payment — never more than what finishes the goal. */
         private BigDecimal target;
+        /** GOAL: contributions to it this month, dated today or earlier. */
         private BigDecimal paid;
         /** max(0, target − paid); zero once the bucket is met. */
         private BigDecimal remaining;
