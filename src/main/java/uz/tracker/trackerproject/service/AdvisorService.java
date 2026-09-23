@@ -17,9 +17,11 @@ import uz.tracker.trackerproject.dto.response.TierAllocation;
 import uz.tracker.trackerproject.dto.response.WalletCheckInStatusResponse;
 import uz.tracker.trackerproject.entity.Investment;
 import uz.tracker.trackerproject.entity.LoanGiven;
+import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.RecordStatus;
 import uz.tracker.trackerproject.enums.TransactionSubType;
+import uz.tracker.trackerproject.enums.TransactionType;
 import uz.tracker.trackerproject.repository.EmergencyRepository;
 import uz.tracker.trackerproject.repository.InvestmentRepository;
 import uz.tracker.trackerproject.repository.LoanGivenRepository;
@@ -174,13 +176,17 @@ public class AdvisorService {
         // ── Free ──
         BigDecimal free = missingIncome ? null : have.add(coming).subtract(billsLeft).subtract(setAsideLeft);
 
+        // ── Savings goals with a monthly payment: outside the plan's percentages, set aside all the same ──
+        List<Investment> holdings = investmentRepository.findAll();
+        List<GoalMonth> goalMonths = missingIncome ? List.of() : goalMonths(holdings, date);
+
         // ── Per day: past this month, up to the salary after next ──
         DailyAdviceService.Result perDay = missingIncome ? null : dailyAdviceService.compute(
-                new DailyAdviceService.Inputs(date, have, expected, coming, setAsideLeft, pctSum));
+                new DailyAdviceService.Inputs(date, have, expected, coming, setAsideLeft, pctSum,
+                        goalMonths.stream().map(GoalMonth::plan).toList()));
         Daily daily = perDay == null ? null : perDay.daily();
 
         // ── What to do next ──
-        List<Investment> holdings = investmentRepository.findAll();
         boolean hasEmergencyFund = emergencyRepository.count() > 0
                 || holdings.stream().anyMatch(i -> Boolean.TRUE.equals(i.getEmergencyFund()));
         List<Suggestion> suggestions = new ArrayList<>();
@@ -256,26 +262,72 @@ public class AdvisorService {
                 .free(free)
                 .suggestions(suggestions)
                 .daily(daily)
-                .savingsThisMonth(missingIncome ? List.of() : savingsRows(allocation))
+                .savingsThisMonth(missingIncome ? List.of() : savingsRows(allocation, goalMonths))
                 .build();
     }
 
     /**
      * Every bucket with a target this month, met or not — the {@link SetAside} figures without the
-     * "still to do" filter, so a screen can show a bucket as done rather than as missing.
+     * "still to do" filter, so a screen can show a bucket as done rather than as missing — then each
+     * savings goal's monthly payment.
      */
-    private static List<SavingsRow> savingsRows(TierAllocation allocation) {
+    private static List<SavingsRow> savingsRows(TierAllocation allocation, List<GoalMonth> goals) {
         List<SavingsRow> rows = new ArrayList<>();
-        if (allocation == null || allocation.getLines() == null) return rows;
-        for (TierAllocation.AllocationLine line : allocation.getLines()) {
-            if (!line.isRecommended()) continue;
-            BigDecimal target = nz(line.getMinAmount());
-            if (target.signum() <= 0) continue;
-            rows.add(SavingsRow.builder().bucket(line.getBucket()).percent(line.getMinPercent())
-                    .target(target).paid(nz(line.getPaidAmount()))
-                    .remaining(nz(line.getRemainingAmount())).build());
+        if (allocation != null && allocation.getLines() != null) {
+            for (TierAllocation.AllocationLine line : allocation.getLines()) {
+                if (!line.isRecommended()) continue;
+                BigDecimal target = nz(line.getMinAmount());
+                if (target.signum() <= 0) continue;
+                rows.add(SavingsRow.builder().bucket(line.getBucket()).percent(line.getMinPercent())
+                        .target(target).paid(nz(line.getPaidAmount()))
+                        .remaining(nz(line.getRemainingAmount())).build());
+            }
         }
+        for (GoalMonth g : goals) rows.add(g.row());
         return rows;
+    }
+
+    /**
+     * One savings goal's month: its monthly payment, what was put into it this month by today, and
+     * what is still missing to reach its target (null when it has none).
+     */
+    private record GoalMonth(Investment goal, BigDecimal monthly, BigDecimal paid, BigDecimal toTarget) {
+        /** The month's payment, but never more than finishes the goal. */
+        SavingsRow row() {
+            BigDecimal target = toTarget == null ? monthly : monthly.min(paid.add(toTarget));
+            return SavingsRow.builder().bucket("GOAL").refId(goal.getId()).name(goal.getName())
+                    .target(target).paid(paid).remaining(clampZero(target.subtract(paid))).build();
+        }
+
+        DailyAdviceService.Goal plan() {
+            return new DailyAdviceService.Goal(goal.getId(), monthly, paid, toTarget);
+        }
+    }
+
+    /**
+     * The savings goals with a monthly payment that have not reached their target (or have none).
+     * "Paid" is what was put into the goal this month up to and including {@code date} — a
+     * contribution recorded for a later day has not left the wallets yet.
+     */
+    private List<GoalMonth> goalMonths(List<Investment> holdings, LocalDate date) {
+        LocalDate start = YearMonth.from(date).atDay(1);
+        List<GoalMonth> goals = new ArrayList<>();
+        for (Investment g : holdings) {
+            if (!Boolean.TRUE.equals(g.getSavingsGoal())) continue;
+            if (g.getCurrency() != null && g.getCurrency() != Currency.UZS) continue;
+            BigDecimal monthly = nz(g.getMonthlyContribution());
+            if (monthly.signum() <= 0 || !belowTarget(g)) continue;
+            BigDecimal paid = BigDecimal.ZERO;
+            for (Transaction t : transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(g.getId())) {
+                if (t.getType() != TransactionType.EXPENSE || t.getAmount() == null) continue;
+                if (t.getTransactionDate().isBefore(start) || t.getTransactionDate().isAfter(date)) continue;
+                paid = paid.add(t.getAmount());
+            }
+            BigDecimal toTarget = g.getTargetAmount() == null || g.getTargetAmount().signum() <= 0 ? null
+                    : clampZero(g.getTargetAmount().subtract(value(g)));
+            goals.add(new GoalMonth(g, monthly, paid, toTarget));
+        }
+        return goals;
     }
 
     /** The Plan's action item as a bill kind: the bank installment, the loan plan, or the 34% pay-down. */
@@ -386,8 +438,12 @@ public class AdvisorService {
     /** A goal with no target, or one not reached yet (current value, else what was put in). */
     private static boolean belowTarget(Investment goal) {
         if (goal.getTargetAmount() == null || goal.getTargetAmount().signum() <= 0) return true;
-        BigDecimal value = goal.getCurrentValue() != null ? goal.getCurrentValue() : nz(goal.getInvestedAmount());
-        return value.compareTo(goal.getTargetAmount()) < 0;
+        return value(goal).compareTo(goal.getTargetAmount()) < 0;
+    }
+
+    /** What a holding is worth: its current value, else what was put in. */
+    private static BigDecimal value(Investment holding) {
+        return holding.getCurrentValue() != null ? holding.getCurrentValue() : nz(holding.getInvestedAmount());
     }
 
     private static Suggestion suggestion(String code, Map<String, String> params, String kind,

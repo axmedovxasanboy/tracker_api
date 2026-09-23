@@ -17,9 +17,11 @@ import uz.tracker.trackerproject.dto.response.TierAllocation.AllocationLine;
 import uz.tracker.trackerproject.dto.response.WalletCheckInStatusResponse;
 import uz.tracker.trackerproject.entity.Investment;
 import uz.tracker.trackerproject.entity.LoanGiven;
+import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.RecordStatus;
 import uz.tracker.trackerproject.enums.TransactionSubType;
+import uz.tracker.trackerproject.enums.TransactionType;
 import uz.tracker.trackerproject.repository.EmergencyRepository;
 import uz.tracker.trackerproject.repository.InvestmentRepository;
 import uz.tracker.trackerproject.repository.LoanGivenRepository;
@@ -389,6 +391,70 @@ class AdvisorServiceTest {
         assertThat(met.getTarget()).isEqualByComparingTo("884000");
         assertThat(met.getPaid()).isEqualByComparingTo("884000");
         assertThat(met.getRemaining()).isEqualByComparingTo("0");
+    }
+
+    private static Transaction contribution(long goalId, String day, String amount) {
+        Transaction t = new Transaction();
+        t.setType(TransactionType.EXPENSE);
+        t.setSubType(TransactionSubType.INVESTMENT);
+        t.setAmount(new BigDecimal(amount));
+        t.setCurrency(Currency.UZS);
+        t.setTransactionDate(LocalDate.parse(day));
+        t.setInvestmentId(goalId);
+        return t;
+    }
+
+    /**
+     * A goal with a monthly payment is one more thing to set aside this month, after the buckets:
+     * what was put in by today against its payment. A goal already reached, or one without a
+     * payment, asks nothing; in its last month a goal asks only what finishes it.
+     */
+    @Test
+    void eachGoalWithAMonthlyPaymentIsASavingsRowAfterTheBuckets() {
+        Investment car = goal(5, "Car", "12000000", "3000000");
+        car.setMonthlyContribution(new BigDecimal("1000000"));
+        Investment laptop = goal(6, "Laptop", "10000000", "9800000");
+        laptop.setMonthlyContribution(new BigDecimal("1000000"));
+        Investment phone = goal(7, "Phone", "5000000", "5000000");      // reached
+        phone.setMonthlyContribution(new BigDecimal("500000"));
+        Investment trip = goal(8, "Trip", null, "0");                    // no monthly payment
+        when(investmentRepository.findAll()).thenReturn(List.of(car, laptop, phone, trip));
+        when(transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(5L)).thenReturn(List.of(
+                contribution(5, "2026-09-25", "300000"),   // recorded for a later day: not in yet
+                contribution(5, "2026-09-10", "400000"),
+                contribution(5, "2026-08-20", "200000"))); // last month
+
+        AdvisorResponse r = advise(SEP_18);
+
+        assertThat(r.getSavingsThisMonth())
+                .extracting(SavingsRow::getBucket, SavingsRow::getRefId, SavingsRow::getName)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple("DONATION", null, null),
+                        org.assertj.core.groups.Tuple.tuple("EMERGENCY", null, null),
+                        org.assertj.core.groups.Tuple.tuple("INVESTMENTS", null, null),
+                        org.assertj.core.groups.Tuple.tuple("GOAL", 5L, "Car"),
+                        org.assertj.core.groups.Tuple.tuple("GOAL", 6L, "Laptop"));
+        SavingsRow carRow = r.getSavingsThisMonth().get(3);
+        assertThat(carRow.getPercent()).isNull();
+        assertThat(carRow.getTarget()).isEqualByComparingTo("1000000");
+        assertThat(carRow.getPaid()).isEqualByComparingTo("400000");
+        assertThat(carRow.getRemaining()).isEqualByComparingTo("600000");
+        SavingsRow laptopRow = r.getSavingsThisMonth().get(4);
+        assertThat(laptopRow.getTarget()).isEqualByComparingTo("200000");   // 10M − 9.8M
+        assertThat(laptopRow.getRemaining()).isEqualByComparingTo("200000");
+        // The bot's lists stay as they were: goals are not in setAside.
+        assertThat(r.getSetAside()).extracting(AdvisorResponse.SetAside::getBucket)
+                .containsExactly("DONATION", "EMERGENCY", "INVESTMENTS");
+
+        // The walk is handed both, to set them aside like the buckets.
+        ArgumentCaptor<DailyAdviceService.Inputs> in = ArgumentCaptor.forClass(DailyAdviceService.Inputs.class);
+        verify(dailyAdviceService).compute(in.capture());
+        assertThat(in.getValue().goals())
+                .extracting(DailyAdviceService.Goal::id, g -> g.paidThisMonth().toPlainString(),
+                        g -> g.toTarget().toPlainString())
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(5L, "400000", "9000000"),
+                        org.assertj.core.groups.Tuple.tuple(6L, "0", "200000"));
     }
 
     // ── Wallet checks and closing a month ─────────────────────────────────────

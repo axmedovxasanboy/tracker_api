@@ -528,4 +528,70 @@ class DailyAdviceServiceTest {
                         tuple(SEP_23, "102000"),
                         tuple(LocalDate.of(2026, 10, 1), "102000"));
     }
+
+    // ── Savings goals ─────────────────────────────────────────────────────────
+
+    private DailyAdviceService.Result withGoal(LocalDate today, String have, String salaryComing,
+                                               DailyAdviceService.Goal goal) {
+        return service.compute(new DailyAdviceService.Inputs(today, new BigDecimal(have),
+                new BigDecimal("7000000"), new BigDecimal(salaryComing), BigDecimal.ZERO, BigDecimal.ZERO,
+                List.of(goal)));
+    }
+
+    private static DailyAdviceService.Goal car(String paidThisMonth, String toTarget) {
+        return new DailyAdviceService.Goal(11L, new BigDecimal("1000000"), new BigDecimal(paidThisMonth),
+                toTarget == null ? null : new BigDecimal(toTarget));
+    }
+
+    /**
+     * 3 September, the salary due on the 7th, 1M a month into the car and 300,000 of it paid: the
+     * 700,000 left is set aside on the 7th, out of the salary — not today, which with 500,000 in hand
+     * would read as short until payday.
+     */
+    @Test
+    void aGoalsPaymentWaitsForThePaydayThatFundsIt() {
+        ledger.income(LocalDate.of(2026, 8, 7), "7000000", SALARY);
+        LocalDate sep3 = LocalDate.of(2026, 9, 3);
+
+        Daily tight = withGoal(sep3, "500000", "7000000", car("300000", null)).daily();
+        assertThat(tight.getShortBy()).isNull();
+        assertThat(tight.getSafePerDay()).isEqualByComparingTo("125000");   // 500,000 over the 4 days to payday
+
+        // With more in hand the tightest day is the horizon's end, and the 700,000 is in it.
+        Daily d = withGoal(sep3, "2000000", "7000000", car("300000", null)).daily();
+        assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 10, 6));
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("700000");
+    }
+
+    /**
+     * 23 September, the salary in: this month's 700,000 today, then the full 1M on 7 October — but
+     * never more in all than is missing to reach the target.
+     */
+    @Test
+    void laterMonthsGetTheFullPaymentOnTheirPaydayCappedAtTheTarget() {
+        salaryOnThe7th();
+
+        Daily open = withGoal(SEP_23, "5000000", "0", car("300000", null)).daily();
+        assertThat(open.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
+        assertThat(open.getBreakdown().getSavings()).isEqualByComparingTo("1700000");
+
+        Daily capped = withGoal(SEP_23, "5000000", "0", car("300000", "1000000")).daily();
+        assertThat(capped.getBreakdown().getSavings()).isEqualByComparingTo("1000000");  // 700,000 + 300,000
+        // 5M − 0.7M + 7M − 0.3M over 45 days
+        assertThat(capped.getSafePerDay()).isEqualByComparingTo("244000");
+    }
+
+    /** A contribution recorded for the 28th is set aside on the 28th — and not again today. */
+    @Test
+    void aGoalContributionRecordedForALaterDayCountsOnItsDayOnce() {
+        salaryOnThe7th();
+        ledger.add(LocalDate.of(2026, 9, 28), TransactionType.EXPENSE, TransactionSubType.INVESTMENT, "400000")
+                .setInvestmentId(11L);
+
+        Daily d = withGoal(SEP_23, "5000000", "0", car("0", null)).daily();
+
+        // 600,000 today + 400,000 on the 28th + 1M on 7 October
+        assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2000000");
+    }
 }
