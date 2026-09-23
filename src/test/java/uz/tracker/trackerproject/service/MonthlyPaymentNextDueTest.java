@@ -43,7 +43,8 @@ class MonthlyPaymentNextDueTest {
                 mock(MarkPaidRepository.class),
                 mock(CardService.class),
                 mock(MonthCloseService.class),
-                mock(SettingsService.class));
+                mock(SettingsService.class),
+                mock(CounterpartyService.class));
     }
 
     private MonthlyPayment bill(int dueDay, LocalDate nextDueDate) {

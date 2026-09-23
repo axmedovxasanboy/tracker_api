@@ -77,7 +77,8 @@ class DonationMirrorSyncTest {
                 mock(MarkPaidRepository.class),
                 cardService,
                 monthCloseService,
-                mock(SettingsService.class));
+                mock(SettingsService.class),
+                mock(CounterpartyService.class));
     }
 
     private DonationRequest request(String amount, LocalDate date, String description) {

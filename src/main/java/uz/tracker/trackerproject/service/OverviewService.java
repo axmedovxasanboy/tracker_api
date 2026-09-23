@@ -26,6 +26,8 @@ import uz.tracker.trackerproject.entity.MonthlyPayment;
 import uz.tracker.trackerproject.entity.Settings;
 import uz.tracker.trackerproject.enums.CategoryType;
 import uz.tracker.trackerproject.enums.Currency;
+import uz.tracker.trackerproject.enums.RecordStatus;
+import uz.tracker.trackerproject.enums.RepaymentType;
 import uz.tracker.trackerproject.enums.TransactionType;
 import uz.tracker.trackerproject.repository.BankLoanRepository;
 import uz.tracker.trackerproject.repository.CategoryRepository;
@@ -73,7 +75,7 @@ public class OverviewService {
 
     /** Default "tight vs comfortable" cutoff within Level 1.2 (5M UZS); LevelConfig can override it. */
     private static final BigDecimal FIVE_MILLION_UZS = new BigDecimal("5000000");
-    /** Recommended personal-loan repayment portion ("at least 34% per month"). */
+    /** The ASAP ask on a balance above 70% of the stable income: 34% of what is left. */
     private static final BigDecimal PERSONAL_LOAN_PAYDOWN_RATE = new BigDecimal("0.34");
     /**
      * Fraction of a bank installment's average monthly amount that must be paid for the
@@ -184,13 +186,18 @@ public class OverviewService {
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
         BigDecimal leftMoneyUzs = incomeUzs.subtract(mandatoryUzs);
 
-        // The owner's model: the only "monthly loan installment" is a BANK loan. Money borrowed
-        // from a person (LoanTaken) and money owed (Debt) are BOTH debt → paid at 34% of original.
-        // Gated by payment-start so a not-yet-started obligation doesn't move this month's tier.
+        // The owner's model: the only "monthly loan installment" is a BANK loan. Money borrowed from
+        // a person (LoanTaken) and money owed (Debt) are BOTH personal debt: a MONTHLY loan asks its
+        // plan (from its payment-start month), an ASAP loan or a debt its ASAP ask (from the month
+        // it was borrowed) — see debtAsks. Their sum is the debt charge.
         BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(month);
-        BigDecimal loanTaken34Uzs = sumLoanTaken34Uzs(month);
-        BigDecimal debtRows34Uzs = sumDebtRows34Uzs(month);
-        BigDecimal plannedSetAsideUzs = sumLoanTakenPlannedUzs(month);
+        List<DebtAsk> asks = debtAsks(month, month.atEndOfMonth());
+        BigDecimal loanTaken34Uzs = asks.stream().filter(a -> LOAN_ASK.equals(a.kind()))
+                .map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal debtRows34Uzs = asks.stream().filter(a -> DEBT_ASK.equals(a.kind()))
+                .map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal plannedSetAsideUzs = asks.stream().filter(a -> !a.asap())
+                .map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal loanInstallmentsUzs = bankUzs;
         BigDecimal debt34Uzs = loanTaken34Uzs.add(debtRows34Uzs);
         BigDecimal debtPaymentsUzs = loanInstallmentsUzs.add(debt34Uzs);
@@ -425,7 +432,7 @@ public class OverviewService {
             // months it was still being paid in.
             BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(m);
             BigDecimal loanInstallmentsUzs = bankUzs;
-            BigDecimal debt34Uzs = sumDebt34Uzs(m);
+            BigDecimal debt34Uzs = debtChargeUzs(m);
             BigDecimal debtPaymentsUzs = loanInstallmentsUzs.add(debt34Uzs);
             BigDecimal debtRatio = stableUzs.signum() > 0 ? debtPaymentsUzs.divide(stableUzs, MC) : null;
             String subLevel = computeSubLevel(level, debtPaymentsUzs, debtRatio);
@@ -721,132 +728,188 @@ public class OverviewService {
         return b.getEndDate() == null || !b.getEndDate().isBefore(month.atDay(1));
     }
 
-    /**
-     * The mandatory monthly "debt" payment (34% rule). Per the owner, BOTH money borrowed from a
-     * person (LoanTaken) and money owed (Debt) are debt — each pays 34% of its ORIGINAL total,
-     * capped at the residual (final month), recurring until cleared. The only obligation that is
-     * NOT a 34% debt is a bank loan (it has its own monthly installment). Gated by payment-start.
-     */
-    private BigDecimal sumDebt34Uzs(YearMonth month) {
-        return sumLoanTaken34Uzs(month).add(sumDebtRows34Uzs(month));
-    }
+    // ── Borrowed money and debts: MONTHLY plans and ASAP asks ─────────────────
 
-    /** 34% of original (capped) across active LoanTaken (money borrowed from people) rows. */
-    private BigDecimal sumLoanTaken34Uzs(YearMonth month) {
-        BigDecimal total = BigDecimal.ZERO;
-        for (LoanTaken l : loanTakenRepository.findAll()) {
-            // A loan with an agreed monthly plan costs that, not 34% of the whole sum. Still
-            // capped at what is actually left, so the final month tops out and the debt clears.
-            BigDecimal charge = plannedOrDefaultCharge(l);
-            if (charge.signum() <= 0) continue;
-            if (!hasStartedBy(l.getPaymentStartDate(), month)) continue;
-            total = total.add(charge);
-        }
-        return total;
-    }
+    /** An ASAP loan left at or under this share of the stable income is asked in full. */
+    private static final BigDecimal ASAP_ALL_SHARE = new BigDecimal("0.70");
+
+    /** {@link DebtAsk#kind()} of borrowed money (LoanTaken) and of a debt (Debt) — ids of the two collide. */
+    static final String LOAN_ASK = "LOAN";
+    static final String DEBT_ASK = "DEBT";
 
     /**
-     * The monthly charge for one borrowed loan: the user's own repayment plan when they set one
-     * (capped at the residual), otherwise the default 34%-of-original rule.
-     */
-    static BigDecimal plannedOrDefaultCharge(LoanTaken l) {
-        BigDecimal planned = l.getPlannedMonthlyPayment();
-        if (planned == null || planned.signum() <= 0) {
-            return debtMonthlyCharge(l.getTotalAmount(), l.getPaidAmount());
-        }
-        BigDecimal residual = nullToZero(l.getTotalAmount()).subtract(nullToZero(l.getPaidAmount()));
-        if (residual.signum() <= 0) return BigDecimal.ZERO;
-        return planned.min(residual);
-    }
-
-    /**
-     * This month's total across loans the user has put on a repayment PLAN. This is the
-     * "set aside" figure: it belongs in the allocation as its own ask, not folded into the
-     * 34% pay-down, because it is a number the user chose rather than one the rule imposed.
-     */
-    private BigDecimal sumLoanTakenPlannedUzs(YearMonth month) {
-        BigDecimal total = BigDecimal.ZERO;
-        for (LoanTaken l : loanTakenRepository.findAll()) {
-            if (l.getPlannedMonthlyPayment() == null || l.getPlannedMonthlyPayment().signum() <= 0) continue;
-            if (!hasStartedBy(l.getPaymentStartDate(), month)) continue;
-            total = total.add(plannedOrDefaultCharge(l));
-        }
-        return total;
-    }
-
-    /**
-     * Repayments that exist but have not STARTED yet, as informational action items.
+     * One borrowed loan (LOAN) or debt (DEBT) in a month, as the Plan, the ledger, the daily walk and
+     * the advisor all see it (the owner's two kinds, 2026-09-23):
+     * <ul>
+     *   <li>MONTHLY — the plan, from the payment-start month, capped at what is left;</li>
+     *   <li>ASAP (every debt, and borrowed money without a plan) — {@link #asapAsk} on what was left at
+     *       the month's start, from the month it was borrowed; the payment-start month plays no
+     *       part.</li>
+     * </ul>
      *
-     * <p>A loan whose payment-start month is still in the future is excluded from every figure
-     * on this page — no 34% charge, no set-aside. That is correct, but silently correct: the
-     * user sets a 500,000/mo plan, sees nothing appear anywhere, and reasonably concludes the
-     * plan was not saved. Naming the money and the month it begins costs one line and removes
-     * the whole class of confusion.
+     * @param ask    what the month asks; zero in a month it does not count in
+     * @param repaid repaid toward it in the month up to the as-of day: repayments linked to it and
+     *               its "already paid" marks for the month
+     * @param left   what is still owed now
+     * @param plan   a MONTHLY loan's monthly payment; null for ASAP
+     */
+    record DebtAsk(String kind, Long id, String name, RepaymentType type, BigDecimal ask, BigDecimal repaid,
+                   BigDecimal left, BigDecimal plan, LocalDate paymentStartDate, LocalDate borrowedDate) {
+        boolean asap() {
+            return type == RepaymentType.ASAP;
+        }
+
+        /** What the month still asks after its repayments. */
+        BigDecimal due() {
+            return clampZero(ask.subtract(repaid));
+        }
+    }
+
+    /**
+     * The ASAP ask on {@code leftAtStart}, what was left at a month's start: all of it when that is
+     * at most 70% of the stable income, else 34% of it (to the sum). The owner's 10,000,000 on a
+     * 7,000,000 salary: 3,400,000, then 2,244,000 (34% of 6,600,000), then the last 4,356,000.
+     */
+    static BigDecimal asapAsk(BigDecimal leftAtStart, BigDecimal stableIncome) {
+        if (leftAtStart == null || leftAtStart.signum() <= 0) return BigDecimal.ZERO;
+        BigDecimal all = nullToZero(stableIncome).multiply(ASAP_ALL_SHARE);
+        if (leftAtStart.compareTo(all) <= 0) return leftAtStart;
+        return leftAtStart.multiply(PERSONAL_LOAN_PAYDOWN_RATE).setScale(0, RoundingMode.HALF_UP);
+    }
+
+    /** Whether money borrowed on {@code borrowedDate} is owed in {@code month}: from its own month on. */
+    static boolean borrowedBy(LocalDate borrowedDate, YearMonth month) {
+        return borrowedDate == null || !YearMonth.from(borrowedDate).isAfter(month);
+    }
+
+    /**
+     * Every borrowed loan and debt still owed (UZS), with its ask for {@code month} and what was repaid
+     * toward it by {@code asOf} (the month's end when later). One that is cleared is out of every
+     * month, as before. Package-private: the daily walk and the advisor read the same asks.
+     */
+    List<DebtAsk> debtAsks(YearMonth month, LocalDate asOf) {
+        Settings s = settingsService.getOrCreate();
+        BigDecimal stable = s == null ? BigDecimal.ZERO : nullToZero(s.getMonthlyStableIncome());
+        LocalDate start = month.atDay(1);
+        LocalDate end = asOf == null || asOf.isAfter(month.atEndOfMonth()) ? month.atEndOfMonth() : asOf;
+        List<DebtAsk> asks = new ArrayList<>();
+        for (LoanTaken l : loanTakenRepository.findAll()) {
+            BigDecimal left = nullToZero(l.getTotalAmount()).subtract(nullToZero(l.getPaidAmount()));
+            if (left.signum() <= 0 || l.getStatus() == RecordStatus.PAID || !isUzs(l.getCurrency())) continue;
+            RepaymentType type = l.effectiveRepaymentType();
+            List<Repaid> repaid = repaid(transactionRepository.findByRepaidLoanTakenIdOrderByTransactionDateDesc(l.getId()),
+                    markPaidRepository.findByKindAndRefId("PERSONAL_LOAN", l.getId()));
+            BigDecimal ask;
+            if (type == RepaymentType.MONTHLY) {
+                ask = hasStartedBy(l.getPaymentStartDate(), month) ? l.getPlannedMonthlyPayment().min(left) : BigDecimal.ZERO;
+            } else {
+                ask = borrowedBy(l.getBorrowedDate(), month) ? asapAsk(left.add(repaidSince(repaid, start)), stable) : BigDecimal.ZERO;
+            }
+            asks.add(new DebtAsk(LOAN_ASK, l.getId(), l.getLenderName(), type, ask, repaidIn(repaid, start, end), left,
+                    type == RepaymentType.MONTHLY ? l.getPlannedMonthlyPayment() : null,
+                    l.getPaymentStartDate(), l.getBorrowedDate()));
+        }
+        for (Debt d : debtRepository.findAll()) {
+            BigDecimal left = nullToZero(d.getTotalAmount()).subtract(nullToZero(d.getPaidAmount()));
+            if (left.signum() <= 0 || d.getStatus() == RecordStatus.PAID || !isUzs(d.getCurrency())) continue;
+            List<Repaid> repaid = repaid(transactionRepository.findByRepaidDebtIdOrderByTransactionDateDesc(d.getId()),
+                    markPaidRepository.findByKindAndRefId("DEBT", d.getId()));
+            BigDecimal ask = borrowedBy(d.getBorrowedDate(), month)
+                    ? asapAsk(left.add(repaidSince(repaid, start)), stable) : BigDecimal.ZERO;
+            asks.add(new DebtAsk(DEBT_ASK, d.getId(), d.getCreditorName(), RepaymentType.ASAP, ask,
+                    repaidIn(repaid, start, end), left, null, d.getPaymentStartDate(), d.getBorrowedDate()));
+        }
+        return asks;
+    }
+
+    /**
+     * Loan repayments in {@code month} up to {@code asOf} that name no loan or debt (UZS): the Plan
+     * counts them toward the ASAP asks, so the daily walk and the advisor take them off those asks
+     * in turn.
+     */
+    BigDecimal unlinkedRepayments(YearMonth month, LocalDate asOf) {
+        LocalDate start = month.atDay(1);
+        LocalDate end = asOf == null || asOf.isAfter(month.atEndOfMonth()) ? month.atEndOfMonth() : asOf;
+        if (end.isBefore(start)) return BigDecimal.ZERO;
+        BigDecimal total = BigDecimal.ZERO;
+        List<Transaction> rows = transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+                uz.tracker.trackerproject.enums.TransactionSubType.LOAN_REPAYMENT, start, end);
+        for (Transaction t : rows == null ? List.<Transaction>of() : rows) {
+            if (t.getAmount() == null || t.getRepaidLoanTakenId() != null || t.getRepaidDebtId() != null) continue;
+            if (!isUzs(t.getCurrency())) continue;
+            total = total.add(t.getAmount());
+        }
+        return total;
+    }
+
+    /** One repayment toward a loan or debt: a linked repayment transaction (on its day) or a mark (for its month). */
+    private record Repaid(LocalDate on, BigDecimal amount, boolean mark) {}
+
+    private static List<Repaid> repaid(List<Transaction> repayments, List<MarkPaid> marks) {
+        List<Repaid> out = new ArrayList<>();
+        for (Transaction t : repayments == null ? List.<Transaction>of() : repayments) {
+            if (t.getAmount() == null || t.getTransactionDate() == null) continue;
+            if (t.getSubType() != uz.tracker.trackerproject.enums.TransactionSubType.LOAN_REPAYMENT) continue;
+            out.add(new Repaid(t.getTransactionDate(), t.getAmount(), false));
+        }
+        for (MarkPaid m : marks == null ? List.<MarkPaid>of() : marks) {
+            if (m.getAmount() == null || m.getMonth() == null) continue;
+            out.add(new Repaid(m.getMonth().withDayOfMonth(1), m.getAmount(), true));
+        }
+        return out;
+    }
+
+    /** Repaid on or after {@code start} — what a balance at the month's start adds back to today's. */
+    private static BigDecimal repaidSince(List<Repaid> repaid, LocalDate start) {
+        return repaid.stream().filter(r -> !r.on().isBefore(start))
+                .map(Repaid::amount).reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    /** Repaid within [start, end]; a mark counts for its whole month, as the Plan counts it. */
+    private static BigDecimal repaidIn(List<Repaid> repaid, LocalDate start, LocalDate end) {
+        return repaid.stream()
+                .filter(r -> r.mark() ? r.on().equals(start) : !r.on().isBefore(start) && !r.on().isAfter(end))
+                .map(Repaid::amount).reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    /** Σ of {@code month}'s asks: the debt charge that sets the sub-level (bank installments aside). */
+    private BigDecimal debtChargeUzs(YearMonth month) {
+        return debtAsks(month, month.atEndOfMonth()).stream().map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    /**
+     * Repayment plans that exist but have not STARTED yet, as informational action items.
+     *
+     * <p>A MONTHLY loan whose payment-start month is still in the future is excluded from every
+     * figure on this page. That is correct, but silently correct: the user sets a 500,000/mo plan,
+     * sees nothing appear anywhere, and reasonably concludes the plan was not saved. Naming the money
+     * and the month it begins costs one line. (ASAP money counts from the month it was borrowed, so
+     * it never waits.)
      *
      * <p>These carry no {@code action}, so they never lock the allocation or ask to be paid.
      */
     private List<ActionItem> upcomingChargeActions(YearMonth month, Currency cur) {
         List<ActionItem> upcoming = new ArrayList<>();
         for (LoanTaken l : loanTakenRepository.findAll()) {
+            if (l.effectiveRepaymentType() != RepaymentType.MONTHLY) continue;
             LocalDate startsOn = l.getPaymentStartDate();
             if (startsOn == null || hasStartedBy(startsOn, month)) continue;
-            BigDecimal charge = plannedOrDefaultCharge(l);
-            if (charge.signum() <= 0) continue;
-            boolean planned = l.getPlannedMonthlyPayment() != null
-                    && l.getPlannedMonthlyPayment().signum() > 0;
+            BigDecimal left = nullToZero(l.getTotalAmount()).subtract(nullToZero(l.getPaidAmount()));
+            if (left.signum() <= 0) continue;
+            BigDecimal charge = l.getPlannedMonthlyPayment().min(left);
             String name = orEmpty(l.getLenderName());
             String amount = formatNumber(charge) + " " + cur;
             YearMonth starts = YearMonth.from(startsOn);
-            upcoming.add(info(
-                    planned ? "page.plan.note.loanPlanNotStarted" : "page.plan.note.loanChargeNotStarted",
+            upcoming.add(info("page.plan.note.loanPlanNotStarted",
                     Map.of("name", name, "amount", amount, "month", starts.toString()),
-                    name + ": "
-                    + (planned ? "your plan of " : "the 34% charge of ")
-                    + amount + "/mo starts "
-                    + monthLabel(starts)
+                    name + ": your plan of " + amount + "/mo starts " + monthLabel(starts)
                     + " — not counted this month. Edit the loan to start it sooner."));
-        }
-        for (Debt d : debtRepository.findAll()) {
-            LocalDate startsOn = d.getPaymentStartDate();
-            if (startsOn == null || hasStartedBy(startsOn, month)) continue;
-            BigDecimal charge = debtMonthlyCharge(d.getTotalAmount(), d.getPaidAmount());
-            if (charge.signum() <= 0) continue;
-            String name = orEmpty(d.getCreditorName());
-            String amount = formatNumber(charge) + " " + cur;
-            YearMonth starts = YearMonth.from(startsOn);
-            upcoming.add(info("page.plan.note.debtChargeNotStarted",
-                    Map.of("name", name, "amount", amount, "month", starts.toString()),
-                    name + ": the 34% charge of "
-                    + amount + "/mo starts "
-                    + monthLabel(starts)
-                    + " — not counted this month. Edit the debt to start it sooner."));
         }
         return upcoming;
     }
 
-    /** 34% of original (capped) across active Debt rows. */
-    private BigDecimal sumDebtRows34Uzs(YearMonth month) {
-        BigDecimal total = BigDecimal.ZERO;
-        for (Debt d : debtRepository.findAll()) {
-            BigDecimal charge = debtMonthlyCharge(d.getTotalAmount(), d.getPaidAmount());
-            if (charge.signum() <= 0) continue;
-            if (!hasStartedBy(d.getPaymentStartDate(), month)) continue;
-            total = total.add(charge);
-        }
-        return total;
-    }
-
-    /**
-     * 34% of the ORIGINAL total, capped at the outstanding residual so the final month tops
-     * out and the debt then clears (C4). Returns zero once paidAmount &gt;= totalAmount.
-     * Pure — unit-tested directly.
-     */
-    static BigDecimal debtMonthlyCharge(BigDecimal totalAmount, BigDecimal paidAmount) {
-        BigDecimal total = nullToZero(totalAmount);
-        BigDecimal residual = total.subtract(nullToZero(paidAmount));
-        if (residual.signum() <= 0) return BigDecimal.ZERO;
-        BigDecimal charge = total.multiply(PERSONAL_LOAN_PAYDOWN_RATE, MC);
-        return charge.compareTo(residual) > 0 ? residual : charge;
+    private static boolean isUzs(Currency c) {
+        return c == null || c == Currency.UZS;
     }
 
     /**
@@ -914,8 +977,8 @@ public class OverviewService {
      * Paid-this-month sums for the debt actions, in display currency. Drives the "Paid X of Y"
      * progress strip under each action and whether it still locks the buckets.
      *
-     * @param ruleRepayments repayments toward every loan and debt WITHOUT a repayment plan, plus
-     *        repayment transactions not linked to any loan — what the 34% pay-down asks for
+     * @param ruleRepayments repayments and marks toward the ASAP loans and debts still owed, each up to
+     *        its ask, plus repayment transactions not linked to any loan — what the ASAP pay-back asks for
      * @param planRepayments repayments toward loans ON a repayment plan — what the set-aside asks for
      */
     record MonthPaid(BigDecimal bankInstallments, BigDecimal ruleRepayments, BigDecimal planRepayments) {}
@@ -932,29 +995,21 @@ public class OverviewService {
     MonthPaid computeMonthPaid(YearMonth month, Currency displayCurrency, LocalDate asOf) {
         LocalDate start = month.atDay(1);
         LocalDate end = asOf.isBefore(month.atEndOfMonth()) ? asOf : month.atEndOfMonth();
-        // The set-aside and the 34% pay-down are two separate asks, so a repayment must count toward
+        // The set-aside and the ASAP pay-back are two separate asks, so a repayment must count toward
         // the one it pays. Both used to read ALL of the month's repayments, which let paying only the
         // larger ask satisfy the smaller one too and unlock the buckets while money was still owed.
         // Split by the loan's plan as it stands now — the same test the two targets are built with.
         java.util.Set<Long> plannedLoanIds = new java.util.HashSet<>();
         for (LoanTaken l : loanTakenRepository.findAll()) {
-            if (l.getPlannedMonthlyPayment() != null && l.getPlannedMonthlyPayment().signum() > 0) {
-                plannedLoanIds.add(l.getId());
-            }
+            if (l.effectiveRepaymentType() == RepaymentType.MONTHLY) plannedLoanIds.add(l.getId());
         }
         BigDecimal bank = BigDecimal.ZERO;
-        BigDecimal repaid = BigDecimal.ZERO;
         BigDecimal repaidToPlans = BigDecimal.ZERO;
         for (Currency c : Currency.reporting()) {
             BigDecimal bankSum = transactionRepository.sumBySubTypeCurrencyDateRange(
                     uz.tracker.trackerproject.enums.TransactionSubType.BANK_LOAN_PAYMENT, c, start, end);
             if (bankSum != null && bankSum.signum() > 0) {
                 bank = bank.add(bankSum);
-            }
-            BigDecimal repaySum = transactionRepository.sumBySubTypeCurrencyDateRange(
-                    uz.tracker.trackerproject.enums.TransactionSubType.LOAN_REPAYMENT, c, start, end);
-            if (repaySum != null && repaySum.signum() > 0) {
-                repaid = repaid.add(repaySum);
             }
             if (!plannedLoanIds.isEmpty()) {
                 BigDecimal planSum = transactionRepository.sumRepaymentsToLoansTaken(plannedLoanIds, c, start, end);
@@ -963,22 +1018,24 @@ public class OverviewService {
                 }
             }
         }
-        BigDecimal rule = clampZero(repaid.subtract(repaidToPlans));
         BigDecimal plan = repaidToPlans;
-        // "Already paid" marks (no transaction) for bank installments and personal loans / debts.
+        // "Already paid" marks (no transaction) for bank installments and MONTHLY loans.
         for (MarkPaid m : markPaidRepository.findByMonth(start)) {
             switch (m.getKind() == null ? "" : m.getKind()) {
                 case "BANK" -> bank = bank.add(m.getAmount());
                 case "PERSONAL_LOAN" -> {
-                    if (m.getRefId() != null && plannedLoanIds.contains(m.getRefId())) {
-                        plan = plan.add(m.getAmount());
-                    } else {
-                        rule = rule.add(m.getAmount());
-                    }
+                    if (m.getRefId() != null && plannedLoanIds.contains(m.getRefId())) plan = plan.add(m.getAmount());
                 }
-                case "DEBT" -> rule = rule.add(m.getAmount());
                 default -> { }
             }
+        }
+        // The ASAP pay-back: what went toward each ASAP loan and debt it asks for — its linked
+        // repayments and marks, counted up to its own ask — plus repayments naming no loan. Money paid
+        // to a MONTHLY loan, or to one already cleared this month, is not part of it: counting that
+        // made the pay-back — the bot's "pay debts" sum — smaller than what the ASAP asks still owe.
+        BigDecimal rule = nullToZero(unlinkedRepayments(month, end));
+        for (DebtAsk a : debtAsks(month, end)) {
+            if (a.asap()) rule = rule.add(a.repaid().min(a.ask()));
         }
         return new MonthPaid(bank, rule, plan);
     }
@@ -1356,14 +1413,14 @@ public class OverviewService {
         // the percentages multiply is allocBaseUzs — max(stable income, the salary received this
         // month) + this month's bonus (the owner's 2026-09-23 decision; before it, the calc base +
         // bonus) — and neither the salary nor the bonus takes part in choosing the scenario.
-        // loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is debt (34%).
+        // loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is personal debt.
         Level1Plan plan = computeLevel1Plan(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
                 debt34Uzs, debtRatio, minLeftoverUzs(1));
         String[] p = plan.pct();
         List<AllocationLine> lines = percentLines(allocBaseUzs, displayCurrency, paid, marks,
                 p[0], p[1], p[2]);
 
-        // Bank installments pay via PayBankInstallmentModal; the set-aside and the 34% pay-down
+        // Bank installments pay via PayBankInstallmentModal; the set-aside and the ASAP pay-back
         // (borrowed money + debts) via PayPersonalLoanModal.
         List<ActionItem> actions = level1Actions(plan, monthPaid, bankMonthlyUzs,
                 nullToZero(debt34Uzs), plannedSetAsideUzs, displayCurrency, upcoming);
@@ -1381,7 +1438,8 @@ public class OverviewService {
      * Owner-spec Level-1 case selection, calc base, and bucket percentages. Pure (no repos / fields)
      * so it can be unit-tested directly. All amounts in UZS.
      *   leftBalance = income − mandatory; loanInstallments = bank loans (params 3+4, production
-     *   passes bank in 3 and 0 in 4); debt34 = 34% of borrowed money (LoanTaken) + debts (Debt).
+     *   passes bank in 3 and 0 in 4); debt34 = the month's asks on borrowed money (LoanTaken) and
+     *   debts (Debt) — MONTHLY plans and ASAP asks (see debtAsks).
      *   A  (no debt)         → base leftBalance,          10/5/15/5
      *   C  (ratio &gt; 70%)     → base left−loan−debt34,    2/0/0/0
      *   B3 (loan AND debt)   → base left−loan−debt34,     5/0/5/0  (no 5M split)
@@ -1518,9 +1576,8 @@ public class OverviewService {
         if (bankMonthlyUzs.signum() > 0) {
             actions.add(payBank(monthPaid, bankMonthlyUzs));
         }
-        // The same asks as Level 1. This used to charge 34% of what REMAINS on each loan and debt,
-        // while the sub-level above was already built from 34% of the
-        // ORIGINAL total — so one page quoted two different monthly debt charges.
+        // The same asks as Level 1, from the same debtAsks the sub-level above was built from — one
+        // monthly debt charge per page.
         addDebtActions(actions, nullToZero(debt34Uzs), plannedSetAsideUzs, displayCurrency, monthPaid);
         if (rule.getNote() != null && !rule.getNote().isBlank()) {
             actions.add(userNote(rule.getNote()));
@@ -1613,7 +1670,7 @@ public class OverviewService {
         if (curLevel != null && !missingIncome) {
             BigDecimal stableUzs = s.getMonthlyStableIncome();
             YearMonth now = YearMonth.now();
-            BigDecimal debtTotal = sumBankLoanMonthlyPaymentsUzs(now).add(sumDebt34Uzs(now));
+            BigDecimal debtTotal = sumBankLoanMonthlyPaymentsUzs(now).add(debtChargeUzs(now));
             BigDecimal ratio = stableUzs.signum() > 0 ? debtTotal.divide(stableUzs, MC) : null;
             curSubLevel = computeSubLevel(curLevel, debtTotal, ratio);
         }
@@ -1792,13 +1849,13 @@ public class OverviewService {
     }
 
     /**
-     * The debt asks shared by every level: the set-aside for loans on a repayment plan, then the
-     * 34% pay-down on everything else — both paid through PayPersonalLoanModal. The set-aside is
-     * money the user committed to themselves and the 34% pay-down is the rule's demand on the
-     * rest; showing them as one number hid the plan entirely.
+     * The debt asks shared by every level: the set-aside for MONTHLY loans (their plans), then the
+     * pay-back of everything ASAP — both paid through PayPersonalLoanModal. The set-aside is money
+     * the user committed to themselves and the pay-back is the ASAP rule's demand on the rest;
+     * showing them as one number hid the plan entirely.
      *
-     * @param debt34Uzs this month's whole debt charge: plan amounts plus 34% of every other
-     *        started loan and debt (see {@link #sumDebt34Uzs})
+     * @param debt34Uzs this month's whole debt charge: the MONTHLY plans plus every ASAP ask (see
+     *        {@link #debtAsks})
      */
     private static void addDebtActions(List<ActionItem> actions, BigDecimal debt34Uzs,
                                        BigDecimal plannedSetAsideUzs, Currency cur, MonthPaid monthPaid) {
@@ -1812,13 +1869,14 @@ public class OverviewService {
     }
 
     /**
-     * The 34% pay-down: 34% of the ORIGINAL total of every started loan and debt that has no
-     * repayment plan, capped at what is left on each. It must reach the full target to unlock.
+     * The ASAP pay-back: every ASAP loan's and debt's ask this month — all of what was left at the
+     * month's start when that is at most 70% of the stable income, else 34% of it. It must reach the
+     * full target to unlock. The code keeps its old name ("payDebts34"): the bot translates it.
      */
     private static ActionItem payDebts34(BigDecimal target, Currency cur, MonthPaid monthPaid) {
         String amount = formatNumber(target) + " " + cur;
         return ActionItem.builder()
-                .text("Pay at least 34% of your debts / borrowed money (~ " + amount + ") this month.")
+                .text("Pay back your debts / borrowed money as fast as you can (~ " + amount + ") this month.")
                 .code("page.plan.action.payDebts34")
                 .params(Map.of("amount", amount))
                 .action("PAY_PERSONAL_LOAN")
@@ -1832,7 +1890,7 @@ public class OverviewService {
 
     /**
      * The repayment plan as its own allocation ask. Same PAY_PERSONAL_LOAN action (it is paid
-     * the same way), but worded as the commitment the user made rather than as the 34% rule.
+     * the same way), but worded as the commitment the user made rather than as the ASAP rule.
      */
     private static ActionItem setAside(BigDecimal targetDisplay, Currency displayCurrency,
                                        MonthPaid monthPaid) {

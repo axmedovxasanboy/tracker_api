@@ -261,16 +261,16 @@ public class AdvisorService {
                 .free(free)
                 .suggestions(suggestions)
                 .daily(daily)
-                .savingsThisMonth(missingIncome ? List.of() : savingsRows(allocation, goalMonths))
+                .savingsThisMonth(missingIncome ? List.of() : savingsRows(allocation, goalMonths, month))
                 .build();
     }
 
     /**
      * Every bucket with a target this month, met or not — the {@link SetAside} figures without the
      * "still to do" filter, so a screen can show a bucket as done rather than as missing — then each
-     * savings goal's monthly payment.
+     * savings goal's monthly payment, once the goal's payment has started (its start month).
      */
-    private static List<SavingsRow> savingsRows(TierAllocation allocation, List<GoalMonth> goals) {
+    private static List<SavingsRow> savingsRows(TierAllocation allocation, List<GoalMonth> goals, YearMonth month) {
         List<SavingsRow> rows = new ArrayList<>();
         if (allocation != null && allocation.getLines() != null) {
             for (TierAllocation.AllocationLine line : allocation.getLines()) {
@@ -282,15 +282,23 @@ public class AdvisorService {
                         .remaining(nz(line.getRemainingAmount())).build());
             }
         }
-        for (GoalMonth g : goals) rows.add(g.row());
+        for (GoalMonth g : goals) {
+            if (g.startedBy(month)) rows.add(g.row());
+        }
         return rows;
     }
 
     /**
-     * One savings goal's month: its monthly payment, what was put into it this month by today, and
-     * what is still missing to reach its target (null when it has none).
+     * One savings goal's month: its monthly payment, what was put into it this month by today, what
+     * is still missing to reach its target (null when it has none), and the month its payment starts
+     * (null: always started).
      */
-    private record GoalMonth(Investment goal, BigDecimal monthly, BigDecimal paid, BigDecimal toTarget) {
+    private record GoalMonth(Investment goal, BigDecimal monthly, BigDecimal paid, BigDecimal toTarget,
+                             YearMonth startMonth) {
+        boolean startedBy(YearMonth month) {
+            return startMonth == null || !startMonth.isAfter(month);
+        }
+
         /** The month's payment, but never more than finishes the goal. */
         SavingsRow row() {
             BigDecimal target = toTarget == null ? monthly : monthly.min(paid.add(toTarget));
@@ -299,14 +307,16 @@ public class AdvisorService {
         }
 
         DailyAdviceService.Goal plan() {
-            return new DailyAdviceService.Goal(goal.getId(), monthly, paid, toTarget);
+            return new DailyAdviceService.Goal(goal.getId(), monthly, paid, toTarget, startMonth);
         }
     }
 
     /**
-     * The savings goals with a monthly payment that have not reached their target (or have none).
-     * "Paid" is what was put into the goal this month up to and including {@code date} — a
-     * contribution recorded for a later day has not left the wallets yet.
+     * The savings goals with a monthly payment that have not reached their target (or have none) —
+     * those whose payment starts in a later month too: the daily figure sets their payment aside
+     * from that month's payday, while this month's rows list only the started ones. "Paid" is what
+     * was put into the goal this month up to and including {@code date} — a contribution recorded
+     * for a later day has not left the wallets yet.
      */
     private List<GoalMonth> goalMonths(List<Investment> holdings, LocalDate date) {
         LocalDate start = YearMonth.from(date).atDay(1);
@@ -324,12 +334,12 @@ public class AdvisorService {
             }
             BigDecimal toTarget = g.getTargetAmount() == null || g.getTargetAmount().signum() <= 0 ? null
                     : clampZero(g.getTargetAmount().subtract(value(g)));
-            goals.add(new GoalMonth(g, monthly, paid, toTarget));
+            goals.add(new GoalMonth(g, monthly, paid, toTarget, g.paymentStartMonth()));
         }
         return goals;
     }
 
-    /** The Plan's action item as a bill kind: the bank installment, the loan plan, or the 34% pay-down. */
+    /** The Plan's action item as a bill kind: the bank installment, the loan plan, or the ASAP pay-back. */
     private static String billKind(TierAllocation.ActionItem a) {
         if ("PAY_BANK".equals(a.getAction())) return "BANK";
         if ("page.plan.action.setAside".equals(a.getCode())) return "LOAN_PLAN";
@@ -356,7 +366,7 @@ public class AdvisorService {
                     .build();
             default -> Suggestion.builder()
                     .code("advisor.s.payDebts").params(Map.of())
-                    .text("Debts: " + fmt(b.getAmount()) + " still to pay this month (34% rule).")
+                    .text("Debts: " + fmt(b.getAmount()) + " still to pay back this month.")
                     .kind("DO").action("PAY_DEBT").amount(b.getAmount())
                     .build();
         };

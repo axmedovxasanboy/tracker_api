@@ -16,4 +16,7 @@ public interface MarkPaidRepository extends JpaRepository<MarkPaid, Long> {
 
     /** Marks for one target (subscription / loan / debt) within a month. */
     List<MarkPaid> findByKindAndRefIdAndMonth(String kind, Long refId, LocalDate month);
+
+    /** Every mark for one target, any month — what an ASAP loan's balance at a month's start adds back. */
+    List<MarkPaid> findByKindAndRefId(String kind, Long refId);
 }

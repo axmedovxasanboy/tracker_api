@@ -25,10 +25,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * A loan on a repayment plan must be asked for ONCE — at the amount the user committed to —
- * and must not also attract the 34%-of-remaining pay-down on top. Charging both would demand
- * roughly four times the money the user actually planned to part with, which is precisely the
- * "pay it ASAP" behaviour the plan exists to replace.
+ * A loan on a repayment plan (MONTHLY) must be asked for ONCE — at the amount the user committed
+ * to — and must not also attract the ASAP pay-back on top. Charging both would demand roughly four
+ * times the money the user actually planned to part with, which is precisely the "pay it ASAP"
+ * behaviour the plan exists to replace.
  *
  * <p>Also pins the allocation's bucket lines, which must no longer contain Stocks at all.
  */
@@ -179,10 +179,10 @@ class OverviewSetAsideActionTest {
     }
 
     @Test
-    void aPlannedLoanIsNotAlsoChargedThe34PercentPayDown() {
+    void aPlannedLoanIsNotAlsoChargedTheAsapPayBack() {
         List<ActionItem> actions = actionsFor("9000000", "200000");
 
-        assertThat(texts(actions)).noneMatch(txt -> txt.contains("34%"));
+        assertThat(texts(actions)).noneMatch(txt -> txt.startsWith("Pay back"));
         // Everything asked of this loan, once: the plan and nothing more.
         BigDecimal asked = actions.stream()
                 .filter(a -> "PAY_PERSONAL_LOAN".equals(a.getAction()))
@@ -192,16 +192,17 @@ class OverviewSetAsideActionTest {
     }
 
     @Test
-    void withoutAPlanTheThirtyFourPercentAskIsUnchanged() {
+    void withoutAPlanTheLoanIsPaidBackAsap() {
         List<ActionItem> actions = actionsFor("9000000", null);
 
-        assertThat(texts(actions)).anyMatch(txt -> txt.contains("34%"));
+        assertThat(texts(actions)).anyMatch(txt -> txt.startsWith("Pay back"));
         assertThat(texts(actions)).noneMatch(txt -> txt.startsWith("Set aside"));
         BigDecimal asked = actions.stream()
                 .filter(a -> "PAY_PERSONAL_LOAN".equals(a.getAction()))
                 .map(ActionItem::getTarget)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
-        assertThat(asked).isEqualByComparingTo("3060000"); // 34% of 9M
+        // 9M left is above 70% of the 10M income, so 34% of what is left.
+        assertThat(asked).isEqualByComparingTo("3060000");
     }
 
     @Test

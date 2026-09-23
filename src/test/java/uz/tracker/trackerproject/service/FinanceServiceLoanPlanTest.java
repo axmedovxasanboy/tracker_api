@@ -6,6 +6,7 @@ import uz.tracker.trackerproject.dto.request.LoanTakenRequest;
 import uz.tracker.trackerproject.entity.LoanTaken;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.RecordStatus;
+import uz.tracker.trackerproject.enums.RepaymentType;
 import uz.tracker.trackerproject.repository.*;
 
 import java.math.BigDecimal;
@@ -44,7 +45,8 @@ class FinanceServiceLoanPlanTest {
                 mock(MarkPaidRepository.class),
                 mock(CardService.class),
                 mock(MonthCloseService.class),
-                mock(SettingsService.class));
+                mock(SettingsService.class),
+                mock(CounterpartyService.class));
         when(loanTakenRepository.save(any(LoanTaken.class))).thenAnswer(inv -> inv.getArgument(0));
     }
 
@@ -96,13 +98,24 @@ class FinanceServiceLoanPlanTest {
     }
 
     @Test
-    void clearingThePlanRevertsToTheDefaultRule() {
+    void clearingThePlanMakesTheLoanAsap() {
         LoanTaken l = existing("200000");
 
         service.setLoanTakenPlan(4L, null);
 
         assertThat(l.getPlannedMonthlyPayment()).isNull();
-        assertThat(OverviewService.plannedOrDefaultCharge(l)).isEqualByComparingTo("3400000");
+        assertThat(l.getRepaymentType()).isEqualTo(RepaymentType.ASAP);
+        assertThat(l.effectiveRepaymentType()).isEqualTo(RepaymentType.ASAP);
+    }
+
+    @Test
+    void settingAPlanMakesTheLoanMonthly() {
+        LoanTaken l = existing(null);
+        assertThat(l.effectiveRepaymentType()).isEqualTo(RepaymentType.ASAP);
+
+        service.setLoanTakenPlan(4L, new BigDecimal("500000"));
+
+        assertThat(l.getRepaymentType()).isEqualTo(RepaymentType.MONTHLY);
     }
 
     @Test

@@ -11,4 +11,5 @@ import java.util.List;
 public interface DebtRepository extends JpaRepository<Debt, Long> {
     List<Debt> findAllByOrderByDueDateAsc();
     List<Debt> findByStatus(RecordStatus status);
+    List<Debt> findByLenderId(Long lenderId);
 }

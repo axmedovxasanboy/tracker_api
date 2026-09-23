@@ -489,7 +489,10 @@ public class TransactionService {
                         l.setBorrowedDate(req.getTransactionDate());
                         if (req.getPaymentStartDate() != null) l.setPaymentStartDate(req.getPaymentStartDate());
                         l.setDescription(req.getDescription());
-                        if (req.getCounterpartyName() != null) l.setLenderName(req.getCounterpartyName());
+                        if (req.getCounterpartyName() != null) {
+                            l.setLenderName(req.getCounterpartyName());
+                            financeService.relinkLender(l);   // the name decides the person
+                        }
                         loanTakenRepository.save(l);
                     });
             case LOAN_GIVEN -> {
@@ -506,7 +509,10 @@ public class TransactionService {
                         l.setCurrency(req.getCurrency());
                         l.setLentDate(req.getTransactionDate());
                         l.setDescription(req.getDescription());
-                        if (req.getCounterpartyName() != null) l.setDebtorName(req.getCounterpartyName());
+                        if (req.getCounterpartyName() != null) {
+                            l.setDebtorName(req.getCounterpartyName());
+                            financeService.relinkBorrower(l);
+                        }
                         loanGivenRepository.save(l);
                     });
             }

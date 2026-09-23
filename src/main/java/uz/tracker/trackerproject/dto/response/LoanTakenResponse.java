@@ -5,6 +5,7 @@ import lombok.Getter;
 import uz.tracker.trackerproject.entity.LoanTaken;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.RecordStatus;
+import uz.tracker.trackerproject.enums.RepaymentType;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -15,6 +16,10 @@ public class LoanTakenResponse {
 
     private Long id;
     private String lenderName;
+    /** The lender on the owner's list of people; null until linked. */
+    private Long lenderId;
+    /** MONTHLY (plannedMonthlyPayment from paymentStartDate) or ASAP (as fast as possible). */
+    private RepaymentType repaymentType;
     private BigDecimal totalAmount;
     private BigDecimal paidAmount;
     private BigDecimal remainingAmount;
@@ -33,6 +38,8 @@ public class LoanTakenResponse {
         return LoanTakenResponse.builder()
                 .id(l.getId())
                 .lenderName(l.getLenderName())
+                .lenderId(l.getLenderId())
+                .repaymentType(l.effectiveRepaymentType())
                 .totalAmount(l.getTotalAmount())
                 .paidAmount(l.getPaidAmount())
                 .remainingAmount(l.getTotalAmount().subtract(l.getPaidAmount()))

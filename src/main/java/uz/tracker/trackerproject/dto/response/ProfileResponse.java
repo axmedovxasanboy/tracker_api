@@ -39,7 +39,7 @@ public class ProfileResponse {
     private BigDecimal monthlyBills;
     /** stableIncome − monthlyBills: this is what sets the level. */
     private BigDecimal leftAfterBills;
-    /** This month's bank installments + debt charge (repayment plans, else 34% of the original). */
+    /** This month's bank installments + debt charge (MONTHLY plans and ASAP asks). */
     private BigDecimal loanPayments;
     /** max(0, leftAfterBills − loanPayments). */
     private BigDecimal leftForSavings;

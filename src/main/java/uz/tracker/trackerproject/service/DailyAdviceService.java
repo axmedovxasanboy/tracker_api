@@ -71,8 +71,8 @@ import java.util.TreeMap;
  *   <li><b>Horizon.</b> The day before the second main payday after today (the main payday is
  *       the day of the largest part) — or the end of next month without a salary history.</li>
  *   <li><b>Must-pays.</b> Bills on their due day, bank installments on the day the loan was
- *       taken, borrowed money and debts on their payment-start day at the Plan's monthly ask
- *       (the repayment plan, else 34% of the original) capped at what is left. This month's are
+ *       taken, MONTHLY loans' plans on their payment-start day, and ASAP loans' and debts' asks —
+ *       this month's today, money in hand; later months' on their main payday. This month's are
  *       counted paid the way the Plan counts them, as of today; unpaid ones whose day is past are
  *       due today.</li>
  *   <li><b>Savings, out of the salary that funds them.</b> This month's unset-aside buckets on this
@@ -132,7 +132,8 @@ public class DailyAdviceService {
      * @param stableIncome the monthly stable income from Settings (positive)
      * @param salaryComing what this month's salary still owes: stable income − non-bonus regular income this month
      * @param setAsideLeft this month's set-asides not yet made
-     * @param goals        savings goals with a monthly payment, still short of their target
+     * @param goals        savings goals with a monthly payment, still short of their target — those
+     *                     whose payment starts in a later month too
      */
     public record Inputs(LocalDate today, BigDecimal have, BigDecimal stableIncome, BigDecimal salaryComing,
                          BigDecimal setAsideLeft, List<Goal> goals) {
@@ -145,13 +146,26 @@ public class DailyAdviceService {
 
     /**
      * A savings goal's monthly payment, set aside like the plan's buckets (though outside their
-     * percentages). Its deadline plays no part: it is for display.
+     * percentages) from its start month on. Its deadline plays no part: it is for display.
      *
      * @param monthly       the monthly payment (positive)
      * @param paidThisMonth contributions to it this month, dated today or earlier
      * @param toTarget      what is still missing to reach its target; null when it has none
+     * @param startMonth    the first month the payment is asked for ({@code Investment.paymentStartMonth});
+     *                      null = it has always started
      */
-    public record Goal(Long id, BigDecimal monthly, BigDecimal paidThisMonth, BigDecimal toTarget) {}
+    public record Goal(Long id, BigDecimal monthly, BigDecimal paidThisMonth, BigDecimal toTarget,
+                       YearMonth startMonth) {
+        /** A goal whose payment has always started. */
+        public Goal(Long id, BigDecimal monthly, BigDecimal paidThisMonth, BigDecimal toTarget) {
+            this(id, monthly, paidThisMonth, toTarget, null);
+        }
+
+        /** Whether the payment is asked for in {@code month}: from the start month on. */
+        public boolean startedBy(YearMonth month) {
+            return startMonth == null || !startMonth.isAfter(month);
+        }
+    }
 
     /**
      * @param surplus the least the owner would ever have in hand beyond their own pace: the minimum,
@@ -182,7 +196,7 @@ public class DailyAdviceService {
         LocalDate listTo = today.plusDays(UPCOMING_DAYS);
         LocalDate computeTo = YearMonth.from(until).atEndOfMonth();
         if (listTo.isAfter(computeTo)) computeTo = listTo;
-        List<Upcoming> due = obligations(today, computeTo, later);
+        List<Upcoming> due = obligations(today, computeTo, later, pattern, stable);
 
         // ── 4. Savings, set aside out of the salary that funds them ──
         NavigableMap<LocalDate, BigDecimal> savings = new TreeMap<>();
@@ -213,17 +227,23 @@ public class DailyAdviceService {
         }
         // Savings goals' monthly payments, on the same days: what this month still owes (less what
         // is recorded for a later day — the walk takes that on its own day), then the full payment
-        // each later month; all of it capped at what is still missing to reach the target.
+        // each later month; all of it capped at what is still missing to reach the target. Nothing
+        // before the goal's start month: this month's only once it has started, and later months'
+        // from max(start month, next month).
         for (Goal g : in.goals() == null ? List.<Goal>of() : in.goals()) {
             BigDecimal monthly = nz(g.monthly());
             if (monthly.signum() <= 0) continue;
-            BigDecimal recordedLater = later.stream()
-                    .filter(t -> isSaving(t) && Objects.equals(t.getInvestmentId(), g.id()))
-                    .map(Transaction::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
             BigDecimal cap = g.toTarget();
-            cap = reserve(savings, thisMonthOn,
-                    clampZero(monthly.subtract(nz(g.paidThisMonth())).subtract(recordedLater)), cap);
-            for (LocalDate on : laterPaydays) cap = reserve(savings, on, monthly, cap);
+            if (g.startedBy(current)) {
+                BigDecimal recordedLater = later.stream()
+                        .filter(t -> isSaving(t) && Objects.equals(t.getInvestmentId(), g.id()))
+                        .map(Transaction::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
+                cap = reserve(savings, thisMonthOn,
+                        clampZero(monthly.subtract(nz(g.paidThisMonth())).subtract(recordedLater)), cap);
+            }
+            for (int i = 0; i < laterPaydays.size(); i++) {
+                if (g.startedBy(laterMonths.get(i))) cap = reserve(savings, laterPaydays.get(i), monthly, cap);
+            }
         }
 
         // ── 5–7. Walk the days ──
@@ -461,13 +481,14 @@ public class DailyAdviceService {
     // ── Must-pays ─────────────────────────────────────────────────────────────
 
     /** Every must-pay from today to {@code to}, date ascending. */
-    private List<Upcoming> obligations(LocalDate today, LocalDate to, List<Transaction> later) {
+    private List<Upcoming> obligations(LocalDate today, LocalDate to, List<Transaction> later,
+                                       SalaryPattern pattern, BigDecimal stable) {
         List<Upcoming> items = new ArrayList<>();
         // Paid by today: a payment dated later this month is still in the wallets.
         OverviewService.MonthPaid paid = overviewService.computeMonthPaid(YearMonth.from(today), Currency.UZS, today);
         bills(today, to, later, items);
         bankLoans(today, to, paid == null ? BigDecimal.ZERO : nz(paid.bankInstallments()), later, items);
-        loansAndDebts(today, to, paid, later, items);
+        loansAndDebts(today, to, paid, later, pattern, stable, items);
         items.sort(Comparator.comparing(Upcoming::getDate)
                 .thenComparing(Upcoming::getAmount, Comparator.reverseOrder())
                 .thenComparing(Upcoming::getKind)
@@ -481,17 +502,17 @@ public class DailyAdviceService {
         final Long refId;
         final String name;
         final LocalDate dueOn;
-        /** A 34%-rule ask, where a repayment naming no loan is counted (as the Plan counts it). */
-        final boolean rule;
+        /** An ASAP ask: due as soon as there is money, and where a repayment naming no loan is counted. */
+        final boolean asap;
         BigDecimal owed;
 
-        Ask(String kind, Long refId, String name, LocalDate dueOn, BigDecimal owed, boolean rule) {
+        Ask(String kind, Long refId, String name, LocalDate dueOn, BigDecimal owed, boolean asap) {
             this.kind = kind;
             this.refId = refId;
             this.name = name;
             this.dueOn = dueOn;
             this.owed = owed;
-            this.rule = rule;
+            this.asap = asap;
         }
     }
 
@@ -502,13 +523,13 @@ public class DailyAdviceService {
      */
     private static void paidLater(List<Upcoming> out, Ask ask, Transaction t) {
         out.add(Upcoming.builder().date(t.getTransactionDate()).kind(ask.kind).refId(ask.refId)
-                .name(ask.name == null ? "" : ask.name).amount(t.getAmount()).recorded(true).build());
+                .name(ask.name == null ? "" : ask.name).amount(t.getAmount()).recorded(true).asap(ask.asap).build());
         ask.owed = clampZero(ask.owed.subtract(t.getAmount()));
     }
 
     /** What an ask still owes after its later payments: due on its day, or today once that has passed. */
     private static void owing(List<Upcoming> out, LocalDate today, Ask ask) {
-        if (ask.owed.signum() > 0) out.add(due(today, ask.dueOn, ask.kind, ask.refId, ask.name, ask.owed));
+        if (ask.owed.signum() > 0) out.add(due(today, ask.dueOn, ask.kind, ask.refId, ask.name, ask.owed, ask.asap));
     }
 
     /** The first ask still owing, else the last one; null when there is none. */
@@ -590,82 +611,66 @@ public class DailyAdviceService {
         }
     }
 
-    /** One borrowed loan or debt, as far as its monthly asks are concerned. */
-    private record Owed(String kind, Long id, String name, BigDecimal total, BigDecimal left,
-                        BigDecimal planned, LocalDate start, int day) {
-        /** The Plan's monthly ask with {@code remaining} still owed: the plan, else 34% of the original — capped. */
-        BigDecimal ask(BigDecimal remaining) {
-            if (planned != null) return planned.min(remaining);
-            return OverviewService.debtMonthlyCharge(total, total.subtract(remaining));
-        }
-    }
-
     /**
-     * Borrowed money and debts that are not PAID: each month's ask from the month its payments
-     * start, on its payment-start day (the 1st when unset), the running total capped at what is
-     * left. This month's asks are covered by what the Plan counts as paid by today — repayments to
-     * loans on a plan for the plan's asks, every other repayment and mark for the 34% asks. A
-     * repayment recorded for a later day is paid on its day, against its own loan or debt (one that
-     * names neither goes to the first 34% ask still owing).
+     * Borrowed money and debts still owed (OverviewService.debtAsks — the Plan's own asks).
+     *
+     * <ul>
+     *   <li>MONTHLY: the plan on its payment-start day each month from its start month, capped at
+     *       what is left. This month's plan asks are covered by what the Plan counts as paid toward
+     *       MONTHLY loans by today, in order; what is still owed past its day falls due today
+     *       (overdue).</li>
+     *   <li>ASAP (every debt, and borrowed money without a plan): this month's ask, less what was
+     *       repaid toward it by today — and, in turn, repayments naming no loan or debt — is due
+     *       TODAY, money in hand, never overdue. Each later month's ask is projected on what is left
+     *       once the month before is paid, and falls on that month's main payday (the 1st without
+     *       a salary history).</li>
+     * </ul>
+     * A repayment recorded for a later day this month is paid on its day, against its own loan or
+     * debt (one naming neither goes to the first ASAP ask still owing).
      */
     private void loansAndDebts(LocalDate today, LocalDate to, OverviewService.MonthPaid paid,
-                               List<Transaction> later, List<Upcoming> out) {
+                               List<Transaction> later, SalaryPattern pattern, BigDecimal stable,
+                               List<Upcoming> out) {
         YearMonth current = YearMonth.from(today);
-        List<Owed> owed = new ArrayList<>();
-        for (LoanTaken l : loanTakenRepository.findAll()) {
-            if (l.getStatus() == RecordStatus.PAID || !isUzs(l.getCurrency())) continue;
-            BigDecimal total = nz(l.getTotalAmount());
-            BigDecimal left = total.subtract(nz(l.getPaidAmount()));
-            if (left.signum() <= 0) continue;
-            // The PLANNED payment, never the legacy monthlyPayment column (derived at creation).
-            BigDecimal planned = l.getPlannedMonthlyPayment() != null && l.getPlannedMonthlyPayment().signum() > 0
-                    ? l.getPlannedMonthlyPayment() : null;
-            owed.add(new Owed(LOAN, l.getId(), l.getLenderName(), total, left, planned,
-                    l.getPaymentStartDate(), startDay(l.getPaymentStartDate())));
-        }
-        for (Debt d : debtRepository.findAll()) {
-            if (d.getStatus() == RecordStatus.PAID || !isUzs(d.getCurrency())) continue;
-            BigDecimal total = nz(d.getTotalAmount());
-            BigDecimal left = total.subtract(nz(d.getPaidAmount()));
-            if (left.signum() <= 0) continue;
-            owed.add(new Owed(DEBT, d.getId(), d.getCreditorName(), total, left, null,
-                    d.getPaymentStartDate(), startDay(d.getPaymentStartDate())));
-        }
-        owed.sort(Comparator.comparingInt(Owed::day).thenComparing(Owed::kind, Comparator.reverseOrder())
-                .thenComparing(Owed::id, Comparator.nullsLast(Comparator.naturalOrder())));
+        List<OverviewService.DebtAsk> owed = new ArrayList<>(overviewService.debtAsks(current, today));
+        owed.sort(Comparator.comparing(OverviewService.DebtAsk::asap)
+                .thenComparingInt(o -> o.asap() ? 0 : startDay(o.paymentStartDate()))
+                .thenComparing(OverviewService.DebtAsk::kind, Comparator.reverseOrder())
+                .thenComparing(OverviewService.DebtAsk::id, Comparator.nullsLast(Comparator.naturalOrder())));
 
         BigDecimal planPaid = paid == null ? BigDecimal.ZERO : nz(paid.planRepayments());
-        BigDecimal rulePaid = paid == null ? BigDecimal.ZERO : nz(paid.ruleRepayments());
+        BigDecimal unlinked = nz(overviewService.unlinkedRepayments(current, today));
         List<Ask> asks = new ArrayList<>(owed.size());
-        for (Owed o : owed) {
-            BigDecimal owes = BigDecimal.ZERO;
-            if (OverviewService.hasStartedBy(o.start(), current)) {
-                BigDecimal ask = o.ask(o.left());
-                BigDecimal covered;
-                if (o.planned() != null) {
-                    covered = planPaid.min(ask);
-                    planPaid = planPaid.subtract(covered);
-                } else {
-                    covered = rulePaid.min(ask);
-                    rulePaid = rulePaid.subtract(covered);
-                }
-                owes = ask.subtract(covered);
+        for (OverviewService.DebtAsk o : owed) {
+            BigDecimal owes;
+            LocalDate dueOn;
+            if (o.asap()) {
+                owes = o.due();
+                BigDecimal covered = unlinked.min(owes);
+                unlinked = unlinked.subtract(covered);
+                owes = owes.subtract(covered);
+                dueOn = today;
+            } else {
+                BigDecimal covered = planPaid.min(o.ask());
+                planPaid = planPaid.subtract(covered);
+                owes = o.ask().subtract(covered);
+                dueOn = dayIn(current, startDay(o.paymentStartDate()));
             }
-            asks.add(new Ask(o.kind(), o.id(), o.name(), dayIn(current, o.day()), owes, o.planned() == null));
+            asks.add(new Ask(o.kind(), o.id(), o.name(), dueOn, owes, o.asap()));
         }
         for (Transaction t : later) {
             if (t.getType() != TransactionType.EXPENSE || t.getSubType() != TransactionSubType.LOAN_REPAYMENT) continue;
             String kind = t.getRepaidLoanTakenId() != null ? LOAN : t.getRepaidDebtId() != null ? DEBT : null;
             Long ref = t.getRepaidLoanTakenId() != null ? t.getRepaidLoanTakenId() : t.getRepaidDebtId();
             Ask ask = kind == null
-                    ? firstOwing(asks.stream().filter(a -> a.rule).toList())
+                    ? firstOwing(asks.stream().filter(a -> a.asap).toList())
                     : asks.stream().filter(a -> a.kind.equals(kind) && Objects.equals(a.refId, ref)).findFirst().orElse(null);
             paidLater(out, ask != null ? ask
                     : new Ask(kind == null ? LOAN : kind, ref, t.getDescription(), null, BigDecimal.ZERO, false), t);
         }
 
         for (int i = 0; i < owed.size(); i++) {
-            Owed o = owed.get(i);
+            OverviewService.DebtAsk o = owed.get(i);
             Ask a = asks.get(i);
             // `left` already excludes repayments recorded ahead (paying bumps paidAmount at once),
             // so only what this month still owes after them comes off it for the months after.
@@ -675,12 +680,20 @@ public class DailyAdviceService {
                 remaining = remaining.subtract(a.owed);
             }
             for (YearMonth ym = current.plusMonths(1); remaining.signum() > 0; ym = ym.plusMonths(1)) {
-                LocalDate date = dayIn(ym, o.day());
+                LocalDate date = o.asap()
+                        ? (pattern == null ? ym.atDay(1) : dayIn(ym, pattern.mainDay()))
+                        : dayIn(ym, startDay(o.paymentStartDate()));
                 if (date.isAfter(to)) break;
-                if (!OverviewService.hasStartedBy(o.start(), ym)) continue;
-                BigDecimal ask = o.ask(remaining);
+                BigDecimal ask;
+                if (o.asap()) {
+                    if (!OverviewService.borrowedBy(o.borrowedDate(), ym)) continue;
+                    ask = OverviewService.asapAsk(remaining, stable);
+                } else {
+                    if (!OverviewService.hasStartedBy(o.paymentStartDate(), ym)) continue;
+                    ask = nz(o.plan()).min(remaining);
+                }
                 if (ask.signum() <= 0) break;
-                out.add(item(date, o.kind(), o.id(), o.name(), ask, false));
+                out.add(item(date, o.kind(), o.id(), o.name(), ask, false, o.asap()));
                 remaining = remaining.subtract(ask);
             }
         }
@@ -780,14 +793,20 @@ public class DailyAdviceService {
     }
 
     /** A must-pay for this month: on its day, or today and overdue when that day has passed. */
-    private static Upcoming due(LocalDate today, LocalDate date, String kind, Long refId, String name, BigDecimal amount) {
+    private static Upcoming due(LocalDate today, LocalDate date, String kind, Long refId, String name,
+                                BigDecimal amount, boolean asap) {
         boolean overdue = date.isBefore(today);
-        return item(overdue ? today : date, kind, refId, name, amount, overdue);
+        return item(overdue ? today : date, kind, refId, name, amount, overdue, asap);
     }
 
     private static Upcoming item(LocalDate date, String kind, Long refId, String name, BigDecimal amount, boolean overdue) {
+        return item(date, kind, refId, name, amount, overdue, false);
+    }
+
+    private static Upcoming item(LocalDate date, String kind, Long refId, String name, BigDecimal amount,
+                                 boolean overdue, boolean asap) {
         return Upcoming.builder().date(date).kind(kind).refId(refId).name(name == null ? "" : name)
-                .amount(amount).overdue(overdue).build();
+                .amount(amount).overdue(overdue).asap(asap).build();
     }
 
     /** {@code day} in {@code ym}, clamped to the month's length (the 31st is the 30th in November). */

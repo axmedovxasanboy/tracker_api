@@ -61,15 +61,24 @@ public class InvestmentRequest {
     @DecimalMin("0")
     private BigDecimal monthlyContribution;
 
-    // Whether each of the two was SENT. The bot edits a holding by sending back every field of the
-    // response as it knew it — a shape without these two — so an update must not read "left out" as
-    // "cleared", or every bot edit would wipe a goal's deadline and monthly payment. Jackson calls a
-    // setter only for a property present in the JSON (an explicit null included). Not bean
-    // properties, so no client can set them.
+    /**
+     * The savings goal's first month of payment — any day of it; it is stored as the 1st. See
+     * {@link #paymentStartDateGiven()}: leaving it out keeps the stored one, sending {@code null}
+     * clears it, which means the month of {@link #purchaseDate} again.
+     */
+    private LocalDate paymentStartDate;
+
+    // Whether each of the three was SENT. The bot edits a holding by sending back every field of the
+    // response as it knew it — a shape without these three — so an update must not read "left out" as
+    // "cleared", or every bot edit would wipe a goal's deadline, monthly payment and start month.
+    // Jackson calls a setter only for a property present in the JSON (an explicit null included).
+    // Not bean properties, so no client can set them.
     @Getter(AccessLevel.NONE) @Setter(AccessLevel.NONE)
     private boolean targetDateSent;
     @Getter(AccessLevel.NONE) @Setter(AccessLevel.NONE)
     private boolean monthlyContributionSent;
+    @Getter(AccessLevel.NONE) @Setter(AccessLevel.NONE)
+    private boolean paymentStartDateSent;
 
     public void setTargetDate(LocalDate targetDate) {
         this.targetDate = targetDate;
@@ -89,6 +98,16 @@ public class InvestmentRequest {
     /** True when the request carried {@code monthlyContribution} at all — null included. */
     public boolean monthlyContributionGiven() {
         return monthlyContributionSent;
+    }
+
+    public void setPaymentStartDate(LocalDate paymentStartDate) {
+        this.paymentStartDate = paymentStartDate;
+        this.paymentStartDateSent = true;
+    }
+
+    /** True when the request carried {@code paymentStartDate} at all — null included. */
+    public boolean paymentStartDateGiven() {
+        return paymentStartDateSent;
     }
 
     /** Optional current/market value (platform growth). Null = treated as investedAmount. */

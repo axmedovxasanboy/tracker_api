@@ -23,6 +23,10 @@ public class LoanGiven {
     @Column(nullable = false)
     private String debtorName;
 
+    /** The borrower on the owner's list of people (Counterparty, kind BORROWER). */
+    @Column(name = "borrower_id")
+    private Long borrowerId;
+
     @Column(nullable = false, precision = 19, scale = 4)
     private BigDecimal totalAmount;
 

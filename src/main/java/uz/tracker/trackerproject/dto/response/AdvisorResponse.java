@@ -224,9 +224,9 @@ public class AdvisorResponse {
     @Getter @Builder
     public static class Upcoming {
         private LocalDate date;
-        /** BILL | BANK | LOAN | DEBT */
+        /** BILL | BANK | LOAN (borrowed money, MONTHLY or ASAP) | DEBT (a Debt row) */
         private String kind;
-        /** The MonthlyPayment / BankLoan / LoanTaken / Debt id. */
+        /** The MonthlyPayment / BankLoan / LoanTaken / Debt id — ids of different kinds collide. */
         private Long refId;
         private String name;
         private BigDecimal amount;
@@ -238,6 +238,12 @@ public class AdvisorResponse {
          * but paying it again would record it twice. False for a due that is still owed.
          */
         private boolean recorded;
+        /**
+         * True for an ASAP ask — borrowed money without a plan (kind LOAN) or a debt (kind DEBT) to
+         * pay back as fast as possible; this month's is dated today, money in hand, and later
+         * months' fall on their main payday. False for bills, bank installments and MONTHLY plans.
+         */
+        private boolean asap;
     }
 
     @Getter @Builder

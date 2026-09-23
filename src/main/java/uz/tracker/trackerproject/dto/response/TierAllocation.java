@@ -11,8 +11,8 @@ import java.util.Map;
  * Per-tier allocation recommendation. The bucket-level lines describe minimum percentages of
  * the allocation base — max(stable income, the salary received this month) plus this month's
  * bonus income — to set aside;
- * {@code actions} carries the debt asks and scenario notes (e.g. "pay at least 34% of your
- * debts this month").
+ * {@code actions} carries the debt asks and scenario notes (e.g. "pay back your debts as fast
+ * as you can this month").
  *
  * For Level 1, the rules are hard-coded server-side per the owner's spec. For Levels 2–6, the
  * user configures their own percentages — until then the service returns scenarioKey = null +
@@ -80,8 +80,8 @@ public class TierAllocation {
 
         /**
          * Sum already paid this month toward THIS action, marks included. Each payment counts for
-         * exactly one action: a repayment to a loan on a repayment plan counts for the set-aside,
-         * every other loan or debt repayment for the 34% pay-down. Null when irrelevant.
+         * exactly one action: a repayment to a MONTHLY loan counts for the set-aside, every other
+         * loan or debt repayment for the ASAP pay-back. Null when irrelevant.
          */
         private BigDecimal paid;
 
@@ -91,7 +91,7 @@ public class TierAllocation {
         /**
          * Amount that must be paid this month for this action to count as "met" and stop
          * locking the allocation buckets. Bank installments unlock at 90% of {@link #target}
-         * (the average monthly amount); the set-aside and the 34% pay-down require their full
+         * (the average monthly amount); the set-aside and the ASAP pay-back require their full
          * {@link #target}. Null for informational items.
          */
         private BigDecimal unlockThreshold;

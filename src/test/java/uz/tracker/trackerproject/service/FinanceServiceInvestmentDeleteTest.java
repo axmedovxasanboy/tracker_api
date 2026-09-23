@@ -63,7 +63,8 @@ class FinanceServiceInvestmentDeleteTest {
                 mock(MarkPaidRepository.class),
                 mock(CardService.class),
                 monthCloseService,
-                mock(SettingsService.class));
+                mock(SettingsService.class),
+                mock(CounterpartyService.class));
     }
 
     private Transaction tx(long id, String amount) {

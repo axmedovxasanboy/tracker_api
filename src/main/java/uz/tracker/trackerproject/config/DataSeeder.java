@@ -19,6 +19,7 @@ import uz.tracker.trackerproject.repository.CategoryRepository;
 import uz.tracker.trackerproject.repository.DebtRepository;
 import uz.tracker.trackerproject.repository.LoanTakenRepository;
 import uz.tracker.trackerproject.repository.TransactionRepository;
+import uz.tracker.trackerproject.service.CounterpartyService;
 
 import java.math.BigDecimal;
 import java.util.Arrays;
@@ -37,6 +38,7 @@ public class DataSeeder implements CommandLineRunner {
     private final TransactionRepository transactionRepository;
     private final LoanTakenRepository loanTakenRepository;
     private final DebtRepository debtRepository;
+    private final CounterpartyService counterpartyService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -98,6 +100,15 @@ public class DataSeeder implements CommandLineRunner {
         // dueDate) so the tier dashboard has a stable monthly value for them too.
         // Idempotent — only touches rows where monthlyPayment is null.
         backfillLoanMonthlyPayment();
+
+        // Borrowed money is MONTHLY (a repayment plan) or ASAP now. Rows from before the type get
+        // the one their plan implies. Idempotent — only rows without a type are touched.
+        backfillRepaymentTypes();
+
+        // The lenders and borrowers lists: link every loan, debt and loan given that has no person
+        // yet to the one its name belongs to (ignoring case and spaces), adding people as needed.
+        // Idempotent — linked records are left alone.
+        counterpartyService.backfillLinks();
 
         if (categoryRepository.count() == 0) {
             categoryRepository.saveAll(defaultCategories());
@@ -613,6 +624,14 @@ public class DataSeeder implements CommandLineRunner {
         c.setIcon(icon);
         c.setApplicableSubType(subType);
         return c;
+    }
+
+    private void backfillRepaymentTypes() {
+        loanTakenRepository.findAll().forEach(l -> {
+            if (l.getRepaymentType() != null) return;
+            l.setRepaymentType(l.effectiveRepaymentType());
+            loanTakenRepository.save(l);
+        });
     }
 
     private void backfillLoanMonthlyPayment() {

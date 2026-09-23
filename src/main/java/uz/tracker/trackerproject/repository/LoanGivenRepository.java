@@ -13,4 +13,5 @@ public interface LoanGivenRepository extends JpaRepository<LoanGiven, Long> {
     List<LoanGiven> findAllByOrderByExpectedReturnDateAsc();
     List<LoanGiven> findByStatus(RecordStatus status);
     Optional<LoanGiven> findByOriginatingTransactionId(Long transactionId);
+    List<LoanGiven> findByBorrowerId(Long borrowerId);
 }

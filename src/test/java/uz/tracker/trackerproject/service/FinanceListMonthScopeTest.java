@@ -51,7 +51,8 @@ class FinanceListMonthScopeTest {
                 mock(MarkPaidRepository.class),
                 mock(CardService.class),
                 mock(MonthCloseService.class),
-                mock(SettingsService.class));
+                mock(SettingsService.class),
+                mock(CounterpartyService.class));
     }
 
     private Donation donation(long id, YearMonth month) {

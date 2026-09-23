@@ -9,10 +9,12 @@ import uz.tracker.trackerproject.dto.response.AdvisorResponse.SavingsRow;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Suggestion;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Upcoming;
 import uz.tracker.trackerproject.dto.response.MonthClosePreviewResponse.WalletLine;
+import uz.tracker.trackerproject.dto.response.OverviewTierResponse;
 import uz.tracker.trackerproject.dto.response.ProfileResponse;
 import uz.tracker.trackerproject.dto.response.WalletCheckInStatusResponse;
 import uz.tracker.trackerproject.entity.BankLoan;
 import uz.tracker.trackerproject.entity.Category;
+import uz.tracker.trackerproject.entity.Investment;
 import uz.tracker.trackerproject.entity.LoanTaken;
 import uz.tracker.trackerproject.entity.MarkPaid;
 import uz.tracker.trackerproject.entity.MonthlyPayment;
@@ -54,16 +56,18 @@ class AdvisorOwnerSeptemberTest {
     private Category salary;
     private OverviewService overview;
     private TransactionRepository transactionRepository;
+    private InvestmentRepository investmentRepository;
+    private LoanTakenRepository loanTakenRepository;
 
     @BeforeEach
     void setUp() {
         transactionRepository = mock(TransactionRepository.class);
         MonthlyPaymentRepository monthlyPaymentRepository = mock(MonthlyPaymentRepository.class);
         BankLoanRepository bankLoanRepository = mock(BankLoanRepository.class);
-        LoanTakenRepository loanTakenRepository = mock(LoanTakenRepository.class);
+        loanTakenRepository = mock(LoanTakenRepository.class);
         DebtRepository debtRepository = mock(DebtRepository.class);
         MarkPaidRepository markPaidRepository = mock(MarkPaidRepository.class);
-        InvestmentRepository investmentRepository = mock(InvestmentRepository.class);
+        investmentRepository = mock(InvestmentRepository.class);
         EmergencyRepository emergencyRepository = mock(EmergencyRepository.class);
         SettingsService settingsService = mock(SettingsService.class);
         WalletCheckInService walletCheckInService = mock(WalletCheckInService.class);
@@ -111,7 +115,11 @@ class AdvisorOwnerSeptemberTest {
         parents.setPaymentStartDate(LocalDate.of(2026, 10, 1));
         parents.setCurrency(Currency.UZS);
         parents.setStatus(RecordStatus.PENDING);
-        when(loanTakenRepository.findAll()).thenReturn(List.of(parents));
+        // ── Uzum Bank and Uzum Nasiya, borrowed on the 14th and repaid in full: no plan, so ASAP —
+        //    and paid, so they ask nothing (a cleared loan is out of every month). ──
+        LoanTaken uzumBank = paidUp(8L, "Uzum Bank", "1155000");
+        LoanTaken uzumNasiya = paidUp(9L, "Uzum Nasiya", "800000");
+        when(loanTakenRepository.findAll()).thenReturn(List.of(parents, uzumBank, uzumNasiya));
         when(debtRepository.findAll()).thenReturn(List.of());
 
         // ── September's transactions ──
@@ -144,6 +152,11 @@ class AdvisorOwnerSeptemberTest {
         ledger.add(LocalDate.of(2026, 9, 16), TransactionType.EXPENSE, TransactionSubType.EVERYDAY_SPENDING, "3000000");
         ledger.expense(LocalDate.of(2026, 9, 20), "4598000");
         ledger.add(LocalDate.of(2026, 9, 22), TransactionType.EXPENSE, TransactionSubType.EVERYDAY_SPENDING, "2000000");
+        // The Uzum loans paid back, each against its loan.
+        ledger.add(LocalDate.of(2026, 9, 21), TransactionType.EXPENSE, TransactionSubType.LOAN_REPAYMENT, "1155000")
+                .setRepaidLoanTakenId(8L);
+        ledger.add(LocalDate.of(2026, 9, 21), TransactionType.EXPENSE, TransactionSubType.LOAN_REPAYMENT, "800000")
+                .setRepaidLoanTakenId(9L);
 
         // ── Wallets: 9,687,000, checked yesterday ──
         when(walletCheckInService.status(any())).thenReturn(WalletCheckInStatusResponse.builder()
@@ -166,6 +179,18 @@ class AdvisorOwnerSeptemberTest {
                 monthlyPaymentRepository, bankLoanRepository, loanTakenRepository, debtRepository);
         advisor = new AdvisorService(overview, walletCheckInService, monthCloseService, transactionRepository,
                 mock(LoanGivenRepository.class), investmentRepository, emergencyRepository, daily);
+    }
+
+    private static LoanTaken paidUp(long id, String lender, String amount) {
+        LoanTaken l = new LoanTaken();
+        l.setId(id);
+        l.setLenderName(lender);
+        l.setTotalAmount(new BigDecimal(amount));
+        l.setPaidAmount(new BigDecimal(amount));
+        l.setBorrowedDate(LocalDate.of(2026, 9, 14));
+        l.setCurrency(Currency.UZS);
+        l.setStatus(RecordStatus.PAID);
+        return l;
     }
 
     /** The owner's categories: the salary tree is Salary with its Avans and Bonus; Other income stands apart. */
@@ -269,6 +294,100 @@ class AdvisorOwnerSeptemberTest {
                         tuple(LocalDate.of(2026, 10, 15), "1111000"),
                         tuple(LocalDate.of(2026, 11, 7), "5225000"),
                         tuple(LocalDate.of(2026, 11, 15), "1775000"));
+    }
+
+    /**
+     * The goal the owner created on 23 September: 3,500,000 a month. With no start month it is asked
+     * from September, the month it was created — 3.5M today and 3.5M more on 7 October — and the walk
+     * is 860,350 short on 10 October, the rent's day. From October it asks nothing this month (no
+     * row) and its first 3.5M on 7 October, out of October's salary: not short.
+     */
+    @Test
+    void theOwnersGoalStartingInOctoberLeavesSeptemberAlone() {
+        Investment car = new Investment();
+        car.setId(21L);
+        car.setName("Mashina");
+        car.setSavingsGoal(true);
+        car.setCurrency(Currency.UZS);
+        car.setInvestedAmount(BigDecimal.ZERO);
+        car.setOpeningBalance(true);
+        car.setTargetAmount(new BigDecimal("42000000"));
+        car.setMonthlyContribution(new BigDecimal("3500000"));
+        car.setPurchaseDate(TODAY);
+        when(investmentRepository.findAll()).thenReturn(List.of(car));
+
+        AdvisorResponse fromSeptember = advisor.advise(TODAY);
+        assertThat(fromSeptember.getSavingsThisMonth()).extracting(SavingsRow::getBucket).contains("GOAL");
+        assertThat(fromSeptember.getDaily().getShortBy().getDate()).isEqualTo(LocalDate.of(2026, 10, 10));
+        assertThat(fromSeptember.getDaily().getShortBy().getAmount()).isEqualByComparingTo("860350");
+
+        car.setPaymentStartDate(LocalDate.of(2026, 10, 1));
+        AdvisorResponse fromOctober = advisor.advise(TODAY);
+        assertThat(fromOctober.getSavingsThisMonth()).extracting(SavingsRow::getBucket).doesNotContain("GOAL");
+        Daily d = fromOctober.getDaily();
+        assertThat(d.getShortBy()).isNull();
+        assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
+        // 1,872,350 this month + October's 700,000 and the goal's 3,500,000 on 7 October.
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("6072350");
+        // 7,014,650 − 3,500,000 = 3,514,650 over 45 days.
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("78000");
+    }
+
+    /**
+     * The two kinds of borrowed money on the owner's own loans: the parents' is MONTHLY (it has a
+     * plan), the Uzum ones ASAP — but repaid, so nothing moves: September's debt charge is the bank's
+     * 400,000 alone (bank loan only, tight: 5 / 2 / 8 %), October's the bank and the parents' 500,000
+     * (bank AND debts: 5 / 0 / 5 %), and nothing is to pay back.
+     */
+    @Test
+    void theParentsLoanIsMonthlyAndThePaidUzumLoansAskNothing() {
+        OverviewTierResponse sep = overview.getTierIgnoringSubscriptions(YearMonth.of(2026, 9), Currency.UZS, TODAY);
+        OverviewTierResponse oct = overview.getTierIgnoringSubscriptions(YearMonth.of(2026, 10), Currency.UZS, TODAY);
+        assertThat(sep.getDebtPayments()).isEqualByComparingTo("400000");
+        assertThat(sep.getAllocation().getScenarioKey()).isEqualTo("1.2.1.tight");
+        assertThat(oct.getDebtPayments()).isEqualByComparingTo("900000");
+        assertThat(oct.getAllocation().getScenarioKey()).isEqualTo("1.2.3");
+        assertThat(overview.debtAsks(YearMonth.of(2026, 10), YearMonth.of(2026, 10).atEndOfMonth()))
+                .extracting(OverviewService.DebtAsk::name, OverviewService.DebtAsk::type)
+                .containsExactly(tuple("Ota-onam", uz.tracker.trackerproject.enums.RepaymentType.MONTHLY));
+
+        AdvisorResponse r = advisor.advise(TODAY);
+        assertThat(r.getSuggestions()).extracting(Suggestion::getCode).doesNotContain("advisor.s.payDebts");
+        assertThat(r.getDaily().getUpcoming()).filteredOn(u -> "LOAN".equals(u.getKind()))
+                .extracting(Upcoming::getRefId, Upcoming::isAsap)
+                .containsExactly(tuple(7L, false));
+    }
+
+    /**
+     * Borrowing 10,000,000 ASAP on the 20th: September asks 34% of it, 3,400,000 — all still to pay,
+     * however much went to the Uzum loans this month (those are cleared, and not part of the ask).
+     * That is the sum the bot's "pay debts" step carries; Home lists it due today, and October's
+     * 2,244,000 on the 7th.
+     */
+    @Test
+    void anAsapLoanIsAskedInFullByThePayDebtsStepWhateverWentToClearedLoans() {
+        LoanTaken friend = new LoanTaken();
+        friend.setId(10L);
+        friend.setLenderName("Aziz aka");
+        friend.setTotalAmount(new BigDecimal("10000000"));
+        friend.setPaidAmount(BigDecimal.ZERO);
+        friend.setBorrowedDate(LocalDate.of(2026, 9, 20));
+        friend.setCurrency(Currency.UZS);
+        friend.setStatus(RecordStatus.PENDING);
+        List<LoanTaken> loans = new java.util.ArrayList<>(loanTakenRepository.findAll());
+        loans.add(friend);
+        when(loanTakenRepository.findAll()).thenReturn(loans);
+
+        AdvisorResponse r = advisor.advise(TODAY);
+
+        assertThat(r.getSuggestions()).filteredOn(s -> "advisor.s.payDebts".equals(s.getCode()))
+                .singleElement().satisfies(s -> assertThat(s.getAmount()).isEqualByComparingTo("3400000"));
+        assertThat(r.getDaily().getUpcoming()).filteredOn(u -> Long.valueOf(10L).equals(u.getRefId()))
+                .extracting(Upcoming::getDate, Upcoming::getKind, u -> u.getAmount().toPlainString(), Upcoming::isAsap)
+                .containsExactly(
+                        tuple(TODAY, "LOAN", "3400000", true),
+                        // paid, 6,600,000 is left: October asks 34% of it on its payday
+                        tuple(LocalDate.of(2026, 10, 7), "LOAN", "2244000", true));
     }
 
     @Test

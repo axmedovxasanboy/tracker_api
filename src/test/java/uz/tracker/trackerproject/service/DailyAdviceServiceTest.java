@@ -31,6 +31,7 @@ import uz.tracker.trackerproject.repository.TransactionRepository;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.NavigableMap;
@@ -215,9 +216,12 @@ class DailyAdviceServiceTest {
         assertThat(d.getBreakdown().getGoingOut()).isEqualByComparingTo("900000");
     }
 
-    /** 34% of a 1,000,000 debt is 340,000 a month — but only 500,000 is left, so 340,000 then 160,000. */
+    /**
+     * A debt is paid back ASAP: 500,000 left is under 70% of the income, so all of it is due — today,
+     * money in hand, not "overdue" on some day of the month. A debt marked paid is never asked for.
+     */
     @Test
-    void aDebtIsAskedMonthByMonthUntilWhatIsLeftRunsOut() {
+    void anAsapDebtUnder70PercentOfTheIncomeIsDueInFullToday() {
         salaryOnThe7th();
         Debt d = new Debt();
         d.setId(9L);
@@ -239,10 +243,8 @@ class DailyAdviceServiceTest {
 
         assertThat(kind(daily(SEP_23, "9000000", "0"), "DEBT"))
                 .extracting(Upcoming::getDate, Upcoming::getRefId, u -> u.getAmount().stripTrailingZeros().toPlainString(),
-                        Upcoming::isOverdue)
-                .containsExactly(
-                        tuple(SEP_23, 9L, "340000", true),
-                        tuple(LocalDate.of(2026, 10, 1), 9L, "160000", false));
+                        Upcoming::isOverdue, Upcoming::isAsap)
+                .containsExactly(tuple(SEP_23, 9L, "500000", false, true));
     }
 
     /**
@@ -269,6 +271,40 @@ class DailyAdviceServiceTest {
         assertThat(kind(daily(SEP_23, "9000000", "0"), "LOAN"))
                 .extracting(Upcoming::getDate, u -> u.getAmount().toPlainString(), Upcoming::getName)
                 .containsExactly(tuple(LocalDate.of(2026, 10, 1), "500000", "Parents"));
+    }
+
+    /**
+     * 10,000,000 borrowed ASAP on 2 October (its payment-start month plays no part), 1,000,000 of it
+     * repaid on the 5th. October asks 3,400,000 of the 10M left on the 1st, so 2,400,000 is still due
+     * — today, money in hand, not "overdue". Once it is paid 6,600,000 is left, and November asks 34%
+     * of it, 2,244,000, on its payday, the 7th (December's last 4,356,000 is past the listing).
+     */
+    @Test
+    void anAsapLoanIsDueTodayAndEachLaterMonthOnItsPayday() {
+        ledger.income(LocalDate.of(2026, 9, 7), "7000000", SALARY);
+        ledger.income(LocalDate.of(2026, 10, 7), "7000000", SALARY);
+        LoanTaken uzum = new LoanTaken();
+        uzum.setId(12L);
+        uzum.setLenderName("Uzum Bank");
+        uzum.setTotalAmount(new BigDecimal("10000000"));
+        uzum.setPaidAmount(new BigDecimal("1000000"));
+        uzum.setCurrency(Currency.UZS);
+        uzum.setStatus(RecordStatus.PARTIALLY_PAID);
+        uzum.setBorrowedDate(LocalDate.of(2026, 10, 2));
+        uzum.setPaymentStartDate(LocalDate.of(2026, 11, 1));
+        loans.add(uzum);
+        ledger.add(LocalDate.of(2026, 10, 5), TransactionType.EXPENSE, TransactionSubType.LOAN_REPAYMENT, "1000000")
+                .setRepaidLoanTakenId(12L);
+
+        LocalDate oct10 = LocalDate.of(2026, 10, 10);
+        Daily d = daily(oct10, "12000000", "0");
+
+        assertThat(kind(d, "LOAN"))
+                .extracting(Upcoming::getDate, u -> u.getAmount().stripTrailingZeros().toPlainString(),
+                        Upcoming::isOverdue, Upcoming::isAsap, Upcoming::getRefId)
+                .containsExactly(
+                        tuple(oct10, "2400000", false, true, 12L),
+                        tuple(LocalDate.of(2026, 11, 7), "2244000", false, true, 12L));
     }
 
     // ── Income and the horizon ────────────────────────────────────────────────
@@ -512,9 +548,9 @@ class DailyAdviceServiceTest {
         assertThat(d.getSafePerDay()).isEqualByComparingTo("415000");
     }
 
-    /** A legacy debt with no payment-start month always counts (the Plan's rule), asked on the 1st. */
+    /** A legacy debt with no payment-start month or borrowed date counts at once: all 300,000, today. */
     @Test
-    void aLegacyDebtWithNoPaymentStartIsAskedFromTheFirst() {
+    void aLegacyDebtIsAskedAsapToday() {
         salaryOnThe7th();
         Debt d = new Debt();
         d.setId(4L);
@@ -526,10 +562,8 @@ class DailyAdviceServiceTest {
         debts.add(d);
 
         assertThat(kind(daily(SEP_23, "9000000", "0"), "DEBT"))
-                .extracting(Upcoming::getDate, u -> u.getAmount().stripTrailingZeros().toPlainString())
-                .containsExactly(
-                        tuple(SEP_23, "102000"),
-                        tuple(LocalDate.of(2026, 10, 1), "102000"));
+                .extracting(Upcoming::getDate, u -> u.getAmount().stripTrailingZeros().toPlainString(), Upcoming::isAsap)
+                .containsExactly(tuple(SEP_23, "300000", true));
     }
 
     // ── Savings goals ─────────────────────────────────────────────────────────
@@ -597,5 +631,42 @@ class DailyAdviceServiceTest {
         // 600,000 today + 400,000 on the 28th + 1M on 7 October (+ October's buckets, 2.1M)
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
         assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("4100000");
+    }
+
+    /** The car's 1M a month with 300,000 of it paid, from {@code start} on. */
+    private static DailyAdviceService.Goal carFrom(YearMonth start, String toTarget) {
+        return new DailyAdviceService.Goal(11L, new BigDecimal("1000000"), new BigDecimal("300000"),
+                toTarget == null ? null : new BigDecimal(toTarget), start);
+    }
+
+    /**
+     * A goal whose payment starts in October sets nothing aside this month: 600,000 in hand is not
+     * short, where the same goal started this month would take 700,000 today. Its first payment is
+     * set aside on 7 October — October's payday, with October's buckets (2.1M) — still capped at
+     * what the goal is missing. One starting in November asks nothing before the horizon's end.
+     */
+    @Test
+    void aGoalIsSetAsideFromItsStartMonthsPaydayOn() {
+        salaryOnThe7th();
+
+        Daily started = withGoal(SEP_23, "600000", "0", car("300000", null)).daily();
+        assertThat(started.getShortBy()).isNotNull();
+        assertThat(started.getShortBy().getAmount()).isEqualByComparingTo("100000");   // 600,000 − 700,000 today
+
+        Daily notYet = withGoal(SEP_23, "600000", "0", carFrom(YearMonth.of(2026, 10), null)).daily();
+        assertThat(notYet.getShortBy()).isNull();
+        assertThat(notYet.getTightestOn()).isEqualTo(LocalDate.of(2026, 10, 6));
+        assertThat(notYet.getBreakdown().getSavings()).isEqualByComparingTo("0");       // nothing before the 7th
+        assertThat(notYet.getSafePerDay()).isEqualByComparingTo("42000");               // 600,000 over 14 days
+
+        Daily october = withGoal(SEP_23, "5000000", "0", carFrom(YearMonth.of(2026, 10), null)).daily();
+        assertThat(october.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
+        assertThat(october.getBreakdown().getSavings()).isEqualByComparingTo("3100000"); // 1M + 2.1M on the 7th
+
+        Daily capped = withGoal(SEP_23, "5000000", "0", carFrom(YearMonth.of(2026, 10), "400000")).daily();
+        assertThat(capped.getBreakdown().getSavings()).isEqualByComparingTo("2500000");  // 0.4M + 2.1M
+
+        Daily november = withGoal(SEP_23, "5000000", "0", carFrom(YearMonth.of(2026, 11), null)).daily();
+        assertThat(november.getBreakdown().getSavings()).isEqualByComparingTo("2100000"); // 7 Nov is past 6 Nov
     }
 }

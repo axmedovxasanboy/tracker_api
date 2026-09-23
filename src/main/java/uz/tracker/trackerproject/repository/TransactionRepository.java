@@ -79,9 +79,9 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
 
     /**
      * LOAN_REPAYMENT money paid in a date range toward the given borrowed loans. Used to tell the
-     * repayments that fund a loan's repayment plan apart from the ones that pay down everything
-     * else under the 34% rule — the Plan asks for the two separately, so it must count them
-     * separately. Callers must not pass an empty collection.
+     * repayments that fund a MONTHLY loan's plan apart from the ones that pay back everything ASAP —
+     * the Plan asks for the two separately, so it must count them separately. Callers must not pass
+     * an empty collection.
      */
     @Query("""
             SELECT COALESCE(SUM(t.amount), 0) FROM Transaction t

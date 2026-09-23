@@ -50,6 +50,16 @@ final class TransactionLedger {
                     && ids.contains(t.getRepaidLoanTakenId()) && t.getCurrency() == inv.getArgument(1)
                     && within(t, inv.getArgument(2), inv.getArgument(3)));
         });
+        when(repo.findByRepaidLoanTakenIdOrderByTransactionDateDesc(any())).thenAnswer(inv -> {
+            List<Transaction> found = select(t -> Objects.equals(t.getRepaidLoanTakenId(), inv.getArgument(0)));
+            found.sort(Comparator.comparing(Transaction::getTransactionDate).reversed());
+            return found;
+        });
+        when(repo.findByRepaidDebtIdOrderByTransactionDateDesc(any())).thenAnswer(inv -> {
+            List<Transaction> found = select(t -> Objects.equals(t.getRepaidDebtId(), inv.getArgument(0)));
+            found.sort(Comparator.comparing(Transaction::getTransactionDate).reversed());
+            return found;
+        });
         when(repo.sumBonusIncomeByCurrencyDateRange(any(), any(), any())).thenAnswer(inv ->
                 sum(t -> t.getType() == TransactionType.INCOME && t.getCurrency() == inv.getArgument(0)
                         && within(t, inv.getArgument(1), inv.getArgument(2)) && bonus(t.getCategory())));

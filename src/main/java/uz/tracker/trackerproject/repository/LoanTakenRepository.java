@@ -13,4 +13,5 @@ public interface LoanTakenRepository extends JpaRepository<LoanTaken, Long> {
     List<LoanTaken> findAllByOrderByDueDateAsc();
     List<LoanTaken> findByStatus(RecordStatus status);
     Optional<LoanTaken> findByOriginatingTransactionId(Long transactionId);
+    List<LoanTaken> findByLenderId(Long lenderId);
 }

@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Golden-scenario tests for the corrected Level-1 allocation engine (PR-1).
  * Exercises the PURE static core ({@link OverviewService#computeLevel1Plan} and
- * {@link OverviewService#debtMonthlyCharge}) — no Spring context, no mocks. All amounts UZS.
+ * {@link OverviewService#asapAsk}) — no Spring context, no mocks. All amounts UZS.
  *
  * Model (owner spec + decisions D1–D4 / confirms C1–C4):
  *   leftBalance = income − mandatory ; loanInstallments = bank + LoanTaken ; debt34 = Debt 34% of original (capped).
@@ -144,13 +144,13 @@ class OverviewAllocationLevel1Test {
     }
 
     @Test
-    void t10_debtCharge_capsAtResidual_andTerminates() {
-        // 34% of original 6M = 2.04M, but capped at the 1M residual (final month)
-        assertAmount(OverviewService.debtMonthlyCharge(bd("6000000"), bd("5000000")), "1000000");
-        // fresh debt → full 34% of original
-        assertAmount(OverviewService.debtMonthlyCharge(bd("6000000"), Z), "2040000");
-        // cleared → drops out
-        assertEquals(0, OverviewService.debtMonthlyCharge(bd("6000000"), bd("6000000")).signum());
+    void t10_asapAsk_allUnder70PercentOfIncome_else34PercentOfWhatIsLeft() {
+        // 1M left on a 7M income: under 4.9M (70%), so all of it — the debt clears
+        assertAmount(OverviewService.asapAsk(bd("1000000"), bd("7000000")), "1000000");
+        // 6M left: above 4.9M, so 34% of what is left
+        assertAmount(OverviewService.asapAsk(bd("6000000"), bd("7000000")), "2040000");
+        // cleared → nothing
+        assertEquals(0, OverviewService.asapAsk(Z, bd("7000000")).signum());
     }
 
     @Test

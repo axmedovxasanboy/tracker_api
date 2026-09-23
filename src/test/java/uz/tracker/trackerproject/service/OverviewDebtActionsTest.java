@@ -13,6 +13,7 @@ import uz.tracker.trackerproject.entity.LevelAllocationRule;
 import uz.tracker.trackerproject.entity.LoanTaken;
 import uz.tracker.trackerproject.entity.MarkPaid;
 import uz.tracker.trackerproject.entity.Settings;
+import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.InvestmentType;
 import uz.tracker.trackerproject.enums.RecordStatus;
@@ -36,12 +37,12 @@ import static org.mockito.Mockito.when;
  * The Plan's debt asks and the months they are charged in.
  *
  * <ul>
- *   <li>The set-aside for a loan on a repayment plan and the 34% pay-down on everything else are
+ *   <li>The set-aside for a MONTHLY loan (its plan) and the ASAP pay-back on everything else are
  *       two asks, and each must count only the repayments made toward it. Both used to read every
  *       repayment of the month, so paying the larger ask also "met" the smaller one and unlocked the
  *       buckets while money was still owed.</li>
- *   <li>Levels 2–6 charge 34% of the ORIGINAL total like Level 1, not 34% of what remains — the
- *       sub-level and the left balance on the same page were already built from the original.</li>
+ *   <li>Levels 2–6 ask the same ASAP rule as Level 1 — from the same asks the sub-level on the same
+ *       page is built from.</li>
  *   <li>A bank loan is charged in the months it ran, not in every month of the ledger.</li>
  *   <li>The allocation preview routes a top-up by the holding it goes into, exactly as saving does.</li>
  * </ul>
@@ -57,6 +58,8 @@ class OverviewDebtActionsTest {
     private MarkPaidRepository markPaidRepository;
     private OverviewService service;
     private Settings settings;
+    private LoanTaken planned;
+    private Debt debt;
 
     private static final YearMonth AUG = YearMonth.of(2026, 8);
     private static final YearMonth SEP = YearMonth.of(2026, 9);
@@ -107,9 +110,12 @@ class OverviewDebtActionsTest {
 
     // ── fixtures ────────────────────────────────────────────────────────────────
 
-    /** 9M from parents on a 500 000/mo plan (loan 1), plus a 6M debt with no plan (debt 2). */
+    /**
+     * 9M from parents on a 500 000/mo plan (loan 1, MONTHLY), plus a 6M debt (debt 2, ASAP: under 70%
+     * of the 10M income, so all of it is asked).
+     */
     private void plannedLoanAndPlainDebt() {
-        LoanTaken planned = new LoanTaken();
+        planned = new LoanTaken();
         planned.setId(1L);
         planned.setLenderName("Ota-onam");
         planned.setTotalAmount(new BigDecimal("9000000"));
@@ -121,7 +127,7 @@ class OverviewDebtActionsTest {
         planned.setStatus(RecordStatus.PENDING);
         when(loanTakenRepository.findAll()).thenReturn(List.of(planned));
 
-        Debt debt = new Debt();
+        debt = new Debt();
         debt.setId(2L);
         debt.setCreditorName("Bobur");
         debt.setTotalAmount(new BigDecimal("6000000"));
@@ -133,12 +139,25 @@ class OverviewDebtActionsTest {
         when(debtRepository.findAll()).thenReturn(List.of(debt));
     }
 
-    /** This month's repayment transactions: the whole total, and the part paid toward planned loans. */
-    private void repaidThisMonth(String total, String toPlannedLoans) {
-        when(transactionRepository.sumBySubTypeCurrencyDateRange(
-                eq(TransactionSubType.LOAN_REPAYMENT), any(), any(), any())).thenReturn(new BigDecimal(total));
+    /**
+     * This month's repayments: {@code toDebt} to the 6M debt (a transaction naming it, on the 10th) and
+     * {@code toPlan} to the planned loan — each also paid off its balance, as a real repayment does.
+     */
+    private void repaidThisMonth(String toDebt, String toPlan) {
         when(transactionRepository.sumRepaymentsToLoansTaken(any(), any(), any(), any()))
-                .thenReturn(new BigDecimal(toPlannedLoans));
+                .thenReturn(new BigDecimal(toPlan));
+        planned.setPaidAmount(new BigDecimal(toPlan));
+        if (new BigDecimal(toDebt).signum() > 0) {
+            Transaction t = new Transaction();
+            t.setType(uz.tracker.trackerproject.enums.TransactionType.EXPENSE);
+            t.setSubType(TransactionSubType.LOAN_REPAYMENT);
+            t.setAmount(new BigDecimal(toDebt));
+            t.setCurrency(Currency.UZS);
+            t.setTransactionDate(SEP.atDay(10));
+            t.setRepaidDebtId(2L);
+            when(transactionRepository.findByRepaidDebtIdOrderByTransactionDateDesc(2L)).thenReturn(List.of(t));
+            debt.setPaidAmount(new BigDecimal(toDebt));
+        }
     }
 
     private BankLoan bankLoan(LocalDate taken, LocalDate end) {
@@ -176,7 +195,7 @@ class OverviewDebtActionsTest {
     @Test
     void payingTheDebtDoesNotAlsoMeetThePlannedSetAside() {
         plannedLoanAndPlainDebt();
-        repaidThisMonth("2040000", "0");        // 34% of the 6M debt, nothing toward the plan
+        repaidThisMonth("2040000", "0");        // a part of the 6M debt, nothing toward the plan
 
         OverviewTierResponse t = tier(SEP);
 
@@ -186,9 +205,9 @@ class OverviewDebtActionsTest {
     }
 
     @Test
-    void payingThePlanDoesNotAlsoCountTowardTheThirtyFourPercentAsk() {
+    void payingThePlanDoesNotAlsoCountTowardTheAsapPayBack() {
         plannedLoanAndPlainDebt();
-        repaidThisMonth("500000", "500000");    // exactly the plan, paid to the planned loan
+        repaidThisMonth("0", "500000");         // exactly the plan, paid to the planned loan
 
         OverviewTierResponse t = tier(SEP);
 
@@ -200,7 +219,7 @@ class OverviewDebtActionsTest {
     @Test
     void payingBothAsksInFullUnlocksTheBuckets() {
         plannedLoanAndPlainDebt();
-        repaidThisMonth("2540000", "500000");
+        repaidThisMonth("6000000", "500000");   // the plan, and all of the 6M debt (which clears it)
 
         assertThat(tier(SEP).getAllocation().isAllocationLocked()).isFalse();
     }
@@ -209,15 +228,40 @@ class OverviewDebtActionsTest {
     @Test
     void anAlreadyPaidMarkCountsTowardTheAskOfTheLoanItNames() {
         plannedLoanAndPlainDebt();
+        MarkPaid onTheDebt = mark("DEBT", 2L, "2000000");
         when(markPaidRepository.findByMonth(SEP.atDay(1))).thenReturn(List.of(
-                mark("PERSONAL_LOAN", 1L, "500000"),
-                mark("DEBT", 2L, "2040000")));
+                mark("PERSONAL_LOAN", 1L, "500000"), onTheDebt));
+        when(markPaidRepository.findByKindAndRefId("DEBT", 2L)).thenReturn(List.of(onTheDebt));
+        debt.setPaidAmount(new BigDecimal("2000000"));             // a mark pays the balance down too
 
         OverviewTierResponse t = tier(SEP);
 
         assertThat(withCode(t, "page.plan.action.setAside").getPaid()).isEqualByComparingTo("500000");
-        assertThat(withCode(t, "page.plan.action.payDebts34").getPaid()).isEqualByComparingTo("2040000");
-        assertThat(t.getAllocation().isAllocationLocked()).isFalse();
+        assertThat(withCode(t, "page.plan.action.payDebts34").getPaid()).isEqualByComparingTo("2000000");
+        assertThat(withCode(t, "page.plan.action.payDebts34").getTarget()).isEqualByComparingTo("6000000");
+        assertThat(t.getAllocation().isAllocationLocked()).isTrue();
+    }
+
+    /**
+     * Money paid this month to a loan already cleared is not part of the ASAP pay-back: the other
+     * debt's ask is still all to pay — the sum the bot's "pay debts" step carries.
+     */
+    @Test
+    void repaymentsToAClearedLoanDoNotPayTheOtherAsks() {
+        plannedLoanAndPlainDebt();
+        LoanTaken cleared = new LoanTaken();
+        cleared.setId(3L);
+        cleared.setLenderName("Uzum Bank");
+        cleared.setTotalAmount(new BigDecimal("1155000"));
+        cleared.setPaidAmount(new BigDecimal("1155000"));
+        cleared.setCurrency(Currency.UZS);
+        cleared.setBorrowedDate(SEP.atDay(14));
+        cleared.setStatus(RecordStatus.PAID);
+        when(loanTakenRepository.findAll()).thenReturn(List.of(planned, cleared));
+        when(transactionRepository.sumBySubTypeCurrencyDateRange(
+                eq(TransactionSubType.LOAN_REPAYMENT), any(), any(), any())).thenReturn(new BigDecimal("1155000"));
+
+        assertThat(withCode(tier(SEP), "page.plan.action.payDebts34").getPaid()).isEqualByComparingTo("0");
     }
 
     private static MarkPaid mark(String kind, Long refId, String amount) {
@@ -230,15 +274,15 @@ class OverviewDebtActionsTest {
         return m;
     }
 
-    // ── Levels 2–6 charge the same 34% as Level 1 ───────────────────────────────
+    // ── Levels 2–6 ask the same as Level 1 ──────────────────────────────────────
 
     @Test
-    void atLevelTwoTheDebtAskIsThirtyFourPercentOfTheOriginalTotal() {
+    void atLevelTwoTheAsapAskIsTheSameRule() {
         settings.setMonthlyStableIncome(new BigDecimal("20000000"));   // Level 2
         LoanTaken loan = new LoanTaken();
         loan.setId(3L);
         loan.setLenderName("Aziz");
-        loan.setTotalAmount(new BigDecimal("9000000"));
+        loan.setTotalAmount(new BigDecimal("30000000"));
         loan.setPaidAmount(new BigDecimal("3000000"));
         loan.setCurrency(Currency.UZS);
         loan.setBorrowedDate(LocalDate.of(2026, 1, 5));
@@ -256,10 +300,10 @@ class OverviewDebtActionsTest {
         OverviewTierResponse t = tier(SEP);
 
         assertThat(t.getSubLevel()).isEqualTo("2.2");
-        // 34% of the original 9M, which is also what the debt charge and the left balance use —
-        // not 34% of the 6M still owed (2 040 000).
-        assertThat(t.getDebtPayments()).isEqualByComparingTo("3060000");
-        assertThat(withCode(t, "page.plan.action.payDebts34").getTarget()).isEqualByComparingTo("3060000");
+        // 27M left is above 70% of the 20M income: 34% of what is left, the same figure the debt
+        // charge and the sub-level use.
+        assertThat(t.getDebtPayments()).isEqualByComparingTo("9180000");
+        assertThat(withCode(t, "page.plan.action.payDebts34").getTarget()).isEqualByComparingTo("9180000");
     }
 
     // ── a bank loan is charged in the months it ran ─────────────────────────────

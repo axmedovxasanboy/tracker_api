@@ -23,6 +23,10 @@ public class Debt {
     @Column(nullable = false)
     private String creditorName;
 
+    /** The creditor on the owner's list of lenders (Counterparty, kind LENDER). A debt is always ASAP. */
+    @Column(name = "lender_id")
+    private Long lenderId;
+
     @Column(nullable = false, precision = 19, scale = 4)
     private BigDecimal totalAmount;
 
@@ -55,10 +59,8 @@ public class Debt {
     private BigDecimal monthlyPayment;
 
     /**
-     * Month from which this debt's monthly contribution starts counting toward the
-     * Overview tier / allocation guidance. Stored as the first day of that month.
-     * Same semantics as {@code LoanTaken.paymentStartDate}. Null on legacy rows →
-     * treated as "always counts" by OverviewService.
+     * Stored as the first day of a month; no longer read by the engine: a debt is paid back ASAP,
+     * counting from the month it was borrowed. Kept because clients still send and show it.
      */
     @Column(name = "payment_start_date")
     private LocalDate paymentStartDate;

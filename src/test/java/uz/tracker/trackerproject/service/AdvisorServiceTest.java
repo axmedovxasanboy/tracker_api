@@ -305,6 +305,24 @@ class AdvisorServiceTest {
         assertThat(r.isSetAsideAfterBills()).isTrue();
     }
 
+    /**
+     * What the ASAP pay-back still asks is one "pay debts" step — the one the bot's Pay button looks
+     * up by its code — at the Plan's own figure: the ASAP asks less what went toward them. There is no
+     * step per loan: Home lists each ASAP due, by name, in daily.upcoming.
+     */
+    @Test
+    void theAsapPayBackIsOnePayDebtsStepAtWhatItStillAsks() {
+        actions.add(ActionItem.builder().action("PAY_PERSONAL_LOAN").code("page.plan.action.payDebts34")
+                .target(new BigDecimal("3400000")).paid(new BigDecimal("1000000")).build());
+
+        AdvisorResponse r = advise(SEP_18);
+
+        Suggestion debts = find(r, "advisor.s.payDebts");
+        assertThat(debts.getAmount()).isEqualByComparingTo("2400000");
+        assertThat(debts.getAction()).isEqualTo("PAY_DEBT");
+        assertThat(codes(r)).doesNotContain("advisor.s.payBack");
+    }
+
     @Test
     void onceTheBillsArePaidEachBucketIsASetAsideAndTheFirstEmergencyOneStartsTheFund() {
         AdvisorResponse r = advise(SEP_18);
@@ -454,6 +472,54 @@ class AdvisorServiceTest {
                 .containsExactly(
                         org.assertj.core.groups.Tuple.tuple(5L, "400000", "9000000"),
                         org.assertj.core.groups.Tuple.tuple(6L, "0", "200000"));
+    }
+
+    /**
+     * A goal whose payment starts next month asks nothing yet — no row this month — but the walk is
+     * handed it with its start month, to set the payment aside from that month's payday. Without a
+     * start month the payment starts in the month the goal was created. In October both have a row.
+     */
+    @Test
+    void aGoalStartingInALaterMonthHasNoRowUntilThenButTheWalkKnowsWhenItStarts() {
+        Investment car = goal(5, "Car", "42000000", "0");
+        car.setMonthlyContribution(new BigDecimal("3500000"));
+        car.setPurchaseDate(SEP_18);
+        car.setPaymentStartDate(LocalDate.of(2026, 10, 20));          // kept as 1 October
+        Investment trip = goal(6, "Trip", "6000000", "0");
+        trip.setMonthlyContribution(new BigDecimal("500000"));
+        trip.setPurchaseDate(LocalDate.of(2026, 10, 2));               // no start month: its purchase month
+        Investment phone = goal(7, "Phone", "5000000", "0");
+        phone.setMonthlyContribution(new BigDecimal("1000000"));
+        phone.setPurchaseDate(LocalDate.of(2026, 9, 1));                // started
+        when(investmentRepository.findAll()).thenReturn(List.of(car, trip, phone));
+
+        AdvisorResponse september = advise(SEP_18);
+
+        assertThat(september.getSavingsThisMonth())
+                .extracting(SavingsRow::getBucket, SavingsRow::getRefId)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple("DONATION", null),
+                        org.assertj.core.groups.Tuple.tuple("EMERGENCY", null),
+                        org.assertj.core.groups.Tuple.tuple("INVESTMENTS", null),
+                        org.assertj.core.groups.Tuple.tuple("GOAL", 7L));
+        ArgumentCaptor<DailyAdviceService.Inputs> in = ArgumentCaptor.forClass(DailyAdviceService.Inputs.class);
+        verify(dailyAdviceService).compute(in.capture());
+        assertThat(in.getValue().goals())
+                .extracting(DailyAdviceService.Goal::id, DailyAdviceService.Goal::startMonth)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(5L, YearMonth.of(2026, 10)),
+                        org.assertj.core.groups.Tuple.tuple(6L, YearMonth.of(2026, 10)),
+                        org.assertj.core.groups.Tuple.tuple(7L, SEP));
+
+        AdvisorResponse october = advise(LocalDate.of(2026, 10, 12));
+
+        assertThat(october.getSavingsThisMonth())
+                .filteredOn(row -> "GOAL".equals(row.getBucket()))
+                .extracting(SavingsRow::getRefId, row -> row.getTarget().toPlainString())
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(5L, "3500000"),
+                        org.assertj.core.groups.Tuple.tuple(6L, "500000"),
+                        org.assertj.core.groups.Tuple.tuple(7L, "1000000"));
     }
 
     // ── Wallet checks and closing a month ─────────────────────────────────────

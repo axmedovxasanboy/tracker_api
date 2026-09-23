@@ -15,6 +15,8 @@ public class DebtResponse {
 
     private Long id;
     private String creditorName;
+    /** The creditor on the owner's list of lenders; null until linked. A debt is always paid back ASAP. */
+    private Long lenderId;
     private BigDecimal totalAmount;
     private BigDecimal paidAmount;
     private BigDecimal remainingAmount;
@@ -30,6 +32,7 @@ public class DebtResponse {
         return DebtResponse.builder()
                 .id(d.getId())
                 .creditorName(d.getCreditorName())
+                .lenderId(d.getLenderId())
                 .totalAmount(d.getTotalAmount())
                 .paidAmount(d.getPaidAmount())
                 .remainingAmount(d.getTotalAmount().subtract(d.getPaidAmount()))

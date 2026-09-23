@@ -7,8 +7,10 @@ import uz.tracker.trackerproject.dto.request.*;
 import uz.tracker.trackerproject.dto.request.MonthlyPaymentPayRequest.Mode;
 import uz.tracker.trackerproject.dto.response.*;
 import uz.tracker.trackerproject.entity.*;
+import uz.tracker.trackerproject.enums.CounterpartyKind;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.RecordStatus;
+import uz.tracker.trackerproject.enums.RepaymentType;
 import uz.tracker.trackerproject.enums.TransactionSubType;
 import uz.tracker.trackerproject.enums.TransactionType;
 import uz.tracker.trackerproject.exception.ResourceNotFoundException;
@@ -39,6 +41,7 @@ public class FinanceService {
     private final CardService cardService;
     private final MonthCloseService monthCloseService;
     private final SettingsService settingsService;
+    private final CounterpartyService counterpartyService;
 
     /** Targets that support the "already paid" (no-transaction) mark. */
     private static final Set<String> MARK_KINDS =
@@ -56,7 +59,8 @@ public class FinanceService {
     @Transactional
     public DebtResponse createDebt(DebtRequest req) {
         Debt d = new Debt();
-        d.setCreditorName(req.getCreditorName());
+        d.setCreditorName(trim(req.getCreditorName()));
+        linkCreditor(d, req.getLenderId());
         d.setTotalAmount(req.getTotalAmount());
         d.setPaidAmount(req.getPaidAmount() != null ? req.getPaidAmount() : BigDecimal.ZERO);
         d.setCurrency(req.getCurrency());
@@ -78,7 +82,8 @@ public class FinanceService {
         Debt d = debtRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("Debt", id));
         boolean termsChanged = !d.getTotalAmount().equals(req.getTotalAmount())
                 || !java.util.Objects.equals(d.getDueDate(), req.getDueDate());
-        d.setCreditorName(req.getCreditorName());
+        d.setCreditorName(trim(req.getCreditorName()));
+        linkCreditor(d, req.getLenderId());
         d.setTotalAmount(req.getTotalAmount());
         if (req.getPaidAmount() != null) d.setPaidAmount(req.getPaidAmount());
         d.setCurrency(req.getCurrency());
@@ -105,13 +110,14 @@ public class FinanceService {
      * amount can't touch the loan's terms — that path re-derives monthlyPayment whenever the
      * total or due date look changed, which has nothing to do with the plan.
      *
-     * @param amount null or non-positive clears the plan, reverting to the default 34% rule.
+     * @param amount a positive amount makes the loan MONTHLY at it; null or non-positive clears the
+     *               plan, and the loan is paid back ASAP.
      */
     @Transactional
     public LoanTakenResponse setLoanTakenPlan(Long id, BigDecimal amount) {
         LoanTaken l = loanTakenRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("LoanTaken", id));
-        l.setPlannedMonthlyPayment(amount != null && amount.signum() > 0 ? amount : null);
+        applyRepayment(l, null, amount);
         return LoanTakenResponse.from(loanTakenRepository.save(l));
     }
 
@@ -143,7 +149,8 @@ public class FinanceService {
     }
 
     private LoanGiven saveLoanGiven(LoanGiven l, LoanGivenRequest req, Long transactionId) {
-        l.setDebtorName(req.getDebtorName());
+        l.setDebtorName(trim(req.getDebtorName()));
+        linkBorrower(l, req.getBorrowerId());
         l.setTotalAmount(req.getTotalAmount());
         l.setReceivedAmount(req.getReceivedAmount() != null ? req.getReceivedAmount() : BigDecimal.ZERO);
         l.setCurrency(req.getCurrency());
@@ -185,7 +192,8 @@ public class FinanceService {
     @Transactional
     public LoanGivenResponse updateLoanGiven(Long id, LoanGivenRequest req) {
         LoanGiven l = loanGivenRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("LoanGiven", id));
-        l.setDebtorName(req.getDebtorName());
+        l.setDebtorName(trim(req.getDebtorName()));
+        linkBorrower(l, req.getBorrowerId());
         l.setTotalAmount(req.getTotalAmount());
         if (req.getReceivedAmount() != null) l.setReceivedAmount(req.getReceivedAmount());
         l.setCurrency(req.getCurrency());
@@ -224,13 +232,14 @@ public class FinanceService {
     }
 
     private LoanTaken saveLoanTaken(LoanTaken l, LoanTakenRequest req, Long transactionId) {
-        l.setLenderName(req.getLenderName());
+        l.setLenderName(trim(req.getLenderName()));
+        linkLender(l, req.getLenderId());
         l.setTotalAmount(req.getTotalAmount());
         l.setPaidAmount(req.getPaidAmount() != null ? req.getPaidAmount() : BigDecimal.ZERO);
         l.setCurrency(req.getCurrency());
         l.setBorrowedDate(req.getBorrowedDate());
         l.setDueDate(req.getDueDate());
-        l.setPlannedMonthlyPayment(req.getPlannedMonthlyPayment());
+        applyRepayment(l, req.getRepaymentType(), req.getPlannedMonthlyPayment());
         l.setPaymentStartDate(resolvePaymentStart(req.getPaymentStartDate(), req.getBorrowedDate()));
         l.setStatus(req.getStatus() != null ? req.getStatus() : RecordStatus.PENDING);
         l.setDescription(req.getDescription());
@@ -249,13 +258,14 @@ public class FinanceService {
         LoanTaken l = loanTakenRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("LoanTaken", id));
         boolean termsChanged = !l.getTotalAmount().equals(req.getTotalAmount())
                 || !java.util.Objects.equals(l.getDueDate(), req.getDueDate());
-        l.setLenderName(req.getLenderName());
+        l.setLenderName(trim(req.getLenderName()));
+        linkLender(l, req.getLenderId());
         l.setTotalAmount(req.getTotalAmount());
         if (req.getPaidAmount() != null) l.setPaidAmount(req.getPaidAmount());
         l.setCurrency(req.getCurrency());
         l.setBorrowedDate(req.getBorrowedDate());
         l.setDueDate(req.getDueDate());
-        l.setPlannedMonthlyPayment(req.getPlannedMonthlyPayment());
+        applyRepayment(l, req.getRepaymentType(), req.getPlannedMonthlyPayment());
         if (req.getPaymentStartDate() != null) {
             l.setPaymentStartDate(req.getPaymentStartDate().withDayOfMonth(1));
         }
@@ -748,11 +758,14 @@ public class FinanceService {
         // A savings goal is never the emergency fund — emergencyFund wins if both are set.
         i.setSavingsGoal(Boolean.TRUE.equals(req.getSavingsGoal()) && !Boolean.TRUE.equals(req.getEmergencyFund()));
         i.setTargetAmount(req.getTargetAmount());
-        // A goal's deadline and monthly payment change only when the request carries them: the bot
-        // edits a holding by echoing the fields it knows, which predate these two, so "left out"
-        // must keep what is stored. Sent — null included — they are set; a null clears.
+        // A goal's deadline, monthly payment and payment start month change only when the request
+        // carries them: the bot edits a holding by echoing the fields it knows, which predate these
+        // three, so "left out" must keep what is stored. Sent — null included — they are set; a null
+        // clears (a cleared start month means the purchase month). The start month is stored as the
+        // 1st of its month (Investment.setPaymentStartDate).
         if (req.targetDateGiven()) i.setTargetDate(req.getTargetDate());
         if (req.monthlyContributionGiven()) i.setMonthlyContribution(req.getMonthlyContribution());
+        if (req.paymentStartDateGiven()) i.setPaymentStartDate(req.getPaymentStartDate());
         // currentValue is optional: null = "tracks investedAmount" (the response mapper falls back).
         i.setCurrentValue(req.getCurrentValue());
         i.setOpeningBalance(Boolean.TRUE.equals(req.getOpeningBalance()));
@@ -1009,7 +1022,7 @@ public class FinanceService {
      * Undo an "already paid" mark. BUCKET / SUBSCRIPTION / BANK marks are pure bookkeeping and just
      * disappear, but a PERSONAL_LOAN / DEBT mark bumped the entity's paidAmount when it was created
      * (mirroring a real repayment), so deleting it must back that bump out — otherwise the balance
-     * stays permanently understated and the 34% charge shrinks with it.
+     * stays permanently understated and the month's ask shrinks with it.
      */
     @Transactional
     public void deleteMark(Long id) {
@@ -1195,6 +1208,73 @@ public class FinanceService {
      * the entire remaining balance lands on a single month (divisor = 1) — the user can
      * resolve this by setting a future dueDate when editing the loan.
      */
+    // ---- People and repayment types ----
+
+    /**
+     * A borrowed loan's repayment type and plan, kept together: the type sent, else the one the plan
+     * implies (a plan means MONTHLY — how the bot, which never sends a type, keeps working). A
+     * MONTHLY loan must have a plan; an ASAP loan keeps none.
+     */
+    static void applyRepayment(LoanTaken l, RepaymentType requested, BigDecimal plan) {
+        boolean hasPlan = plan != null && plan.signum() > 0;
+        RepaymentType type = requested != null ? requested : hasPlan ? RepaymentType.MONTHLY : RepaymentType.ASAP;
+        if (type == RepaymentType.MONTHLY && !hasPlan) {
+            throw new IllegalArgumentException("A MONTHLY loan needs its monthly payment (plannedMonthlyPayment).");
+        }
+        l.setRepaymentType(type);
+        l.setPlannedMonthlyPayment(type == RepaymentType.MONTHLY ? plan : null);
+    }
+
+    /**
+     * Point a borrowed loan at its lender: the person {@code lenderId} — whose name the loan then
+     * takes — else the one its own name belongs to, added when new (the bot sends names only).
+     */
+    private void linkLender(LoanTaken l, Long lenderId) {
+        Counterparty c = person(lenderId, l.getLenderName(), CounterpartyKind.LENDER, "Lender name");
+        if (c == null) return;
+        l.setLenderId(c.getId());
+        if (lenderId != null) l.setLenderName(c.getName());
+    }
+
+    /** The same for a debt's creditor, on the lenders list. */
+    private void linkCreditor(Debt d, Long lenderId) {
+        Counterparty c = person(lenderId, d.getCreditorName(), CounterpartyKind.LENDER, "Creditor name");
+        if (c == null) return;
+        d.setLenderId(c.getId());
+        if (lenderId != null) d.setCreditorName(c.getName());
+    }
+
+    /** The same for the borrower of money lent, on the borrowers list. */
+    private void linkBorrower(LoanGiven l, Long borrowerId) {
+        Counterparty c = person(borrowerId, l.getDebtorName(), CounterpartyKind.BORROWER, "Borrower name");
+        if (c == null) return;
+        l.setBorrowerId(c.getId());
+        if (borrowerId != null) l.setDebtorName(c.getName());
+    }
+
+    /**
+     * Re-link a borrowed loan whose name was just changed from its transaction (TransactionService
+     * patches the name in place). A blank name keeps the link it had.
+     */
+    public void relinkLender(LoanTaken l) {
+        if (Counterparty.keyOf(l.getLenderName()) != null) linkLender(l, null);
+    }
+
+    /** The same for money lent whose borrower's name changed from its transaction. */
+    public void relinkBorrower(LoanGiven l) {
+        if (Counterparty.keyOf(l.getDebtorName()) != null) linkBorrower(l, null);
+    }
+
+    private Counterparty person(Long id, String name, CounterpartyKind kind, String what) {
+        if (id != null) return counterpartyService.require(id, kind);
+        if (Counterparty.keyOf(name) == null) throw new IllegalArgumentException(what + " is required.");
+        return counterpartyService.findOrCreate(name, kind);
+    }
+
+    private static String trim(String s) {
+        return s == null ? null : s.trim();
+    }
+
     /**
      * Normalise the payment-start to the first day of its month. When the request omits
      * it, default to the month AFTER the borrowed date (or after today if borrowedDate is

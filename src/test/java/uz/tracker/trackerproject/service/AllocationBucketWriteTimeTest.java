@@ -83,7 +83,8 @@ class AllocationBucketWriteTimeTest {
                 mock(MarkPaidRepository.class),
                 mock(CardService.class),
                 mock(MonthCloseService.class),
-                mock(SettingsService.class));
+                mock(SettingsService.class),
+                mock(CounterpartyService.class));
         when(transactionRepository.save(any(Transaction.class))).thenAnswer(i -> i.getArgument(0));
         when(investmentRepository.save(any(Investment.class))).thenAnswer(i -> i.getArgument(0));
     }

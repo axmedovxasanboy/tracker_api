@@ -29,6 +29,11 @@ public class InvestmentResponse {
     private LocalDate targetDate;
     /** A savings goal's monthly payment; null when none was set. */
     private BigDecimal monthlyContribution;
+    /**
+     * The first month the monthly payment is asked for, as its 1st (YYYY-MM-01); null when none was
+     * set — the payment then starts in the month of {@link #purchaseDate}.
+     */
+    private LocalDate paymentStartDate;
     /** Current/market value. Falls back to investedAmount when not explicitly set. */
     private BigDecimal currentValue;
     /** currentValue / targetAmount as a percentage; null when there is no target. */
@@ -59,6 +64,7 @@ public class InvestmentResponse {
                 .targetAmount(i.getTargetAmount())
                 .targetDate(i.getTargetDate())
                 .monthlyContribution(i.getMonthlyContribution())
+                .paymentStartDate(i.getPaymentStartDate())
                 .currentValue(value)
                 .progressPercent(progress)
                 .openingBalance(Boolean.TRUE.equals(i.getOpeningBalance()))

@@ -65,9 +65,9 @@ public class OverviewTierResponse {
     private BigDecimal bonusIncome;
 
     /**
-     * This month's debt charge: bank installments + the monthly charge on borrowed money and
-     * debts (a loan's repayment plan when it has one, else 34% of its original total, capped at
-     * what is left). Drives the sub-level ratio and Level 1's tight-vs-comfortable split; since
+     * This month's debt charge: bank installments + the month's asks on borrowed money and debts
+     * — a MONTHLY loan's plan, or an ASAP loan's or debt's ASAP ask (all of what was left at the
+     * month's start when that is at most 70% of the stable income, else 34% of it). Drives the sub-level ratio and Level 1's tight-vs-comfortable split; since
      * 2026-09-23 it no longer lowers {@link #allocationBase}.
      */
     private BigDecimal debtPayments;
@@ -129,9 +129,9 @@ public class OverviewTierResponse {
     public static class DebtBreakdown {
         /** Sum of BankLoan.monthlyPayment for active bank loans. */
         private BigDecimal bankLoans;
-        /** Σ (remaining / monthsUntilDue) for all unpaid LoanTaken records. */
+        /** Σ this month's asks on borrowed money (LoanTaken): MONTHLY plans and ASAP asks. */
         private BigDecimal loansTaken;
-        /** Σ (remaining / monthsUntilDue) for all unpaid Debt records. */
+        /** Σ this month's ASAP asks on debts (Debt). */
         private BigDecimal debts;
     }
 }

@@ -132,7 +132,8 @@ class MarkPaidLifecycleTest {
                 markPaidRepository,
                 mock(CardService.class),
                 monthCloseService,
-                settingsService);
+                settingsService,
+                mock(CounterpartyService.class));
     }
 
     /** A minimal repository that actually remembers, so a delete is observable downstream. */

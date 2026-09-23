@@ -10,6 +10,7 @@ import uz.tracker.trackerproject.enums.InvestmentType;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 
 @Entity
 @Table(name = "investments")
@@ -70,6 +71,28 @@ public class Investment {
      */
     @Column(name = "monthly_contribution", precision = 19, scale = 4)
     private BigDecimal monthlyContribution;
+
+    /**
+     * The first month a savings goal's monthly payment is asked for — always stored as the 1st of
+     * that month (the setter moves any day there). Before it the advisor lists no row for the goal
+     * and the daily figure sets nothing aside for it. Null = the month of {@link #purchaseDate}, so
+     * a goal saved before this column existed keeps being asked for from the month it was created.
+     */
+    @Column(name = "payment_start_date")
+    private LocalDate paymentStartDate;
+
+    public void setPaymentStartDate(LocalDate paymentStartDate) {
+        this.paymentStartDate = paymentStartDate == null ? null : paymentStartDate.withDayOfMonth(1);
+    }
+
+    /**
+     * The month the monthly payment starts: {@link #paymentStartDate}'s, else {@link #purchaseDate}'s;
+     * null when neither is known (then it has always started).
+     */
+    public YearMonth paymentStartMonth() {
+        if (paymentStartDate != null) return YearMonth.from(paymentStartDate);
+        return purchaseDate == null ? null : YearMonth.from(purchaseDate);
+    }
 
     /** Optional current/market value reflecting platform growth. When null it is treated as
         equal to {@link #investedAmount} (see InvestmentResponse.from + the contribute flow). */

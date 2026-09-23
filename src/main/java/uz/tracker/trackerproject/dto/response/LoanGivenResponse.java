@@ -15,6 +15,8 @@ public class LoanGivenResponse {
 
     private Long id;
     private String debtorName;
+    /** The borrower on the owner's list of people; null until linked. */
+    private Long borrowerId;
     private BigDecimal totalAmount;
     private BigDecimal receivedAmount;
     private BigDecimal pendingAmount;
@@ -29,6 +31,7 @@ public class LoanGivenResponse {
         return LoanGivenResponse.builder()
                 .id(l.getId())
                 .debtorName(l.getDebtorName())
+                .borrowerId(l.getBorrowerId())
                 .totalAmount(l.getTotalAmount())
                 .receivedAmount(l.getReceivedAmount())
                 .pendingAmount(l.getTotalAmount().subtract(l.getReceivedAmount()))

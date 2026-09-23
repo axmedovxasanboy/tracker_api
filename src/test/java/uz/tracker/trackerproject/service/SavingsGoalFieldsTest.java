@@ -13,6 +13,7 @@ import uz.tracker.trackerproject.repository.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -21,14 +22,15 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * A savings goal's deadline and monthly payment. The owner asked for both when adding a goal; the
- * bot, kept as it is, edits a goal by sending back the fields it knows — a shape without these two
- * — so an edit that leaves them out must keep them, while one that sends them (null included) sets
- * them.
+ * A savings goal's deadline, monthly payment and payment start month. The owner asked for them when
+ * adding a goal; the bot, kept as it is, edits a goal by sending back the fields it knows — a shape
+ * without these three — so an edit that leaves them out must keep them, while one that sends them
+ * (null included) sets them.
  */
 class SavingsGoalFieldsTest {
 
     private static final LocalDate JUNE_2027 = LocalDate.of(2027, 6, 1);
+    private static final LocalDate OCT_2026 = LocalDate.of(2026, 10, 1);
 
     private InvestmentRepository investmentRepository;
     private FinanceService service;
@@ -51,7 +53,8 @@ class SavingsGoalFieldsTest {
                 mock(MarkPaidRepository.class),
                 mock(CardService.class),
                 mock(MonthCloseService.class),
-                mock(SettingsService.class));
+                mock(SettingsService.class),
+                mock(CounterpartyService.class));
         when(investmentRepository.save(any(Investment.class))).thenAnswer(inv -> {
             stored = inv.getArgument(0);
             if (stored.getId() == null) stored.setId(9L);
@@ -144,5 +147,66 @@ class SavingsGoalFieldsTest {
         InvestmentRequest dated = json.readValue("""
                 {"targetDate":"2027-06-01"}""", InvestmentRequest.class);
         assertThat(dated.getTargetDate()).isEqualTo(JUNE_2027);
+
+        // The start month the same way: the bot's shape has no key, the web sends one.
+        assertThat(bot.paymentStartDateGiven()).isFalse();
+        InvestmentRequest reset = json.readValue("""
+                {"name":"Car","paymentStartDate":null}""", InvestmentRequest.class);
+        assertThat(reset.paymentStartDateGiven()).isTrue();
+        assertThat(reset.getPaymentStartDate()).isNull();
+        InvestmentRequest starting = json.readValue("""
+                {"paymentStartDate":"2026-10-15"}""", InvestmentRequest.class);
+        assertThat(starting.paymentStartDateGiven()).isTrue();
+        assertThat(starting.getPaymentStartDate()).isEqualTo(LocalDate.of(2026, 10, 15));
+    }
+
+    // ── The payment start month ───────────────────────────────────────────────
+
+    /** Any day of the month is stored as its 1st — the start is a month, not a day. */
+    @Test
+    void theStartMonthIsStoredAsItsFirstDay() {
+        InvestmentRequest create = goal("Car");
+        create.setMonthlyContribution(new BigDecimal("3500000"));
+        create.setPaymentStartDate(LocalDate.of(2026, 10, 15));
+
+        InvestmentResponse created = service.createInvestment(create);
+
+        assertThat(created.getPaymentStartDate()).isEqualTo(OCT_2026);
+        assertThat(stored.getPaymentStartDate()).isEqualTo(OCT_2026);
+        assertThat(stored.paymentStartMonth()).isEqualTo(YearMonth.of(2026, 10));
+
+        InvestmentRequest moved = goal("Car");
+        moved.setPaymentStartDate(LocalDate.of(2026, 11, 30));
+        assertThat(service.updateInvestment(9L, moved).getPaymentStartDate()).isEqualTo(LocalDate.of(2026, 11, 1));
+    }
+
+    /** None given: the payment starts in the month the goal was created, as every goal did before. */
+    @Test
+    void withoutAStartMonthThePaymentStartsInThePurchaseMonth() {
+        InvestmentResponse created = createCar();
+
+        assertThat(created.getPaymentStartDate()).isNull();
+        assertThat(stored.paymentStartMonth()).isEqualTo(YearMonth.of(2026, 9));   // purchased 23 September
+    }
+
+    /** The bot's edit keeps the start month; an explicit null resets it to the purchase month. */
+    @Test
+    void anEditWithoutTheStartMonthKeepsItAndNullResetsIt() {
+        InvestmentRequest create = goal("Car");
+        create.setMonthlyContribution(new BigDecimal("3500000"));
+        create.setPaymentStartDate(OCT_2026);
+        service.createInvestment(create);
+
+        InvestmentResponse renamed = service.updateInvestment(9L, goal("Car (Cobalt)"));
+        assertThat(renamed.getName()).isEqualTo("Car (Cobalt)");
+        assertThat(renamed.getPaymentStartDate()).isEqualTo(OCT_2026);
+        assertThat(renamed.getMonthlyContribution()).isEqualByComparingTo("3500000");
+
+        InvestmentRequest reset = goal("Car (Cobalt)");
+        reset.setPaymentStartDate(null);
+        InvestmentResponse updated = service.updateInvestment(9L, reset);
+        assertThat(updated.getPaymentStartDate()).isNull();
+        assertThat(stored.paymentStartMonth()).isEqualTo(YearMonth.of(2026, 9));
+        assertThat(updated.getMonthlyContribution()).isEqualByComparingTo("3500000");   // left out: kept
     }
 }
