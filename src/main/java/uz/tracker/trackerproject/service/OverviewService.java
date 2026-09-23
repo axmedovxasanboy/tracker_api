@@ -129,7 +129,7 @@ public class OverviewService {
      */
     @Transactional(readOnly = true)
     public OverviewTierResponse getTier(YearMonth month, Currency displayCurrency) {
-        return tier(month, displayCurrency, true);
+        return tier(month, displayCurrency, true, true);
     }
 
     /**
@@ -140,10 +140,22 @@ public class OverviewService {
      */
     @Transactional(readOnly = true)
     public OverviewTierResponse getTierIgnoringSubscriptions(YearMonth month, Currency displayCurrency) {
-        return tier(month, displayCurrency, false);
+        return tier(month, displayCurrency, false, true);
     }
 
-    private OverviewTierResponse tier(YearMonth month, Currency displayCurrency, boolean subscriptionsGate) {
+    /**
+     * The same tier for the profile, which explains the owner's configuration — the level, the
+     * rule and the percentages — rather than asking for payments: the allocation is computed even
+     * while subscriptions are unpaid AND before allocation tracking starts. Once tracking has
+     * started it is exactly {@link #getTierIgnoringSubscriptions}, so the two quote the same amounts.
+     */
+    @Transactional(readOnly = true)
+    public OverviewTierResponse getTierForProfile(YearMonth month) {
+        return tier(month, Currency.UZS, false, false);
+    }
+
+    private OverviewTierResponse tier(YearMonth month, Currency displayCurrency, boolean subscriptionsGate,
+                                      boolean trackingGate) {
         Settings s = settingsService.getOrCreate();
         boolean missingIncome = s.getMonthlyStableIncome() == null
                 || s.getMonthlyStableIncome().signum() <= 0;
@@ -210,7 +222,7 @@ public class OverviewService {
         if (missingIncome) {
             allocation = notDefinedAllocation("page.plan.note.setIncome", Map.of(),
                     "Set monthly income to see allocation guidance.");
-        } else if (beforeTrackingStart) {
+        } else if (beforeTrackingStart && trackingGate) {
             allocation = notDefinedAllocation("page.plan.note.trackingStarts",
                     Map.of("month", trackingStart.toString()),
                     "Allocation tracking starts " + monthLabel(trackingStart)
@@ -1428,8 +1440,11 @@ public class OverviewService {
 
     // ── Allocation-rule view + per-level config (Levels 2–6, Level 1 reference) ──
 
-    /** Configured minimum leftover for a level, in UZS. Level 1 defaults to 5M. */
-    private BigDecimal minLeftoverUzs(int level) {
+    /**
+     * Configured minimum leftover for a level, in UZS. Level 1 defaults to 5M. For Level 1 it is the
+     * tight/comfortable cutoff; package-private so the profile can name it.
+     */
+    BigDecimal minLeftoverUzs(int level) {
         BigDecimal v = levelConfigRepository.findByLevel(level)
                 .map(LevelConfig::getMinLeftover).orElse(null);
         if (v != null) return v;
@@ -1446,11 +1461,16 @@ public class OverviewService {
     }
 
     /** Inclusive lower / exclusive upper left-money bound (UZS) for a level. */
-    private BigDecimal levelIncomeLow(int level) {
+    static BigDecimal levelIncomeLow(int level) {
         return level <= 1 ? BigDecimal.ZERO : LEVEL_BREAKPOINTS_UZS[level - 2];
     }
-    private BigDecimal levelIncomeHigh(int level) {
+    static BigDecimal levelIncomeHigh(int level) {
         return LEVEL_BREAKPOINTS_UZS[level - 1];
+    }
+
+    /** The top breakpoint: left money at or above it is "above tier 6", with no level and no guidance. */
+    static BigDecimal tierCeiling() {
+        return LEVEL_BREAKPOINTS_UZS[LEVEL_BREAKPOINTS_UZS.length - 1];
     }
 
     /**

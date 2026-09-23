@@ -9,6 +9,7 @@ import uz.tracker.trackerproject.dto.response.AdvisorResponse.SavingsRow;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Suggestion;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Upcoming;
 import uz.tracker.trackerproject.dto.response.MonthClosePreviewResponse.WalletLine;
+import uz.tracker.trackerproject.dto.response.ProfileResponse;
 import uz.tracker.trackerproject.dto.response.WalletCheckInStatusResponse;
 import uz.tracker.trackerproject.entity.BankLoan;
 import uz.tracker.trackerproject.entity.Category;
@@ -51,6 +52,7 @@ class AdvisorOwnerSeptemberTest {
     private AdvisorService advisor;
     private TransactionLedger ledger;
     private Category salary;
+    private OverviewService overview;
 
     @BeforeEach
     void setUp() {
@@ -151,7 +153,7 @@ class AdvisorOwnerSeptemberTest {
         when(investmentRepository.findAll()).thenReturn(List.of());
         when(emergencyRepository.count()).thenReturn(1L);
 
-        OverviewService overview = new OverviewService(transactionRepository, monthlyPaymentRepository,
+        overview = new OverviewService(transactionRepository, monthlyPaymentRepository,
                 bankLoanRepository, loanTakenRepository, debtRepository, mock(DonationRepository.class),
                 investmentRepository, mock(LevelAllocationRuleRepository.class), mock(LevelConfigRepository.class),
                 markPaidRepository, settingsService);
@@ -282,5 +284,50 @@ class AdvisorOwnerSeptemberTest {
                         tuple("EMERGENCY", "2", "353600", "353600", "0"),
                         tuple("INVESTMENTS", "8", "1414400", "1414400", "0"));
         assertThat(YearMonth.from(r.getDate())).isEqualTo(YearMonth.of(2026, 9));
+    }
+
+    // ── The profile ───────────────────────────────────────────────────────────
+
+    /**
+     * The Profile page's answer, exactly as the web receives it: Level 1 (not "1.2") from 7M − 5.3M
+     * bills = 1.7M; the bank's 400,000 leaves 1.3M; the bank-loan-only rule is tight under the 5M
+     * cutoff, so 5 / 2 / 8 %, of 17.68M this month (the 16.38M bonus included) and of 1.3M in a
+     * month without one. From October the parents' 500,000 plan starts: bank AND debts, 5 / 0 / 5.
+     */
+    @Test
+    void theProfileExplainsTheLevelAndWhereEachPercentComesFrom() throws Exception {
+        ProfileResponse profile = new ProfileService(overview).profile(TODAY, "owner");
+
+        String json = tools.jackson.databind.json.JsonMapper.builder().build().writeValueAsString(profile);
+        org.skyscreamer.jsonassert.JSONAssert.assertEquals("""
+                {"username":"owner","month":"2026-09","missingStableIncome":false,
+                 "level":1,"aboveCeiling":false,"levelFrom":0,"nextLevelAt":15000000,
+                 "stableIncome":7000000,"monthlyBills":5300000,"leftAfterBills":1700000,
+                 "loanPayments":400000,"leftForSavings":1300000,"bonusThisMonth":16380000,"savingsBase":17680000,
+                 "rule":{"reason":"BANK_LOAN_TIGHT","cutoff":5000000},
+                 "buckets":[
+                   {"bucket":"DONATION","percent":5,"amount":884000,"normalMonthAmount":65000},
+                   {"bucket":"EMERGENCY","percent":2,"amount":353600,"normalMonthAmount":26000},
+                   {"bucket":"INVESTMENTS","percent":8,"amount":1414400,"normalMonthAmount":104000}],
+                 "totalPercent":15,"totalAmount":2652000,"normalMonthTotal":195000,
+                 "nextMonth":{"month":"2026-10","reason":"BANK_AND_DEBTS","loanPayments":900000,
+                   "leftForSavings":800000,"buckets":[
+                     {"bucket":"DONATION","percent":5,"normalMonthAmount":40000},
+                     {"bucket":"EMERGENCY","percent":0,"normalMonthAmount":0},
+                     {"bucket":"INVESTMENTS","percent":5,"normalMonthAmount":40000}]}}
+                """, json, org.skyscreamer.jsonassert.JSONCompareMode.STRICT);
+    }
+
+    /** Each bucket's amount is the very figure the advisor asks for this month. */
+    @Test
+    void theProfilesAmountsAreTheAdvisorsTargets() {
+        ProfileResponse profile = new ProfileService(overview).profile(TODAY, "owner");
+        AdvisorResponse advice = advisor.advise(TODAY);
+
+        for (ProfileResponse.Bucket b : profile.getBuckets()) {
+            SavingsRow row = advice.getSavingsThisMonth().stream()
+                    .filter(s -> b.getBucket().equals(s.getBucket())).findFirst().orElseThrow();
+            assertThat(b.getAmount()).as(b.getBucket()).isEqualByComparingTo(row.getTarget());
+        }
     }
 }
