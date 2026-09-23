@@ -92,7 +92,7 @@ class DailyAdviceReviewRegressionTest {
         overview = new OverviewService(transactionRepository, monthlyPaymentRepository,
                 bankLoanRepository, loanTakenRepository, debtRepository, mock(DonationRepository.class),
                 investmentRepository, mock(LevelAllocationRuleRepository.class), mock(LevelConfigRepository.class),
-                markPaidRepository, settingsService);
+                markPaidRepository, settingsService, mock(CategoryRepository.class));
         daily = new DailyAdviceService(overview, settingsService, transactionRepository,
                 monthlyPaymentRepository, bankLoanRepository, loanTakenRepository, debtRepository);
     }
@@ -123,9 +123,9 @@ class DailyAdviceReviewRegressionTest {
     }
 
     private DailyAdviceService.Result walk(LocalDate today, String have, String stable, String salaryComing,
-                                           String setAsideLeft, String pctSum) {
+                                           String setAsideLeft) {
         return daily.compute(new DailyAdviceService.Inputs(today, new BigDecimal(have), new BigDecimal(stable),
-                new BigDecimal(salaryComing), new BigDecimal(setAsideLeft), new BigDecimal(pctSum)));
+                new BigDecimal(salaryComing), new BigDecimal(setAsideLeft)));
     }
 
     // ── 1. HIGH: no "spare money" while the walk runs short before payday ────────
@@ -144,8 +144,8 @@ class DailyAdviceReviewRegressionTest {
         ledger.income(LocalDate.of(2026, 9, 7), "14000000", salary); // the salary is in
         ledger.expense(LocalDate.of(2026, 9, 12), "460000");         // 20,000 a day
         wallets(SEP_23, "500000");
-        // September's set-asides are done (10/5/15 % of 12M), as "already paid" marks.
-        for (String[] b : new String[][]{{"DONATION", "1200000"}, {"EMERGENCY", "600000"}, {"INVESTMENTS", "1800000"}}) {
+        // September's set-asides are done (10/5/15 % of the 14M salary), as "already paid" marks.
+        for (String[] b : new String[][]{{"DONATION", "1400000"}, {"EMERGENCY", "700000"}, {"INVESTMENTS", "2100000"}}) {
             MarkPaid m = new MarkPaid();
             m.setKind("BUCKET");
             m.setBucket(b[0]);
@@ -164,7 +164,7 @@ class DailyAdviceReviewRegressionTest {
         assertThat(r.getSuggestions()).extracting(Suggestion::getCode)
                 .noneMatch(code -> code.startsWith("advisor.s.extraTo"));
         // The surplus is the least left over at the pace on ANY day: −1.5M − 14 × 20,000 on the 6th.
-        assertThat(walk(SEP_23, "500000", "14000000", "0", "0", "30").surplus()).isEqualByComparingTo("-1780000");
+        assertThat(walk(SEP_23, "500000", "14000000", "0", "0").surplus()).isEqualByComparingTo("-1780000");
     }
 
     // ── 2. MEDIUM: a part that arrived is not expected again ─────────────────────
@@ -182,7 +182,7 @@ class DailyAdviceReviewRegressionTest {
         ledger.income(LocalDate.of(2026, 10, 7), "3900000", salary);
         bill(1, "Rent", "4200000", 10);
 
-        Daily payday = walk(LocalDate.of(2026, 10, 7), "4400000", "8000000", "4100000", "0", "0").daily();
+        Daily payday = walk(LocalDate.of(2026, 10, 7), "4400000", "8000000", "4100000", "0").daily();
 
         assertThat(payday.getIncomes())
                 .extracting(IncomePart::getDate, i -> i.getAmount().toPlainString())
@@ -193,7 +193,7 @@ class DailyAdviceReviewRegressionTest {
         assertThat(payday.getSafePerDay()).isEqualByComparingTo("25000");
         assertThat(payday.getTightestOn()).isEqualTo(LocalDate.of(2026, 10, 14));
         // The same money a day later says the same thing (it used to drop from 102,000 to 28,000).
-        Daily next = walk(LocalDate.of(2026, 10, 8), "4400000", "8000000", "4100000", "0", "0").daily();
+        Daily next = walk(LocalDate.of(2026, 10, 8), "4400000", "8000000", "4100000", "0").daily();
         assertThat(next.getSafePerDay()).isEqualByComparingTo("28000");
     }
 
@@ -211,7 +211,7 @@ class DailyAdviceReviewRegressionTest {
         ledger.income(LocalDate.of(2026, 9, 15), "2000000", salary);
         ledger.income(LocalDate.of(2026, 10, 7), "5889000", salary);
 
-        Daily d = walk(LocalDate.of(2026, 10, 8), "6000000", "7000000", "1111000", "0", "0").daily();
+        Daily d = walk(LocalDate.of(2026, 10, 8), "6000000", "7000000", "1111000", "0").daily();
 
         assertThat(d.getUntil()).isEqualTo(LocalDate.of(2026, 12, 6));
         assertThat(d.getIncomes())
@@ -227,7 +227,8 @@ class DailyAdviceReviewRegressionTest {
     /**
      * The rent recorded today but dated the 28th: the wallets (as of today) still hold the 4.2M, so
      * the rent is still to pay — on the 28th. It used to vanish from the list and the figure rose
-     * from 57,000 to 173,000 a day.
+     * to 173,000 a day. Paid on the 28th or today, the answer is the same: 5M − 4.2M + 7M − October's
+     * 30% (2.1M) − October's rent over the 45 days to 6 November = 33,000 a day.
      */
     @Test
     void aBillPaidWithALaterDateIsStillToPayOnThatDay() {
@@ -235,13 +236,13 @@ class DailyAdviceReviewRegressionTest {
         bill(1, "Rent", "4200000", 28);
         ledger.billPaid(LocalDate.of(2026, 9, 28), "4200000", 1);
 
-        Daily d = walk(SEP_23, "5000000", "7000000", "0", "0", "0").daily();
+        Daily d = walk(SEP_23, "5000000", "7000000", "0", "0").daily();
 
         assertThat(d.getUpcoming())
                 .extracting(Upcoming::getDate, Upcoming::getKind, Upcoming::getRefId,
                         u -> u.getAmount().toPlainString(), Upcoming::isOverdue)
                 .contains(tuple(LocalDate.of(2026, 9, 28), "BILL", 1L, "4200000", false));
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("57000");
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("33000");
     }
 
     /**
@@ -256,7 +257,7 @@ class DailyAdviceReviewRegressionTest {
         bill(2, "Internet", "200000", 25);
         ledger.billPaid(LocalDate.of(2026, 9, 28), "4200000", 1);
 
-        Daily d = walk(SEP_23, "5000000", "7000000", "0", "0", "0").daily();
+        Daily d = walk(SEP_23, "5000000", "7000000", "0", "0").daily();
 
         assertThat(d.getUpcoming())
                 .extracting(Upcoming::getDate, Upcoming::getName, Upcoming::isRecorded)
@@ -273,10 +274,10 @@ class DailyAdviceReviewRegressionTest {
         bill(1, "Rent", "4200000", 28);
         ledger.billPaid(SEP_23, "4200000", 1);
 
-        Daily d = walk(SEP_23, "800000", "7000000", "0", "0", "0").daily();
+        Daily d = walk(SEP_23, "800000", "7000000", "0", "0").daily();
 
         assertThat(d.getUpcoming()).noneMatch(u -> u.getDate().getMonthValue() == 9);
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("57000");
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("33000");
     }
 
     /**
@@ -291,7 +292,7 @@ class DailyAdviceReviewRegressionTest {
         ledger.income(LocalDate.of(2026, 10, 7), "3900000", salary);
         ledger.income(LocalDate.of(2026, 10, 15), "4100000", salary);
 
-        Daily d = walk(LocalDate.of(2026, 10, 10), "1000000", "8000000", "0", "0", "0").daily();
+        Daily d = walk(LocalDate.of(2026, 10, 10), "1000000", "8000000", "0", "0").daily();
 
         assertThat(d.getIncomes())
                 .extracting(IncomePart::getDate, i -> i.getAmount().toPlainString())
@@ -329,7 +330,7 @@ class DailyAdviceReviewRegressionTest {
         ledger.add(LocalDate.of(2026, 9, 28), TransactionType.EXPENSE, TransactionSubType.LOAN_REPAYMENT, "500000")
                 .setRepaidLoanTakenId(8L);
 
-        Daily d = walk(SEP_23, "5000000", "7000000", "0", "0", "0").daily();
+        Daily d = walk(SEP_23, "5000000", "7000000", "0", "0").daily();
 
         assertThat(d.getUpcoming())
                 .extracting(Upcoming::getDate, Upcoming::getKind, Upcoming::getRefId,
@@ -347,12 +348,13 @@ class DailyAdviceReviewRegressionTest {
         ledger.income(LocalDate.of(2026, 9, 7), "7000000", salary);
         ledger.add(LocalDate.of(2026, 9, 28), TransactionType.EXPENSE, TransactionSubType.DONATION, "500000");
 
-        Daily d = walk(SEP_23, "5000000", "7000000", "0", "0", "0").daily();
+        Daily d = walk(SEP_23, "5000000", "7000000", "0", "0").daily();
 
-        // 5M − 0.5M + 7M over the 45 days to 6 November = 255,555 (ignoring it gave 266,000).
+        // 5M − 0.5M + 7M − October's 30% (2.1M) over the 45 days to 6 November = 208,888
+        // (ignoring the donation gave 220,000).
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("500000");
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("255000");
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2600000");
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("208000");
     }
 
     // ── 4. LOW: this month's savings wait for the salary that funds them ─────────
@@ -367,7 +369,7 @@ class DailyAdviceReviewRegressionTest {
         settings.setMonthlyStableIncome(new BigDecimal("14000000"));
         ledger.income(LocalDate.of(2026, 8, 7), "14000000", salary);
 
-        Daily d = walk(LocalDate.of(2026, 9, 3), "500000", "14000000", "14000000", "3600000", "30").daily();
+        Daily d = walk(LocalDate.of(2026, 9, 3), "500000", "14000000", "14000000", "3600000").daily();
 
         assertThat(d.getShortBy()).isNull();
         assertThat(d.getSafePerDay()).isEqualByComparingTo("125000");

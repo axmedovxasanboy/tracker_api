@@ -51,7 +51,7 @@ class OverviewBucketAccountingTest {
                 mock(LevelAllocationRuleRepository.class),
                 mock(LevelConfigRepository.class),
                 mock(MarkPaidRepository.class),
-                mock(SettingsService.class));
+                mock(SettingsService.class), mock(CategoryRepository.class));
         when(donationRepository.findByDonationDateBetweenOrderByDonationDateDesc(any(), any()))
                 .thenReturn(List.of());
         when(transactionRepository.sumBySubTypeCurrencyDateRange(any(), any(), any(), any()))

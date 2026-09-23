@@ -81,7 +81,7 @@ class AllocationGuidanceAgreementTest {
         service = new OverviewService(
                 transactionRepository, monthlyPaymentRepository, bankLoanRepository,
                 loanTakenRepository, debtRepository, donationRepository, investmentRepository,
-                ruleRepository, levelConfigRepository, markPaidRepository, settingsService);
+                ruleRepository, levelConfigRepository, markPaidRepository, settingsService, mock(CategoryRepository.class));
     }
 
     /**

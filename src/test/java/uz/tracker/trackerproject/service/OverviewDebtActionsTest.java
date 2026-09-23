@@ -102,7 +102,7 @@ class OverviewDebtActionsTest {
         service = new OverviewService(
                 transactionRepository, monthlyPaymentRepository, bankLoanRepository,
                 loanTakenRepository, debtRepository, donationRepository, investmentRepository,
-                ruleRepository, levelConfigRepository, markPaidRepository, settingsService);
+                ruleRepository, levelConfigRepository, markPaidRepository, settingsService, mock(CategoryRepository.class));
     }
 
     // ── fixtures ────────────────────────────────────────────────────────────────
@@ -289,9 +289,29 @@ class OverviewDebtActionsTest {
 
         AllocationLedgerResponse ledger = service.getAllocationLedger(SEP, Currency.UZS);
 
+        // The loan changes the rule only from September, the month it was taken: no debt before it
+        // (1.1: 10 %), a bank loan from it (1.2, comfortable after it: 7 %). The base is what the
+        // owner earns — the 10M stable income — in every month, loan or not.
+        assertThat(rowOf(ledger, "2026-07").getSubLevel()).isEqualTo("1.1");
+        assertThat(rowOf(ledger, "2026-08").getSubLevel()).isEqualTo("1.1");
+        assertThat(rowOf(ledger, "2026-09").getSubLevel()).isEqualTo("1.2");
+        assertThat(donationPercentOf(ledger, "2026-08")).isEqualByComparingTo("10");
+        assertThat(donationPercentOf(ledger, "2026-09")).isEqualByComparingTo("7");
         assertThat(baseOf(ledger, "2026-07")).isEqualByComparingTo("10000000");
-        assertThat(baseOf(ledger, "2026-08")).isEqualByComparingTo("10000000");
-        assertThat(baseOf(ledger, "2026-09")).isEqualByComparingTo("8800000");
+        assertThat(baseOf(ledger, "2026-09")).isEqualByComparingTo("10000000");
+    }
+
+    private static AllocationLedgerResponse.MonthBreakdown rowOf(AllocationLedgerResponse ledger, String month) {
+        return ledger.getMonths().stream()
+                .filter(m -> month.equals(m.getMonth()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no ledger row for " + month));
+    }
+
+    private static BigDecimal donationPercentOf(AllocationLedgerResponse ledger, String month) {
+        return rowOf(ledger, month).getLines().stream()
+                .filter(l -> "DONATION".equals(l.getBucket()))
+                .findFirst().orElseThrow().getPercent();
     }
 
     private static BigDecimal baseOf(AllocationLedgerResponse ledger, String month) {

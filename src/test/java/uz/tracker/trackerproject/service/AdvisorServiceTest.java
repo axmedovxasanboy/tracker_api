@@ -119,7 +119,7 @@ class AdvisorServiceTest {
                 .build());
         TierAllocation allocation = TierAllocation.builder()
                 .lines(lines).actions(actions).allocationLocked(locked).build();
-        when(overviewService.getTierIgnoringSubscriptions(any(), any())).thenReturn(OverviewTierResponse.builder()
+        when(overviewService.getTierIgnoringSubscriptions(any(), any(), any())).thenReturn(OverviewTierResponse.builder()
                 .missingStableIncome(missingIncome)
                 .income(missingIncome ? BigDecimal.ZERO : new BigDecimal("8000000"))
                 .allocationBase(new BigDecimal("3242000").add(bonus))
@@ -370,7 +370,6 @@ class AdvisorServiceTest {
         assertThat(in.getValue().stableIncome()).isEqualByComparingTo("8000000");
         assertThat(in.getValue().salaryComing()).isEqualByComparingTo("3000000");
         assertThat(in.getValue().setAsideLeft()).isEqualByComparingTo("972600");
-        assertThat(in.getValue().pctSum()).isEqualByComparingTo("30");
     }
 
     /** Every bucket with a target, met or not; one that is not asked for at this tier is left out. */

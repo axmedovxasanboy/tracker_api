@@ -10,7 +10,7 @@ import java.util.List;
 /**
  * Cross-month allocation ledger for the Overview page. Treats recommended-vs-paid as one
  * running balance from the configured start month to the selected month: overpaying later
- * clears earlier backlog. Every figure is broken down ((left balance + bonus) × %) so the user can
+ * clears earlier backlog. Every figure is broken down ((max(stable, salary) + bonus) × %) so the user can
  * see exactly where it came from. All money fields are UZS.
  */
 @Getter @Builder
@@ -31,7 +31,7 @@ public class AllocationLedgerResponse {
 
     private BigDecimal stableIncome;     // selected month
     private BigDecimal bonusThisMonth;   // bonus-tagged income received in the selected month (inside allocationBase)
-    private BigDecimal allocationBase;   // left balance (stable income − subscriptions − debt charge) + bonus; the %s apply to it
+    private BigDecimal allocationBase;   // max(stable income, salary received) + bonus; the %s apply to it
     private Integer level;               // selected month (level is stable across months)
     private String subLevel;             // selected month
 
@@ -71,7 +71,7 @@ public class AllocationLedgerResponse {
         private String subLevel;
         private BigDecimal stableIncome;
         private BigDecimal bonus;         // that month's bonus income (inside allocationBase)
-        private BigDecimal allocationBase; // what the %s apply to: left balance with THAT month's debt charge + its bonus
+        private BigDecimal allocationBase; // what the %s apply to: max(stable income, THAT month's salary received) + its bonus
         private boolean selected;         // true for the month being viewed
         private List<MonthBucketLine> lines;
     }

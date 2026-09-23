@@ -12,8 +12,9 @@ import java.util.List;
  * here is one they already quote — the page never needs the engine's internals. Money is UZS.
  *
  * <p>The chain it explains: stableIncome − monthlyBills = leftAfterBills (which sets the level) −
- * loanPayments = leftForSavings, + bonusThisMonth = savingsBase; each bucket is its percent of
- * savingsBase this month, and of leftForSavings in a month without a bonus.
+ * loanPayments = leftForSavings (with the debt, it picks the rule). The percentages multiply
+ * savingsBase = max(stableIncome, salary received) + bonusThisMonth; each bucket's
+ * normalMonthAmount is its percent of max(stableIncome, salary received), a month without a bonus.
  */
 @Getter @Builder
 public class ProfileResponse {
@@ -43,8 +44,14 @@ public class ProfileResponse {
     /** max(0, leftAfterBills − loanPayments). */
     private BigDecimal leftForSavings;
     private BigDecimal bonusThisMonth;
-    /** leftForSavings + bonusThisMonth — what the percentages multiply this month. */
+    /**
+     * What the percentages multiply this month — the engine's allocation base:
+     * max(stableIncome, salary received) + bonus (see {@link #baseParts}). Until 2026-09-23 it was
+     * leftForSavings + bonus; leftForSavings and loanPayments are still reported.
+     */
     private BigDecimal savingsBase;
+    /** How {@link #savingsBase} is made up; null while the stable income is unset. */
+    private BaseParts baseParts;
 
     /** Which rule chose the percentages; null while the stable income is unset. */
     private Rule rule;
@@ -56,6 +63,91 @@ public class ProfileResponse {
 
     /** Next month's rule and percentages; null when both are the same as this month's. */
     private NextMonth nextMonth;
+
+    /** What actually came in this month so far — earned income only. Present even without a stable income. */
+    private IncomeThisMonth incomeThisMonth;
+    /** What has been set aside this month, against the rule's targets. Present even without a stable income. */
+    private AllocatedThisMonth allocatedThisMonth;
+
+    /**
+     * This month's income dated today or earlier, by the category it was recorded in (a salary
+     * advance under Salary is its own line), largest first. Money that is not earned is left out:
+     * borrowed money and loans paid back to the owner (their sums reported beside), transfers
+     * between the owner's own wallets, a wallet check-in's surplus correction, and non-UZS pots.
+     */
+    @Getter @Builder
+    public static class IncomeThisMonth {
+        private BigDecimal total;
+        private List<IncomeLine> lines;
+        /** Σ of borrowed money (LOAN_RECEIVED) left out. */
+        private BigDecimal excludedBorrowed;
+        /** Σ of money paid back to the owner (LOAN_RETURNED_TO_ME) left out. */
+        private BigDecimal excludedReturned;
+    }
+
+    @Getter @Builder
+    public static class IncomeLine {
+        /** The category's id; null for income recorded without a category. */
+        private Long categoryId;
+        /** The category's name ("Uncategorized" when there is none). */
+        private String name;
+        /** Its Uzbek name, when it has one. */
+        private String nameUz;
+        private BigDecimal amount;
+        /** True when this income is in the savings base: the salary's category tree, bonus included. */
+        private boolean inBase;
+    }
+
+    @Getter @Builder
+    public static class AllocatedThisMonth {
+        private BigDecimal total;
+        /** total ÷ incomeThisMonth.total × 100, one decimal; null while the income is 0. */
+        private BigDecimal percentOfIncome;
+        /** total ÷ savingsBase × 100, one decimal; null while the base is 0 or unknown. */
+        private BigDecimal percentOfBase;
+        /** DONATION, EMERGENCY, INVESTMENTS always, in that order; then GOALS when anything went to one. */
+        private List<AllocatedLine> lines;
+    }
+
+    @Getter @Builder
+    public static class AllocatedLine {
+        /** DONATION | EMERGENCY | INVESTMENTS | GOALS */
+        private String bucket;
+        /**
+         * A bucket: exactly the {@code paid} the advisor reports for it (marks included). GOALS:
+         * contributions to savings goals this month, dated today or earlier.
+         */
+        private BigDecimal amount;
+        /** amount ÷ incomeThisMonth.total × 100, one decimal; null while the income is 0. */
+        private BigDecimal percentOfIncome;
+        /** amount ÷ savingsBase × 100, one decimal; null while the base is 0 or unknown. */
+        private BigDecimal percentOfBase;
+        /** The bucket's rule amount (= buckets[].amount); null for GOALS and while the stable income is unset. */
+        private BigDecimal target;
+        /** max(0, amount − target): set aside beyond the target; null without a target. */
+        private BigDecimal over;
+    }
+
+    /** savingsBase = max(stableIncome, salaryReceived) + bonus. */
+    @Getter @Builder
+    public static class BaseParts {
+        /** This month's salary so far: income in the salary's category tree, bonus left out, dated up to today. */
+        private BigDecimal salaryReceived;
+        private BigDecimal stableIncome;
+        /** True while the stable income is the larger — before payday, or a smaller salary than Settings. */
+        private boolean usesStableIncome;
+        private BigDecimal bonus;
+        /** The salary-tree income behind it, bonus included, by category, largest first. */
+        private List<BaseLine> lines;
+    }
+
+    @Getter @Builder
+    public static class BaseLine {
+        private Long categoryId;
+        private String name;
+        private String nameUz;
+        private BigDecimal amount;
+    }
 
     @Getter @Builder
     public static class Rule {
@@ -76,7 +168,7 @@ public class ProfileResponse {
         private BigDecimal percent;
         /** percent × savingsBase — the month's target, the same figure as the advisor's. */
         private BigDecimal amount;
-        /** percent × leftForSavings — the same bucket in a month without a bonus. */
+        /** percent × max(stableIncome, salary received) — the same bucket in a month without a bonus. */
         private BigDecimal normalMonthAmount;
     }
 
@@ -87,6 +179,7 @@ public class ProfileResponse {
         private String reason;
         private BigDecimal loanPayments;
         private BigDecimal leftForSavings;
+        /** percent × the stable income: next month before its salary and without a bonus. */
         private List<NextBucket> buckets;
     }
 

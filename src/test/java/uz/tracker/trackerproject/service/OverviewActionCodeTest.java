@@ -10,6 +10,7 @@ import uz.tracker.trackerproject.entity.MonthlyPayment;
 import uz.tracker.trackerproject.entity.Settings;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.RecordStatus;
+import uz.tracker.trackerproject.repository.CategoryRepository;
 import uz.tracker.trackerproject.repository.BankLoanRepository;
 import uz.tracker.trackerproject.repository.DebtRepository;
 import uz.tracker.trackerproject.repository.DonationRepository;
@@ -95,7 +96,7 @@ class OverviewActionCodeTest {
         service = new OverviewService(
                 transactionRepository, monthlyPaymentRepository, bankLoanRepository,
                 loanTakenRepository, debtRepository, donationRepository, investmentRepository,
-                ruleRepository, levelConfigRepository, markPaidRepository, settingsService);
+                ruleRepository, levelConfigRepository, markPaidRepository, settingsService, mock(CategoryRepository.class));
     }
 
     private List<ActionItem> actions() {

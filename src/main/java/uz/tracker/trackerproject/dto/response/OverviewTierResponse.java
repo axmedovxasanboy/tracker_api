@@ -42,12 +42,19 @@ public class OverviewTierResponse {
     private BigDecimal leftMoney;
 
     /**
-     * What the bucket percentages are applied to: the left balance, max(0, leftMoney − debtPayments)
-     * — stable income minus subscriptions minus this month's debt charge — PLUS {@link #bonusIncome},
-     * the month's income in bonus-flagged categories. Other income earned this month is display-only
-     * and never moves it.
+     * What the bucket percentages are applied to: max({@link #income}, {@link #salaryReceived}) +
+     * {@link #bonusIncome} — what the owner earns (owner's decision, 2026-09-23). Other income (not in
+     * the salary's category tree) never moves it. It used to be max(0, leftMoney − debtPayments) +
+     * bonus; the level and the percentages are still chosen from {@link #leftMoney} and the debt.
      */
     private BigDecimal allocationBase;
+
+    /**
+     * The salary received this month: regular income in the salary's category tree (the root above
+     * the bonus categories — for the owner Salary, with Avans), bonus categories left out; in the
+     * month under way, dated up to today. Zero before payday, when the stable income stands in.
+     */
+    private BigDecimal salaryReceived;
 
     /**
      * Income received this month in a bonus-flagged category (or one whose parent is flagged). It is
@@ -60,7 +67,8 @@ public class OverviewTierResponse {
     /**
      * This month's debt charge: bank installments + the monthly charge on borrowed money and
      * debts (a loan's repayment plan when it has one, else 34% of its original total, capped at
-     * what is left). Drives the sub-level ratio and is subtracted from the left balance.
+     * what is left). Drives the sub-level ratio and Level 1's tight-vs-comfortable split; since
+     * 2026-09-23 it no longer lowers {@link #allocationBase}.
      */
     private BigDecimal debtPayments;
 

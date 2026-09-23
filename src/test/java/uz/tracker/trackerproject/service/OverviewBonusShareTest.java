@@ -82,7 +82,7 @@ class OverviewBonusShareTest {
         service = new OverviewService(
                 transactionRepository, monthlyPaymentRepository, bankLoanRepository,
                 loanTakenRepository, debtRepository, donationRepository, investmentRepository,
-                ruleRepository, levelConfigRepository, markPaidRepository, settingsService);
+                ruleRepository, levelConfigRepository, markPaidRepository, settingsService, mock(CategoryRepository.class));
     }
 
     /** A bonus of {@code amount} UZS received in {@code month}. */
@@ -141,8 +141,8 @@ class OverviewBonusShareTest {
 
     /**
      * 6M stable income with a 2M bank installment leaves 4M — under the 5M cutoff, so Level 1.2 is
-     * "tight" (5 / 2 / 8). The bonus takes the base to 11M but must not switch it to "comfortable":
-     * the scenario is chosen from stable income, the bonus only scales its percentages.
+     * "tight" (5 / 2 / 8). The bonus takes the base to 13M (6M earned + 7M) but must not switch it
+     * to "comfortable": the scenario is chosen from stable income, the bonus only scales the amounts.
      */
     @Test
     void aBonusDoesNotTurnATightMonthComfortable() {
@@ -161,8 +161,8 @@ class OverviewBonusShareTest {
         OverviewTierResponse t = tier(SEP);
 
         assertThat(t.getAllocation().getScenarioKey()).isEqualTo("1.2.1.tight");
-        assertThat(t.getAllocationBase()).isEqualByComparingTo("11000000");     // 4M left + 7M bonus
-        assertThat(targetOf(t, "DONATION")).isEqualByComparingTo("550000");     // 5% of 11M
+        assertThat(t.getAllocationBase()).isEqualByComparingTo("13000000");     // 6M stable + 7M bonus
+        assertThat(targetOf(t, "DONATION")).isEqualByComparingTo("650000");     // 5% of 13M
     }
 
     /** The bonus belongs to the month it arrived in — earlier and later months are untouched. */

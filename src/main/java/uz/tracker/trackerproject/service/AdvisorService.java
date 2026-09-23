@@ -108,7 +108,8 @@ public class AdvisorService {
         }
 
         // ── The month's plan (bills and set-asides even while the rent is unpaid) ──
-        OverviewTierResponse tier = overviewService.getTierIgnoringSubscriptions(month, Currency.UZS);
+        // The owner's own today: the month's salary counts up to it in the allocation base.
+        OverviewTierResponse tier = overviewService.getTierIgnoringSubscriptions(month, Currency.UZS, date);
         boolean missingIncome = tier.isMissingStableIncome();
         TierAllocation allocation = tier.getAllocation();
 
@@ -157,11 +158,9 @@ public class AdvisorService {
         BigDecimal billsLeft = bills.stream().map(Bill::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
 
         List<SetAside> setAside = new ArrayList<>();
-        BigDecimal pctSum = BigDecimal.ZERO;
         if (allocation != null && allocation.getLines() != null) {
             for (TierAllocation.AllocationLine line : allocation.getLines()) {
                 if (!line.isRecommended()) continue;
-                pctSum = pctSum.add(nz(line.getMinPercent()));
                 BigDecimal remaining = nz(line.getRemainingAmount());
                 if (remaining.signum() <= 0) continue;
                 setAside.add(SetAside.builder().bucket(line.getBucket()).percent(line.getMinPercent())
@@ -182,7 +181,7 @@ public class AdvisorService {
 
         // ── Per day: past this month, up to the salary after next ──
         DailyAdviceService.Result perDay = missingIncome ? null : dailyAdviceService.compute(
-                new DailyAdviceService.Inputs(date, have, expected, coming, setAsideLeft, pctSum,
+                new DailyAdviceService.Inputs(date, have, expected, coming, setAsideLeft,
                         goalMonths.stream().map(GoalMonth::plan).toList()));
         Daily daily = perDay == null ? null : perDay.daily();
 

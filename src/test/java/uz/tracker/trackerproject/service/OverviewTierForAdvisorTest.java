@@ -76,7 +76,7 @@ class OverviewTierForAdvisorTest {
         service = new OverviewService(
                 transactionRepository, monthlyPaymentRepository, bankLoanRepository,
                 loanTakenRepository, debtRepository, donationRepository, investmentRepository,
-                ruleRepository, levelConfigRepository, markPaidRepository, settingsService);
+                ruleRepository, levelConfigRepository, markPaidRepository, settingsService, mock(CategoryRepository.class));
     }
 
     @Test
@@ -94,13 +94,14 @@ class OverviewTierForAdvisorTest {
         assertThat(advisor.isSubscriptionsPending()).isTrue();
         assertThat(advisor.getPendingSubscriptions()).singleElement()
                 .satisfies(p -> assertThat(p.getName()).isEqualTo("Rent"));
-        // Level 1.1 on 10M − 4.2M = 5.8M: 10 / 5 / 15 %.
+        // Level 1.1 (10M − 4.2M = 5.8M left): 10 / 5 / 15 % of what the owner earns — the 10M stable
+        // income, while no salary is recorded yet.
         assertThat(advisor.getAllocation().getLines())
                 .extracting(AllocationLine::getBucket, l -> l.getMinAmount().stripTrailingZeros().toPlainString())
                 .containsExactly(
-                        org.assertj.core.groups.Tuple.tuple("DONATION", "580000"),
-                        org.assertj.core.groups.Tuple.tuple("EMERGENCY", "290000"),
-                        org.assertj.core.groups.Tuple.tuple("INVESTMENTS", "870000"));
+                        org.assertj.core.groups.Tuple.tuple("DONATION", "1000000"),
+                        org.assertj.core.groups.Tuple.tuple("EMERGENCY", "500000"),
+                        org.assertj.core.groups.Tuple.tuple("INVESTMENTS", "1500000"));
         assertThat(advisor.getAllocationBase()).isEqualByComparingTo(service.getTier(SEP, Currency.UZS).getAllocationBase());
     }
 }

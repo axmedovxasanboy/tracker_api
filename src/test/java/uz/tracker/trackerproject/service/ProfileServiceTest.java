@@ -3,11 +3,16 @@ package uz.tracker.trackerproject.service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import uz.tracker.trackerproject.dto.response.ProfileResponse;
+import uz.tracker.trackerproject.dto.response.ProfileResponse.AllocatedLine;
 import uz.tracker.trackerproject.dto.response.ProfileResponse.Bucket;
+import uz.tracker.trackerproject.dto.response.ProfileResponse.IncomeLine;
+import uz.tracker.trackerproject.entity.Category;
 import uz.tracker.trackerproject.entity.LevelAllocationRule;
 import uz.tracker.trackerproject.entity.MonthlyPayment;
 import uz.tracker.trackerproject.entity.Settings;
 import uz.tracker.trackerproject.enums.Currency;
+import uz.tracker.trackerproject.enums.TransactionSubType;
+import uz.tracker.trackerproject.enums.TransactionType;
 import uz.tracker.trackerproject.repository.*;
 
 import java.math.BigDecimal;
@@ -36,6 +41,7 @@ class ProfileServiceTest {
     private LevelAllocationRuleRepository ruleRepository;
     private OverviewService overview;
     private ProfileService service;
+    private TransactionLedger ledger;
 
     @BeforeEach
     void setUp() {
@@ -50,11 +56,13 @@ class ProfileServiceTest {
         bills = new ArrayList<>();
         when(monthlyPaymentRepository.findAll()).thenReturn(bills);
 
-        overview = new OverviewService(mock(TransactionRepository.class), monthlyPaymentRepository,
+        TransactionRepository transactionRepository = mock(TransactionRepository.class);
+        ledger = new TransactionLedger(transactionRepository);
+        overview = new OverviewService(transactionRepository, monthlyPaymentRepository,
                 mock(BankLoanRepository.class), mock(LoanTakenRepository.class), mock(DebtRepository.class),
                 mock(DonationRepository.class), mock(InvestmentRepository.class), ruleRepository,
-                mock(LevelConfigRepository.class), mock(MarkPaidRepository.class), settingsService);
-        service = new ProfileService(overview);
+                mock(LevelConfigRepository.class), mock(MarkPaidRepository.class), settingsService, mock(CategoryRepository.class));
+        service = new ProfileService(overview, transactionRepository);
     }
 
     private void income(String amount) {
@@ -82,6 +90,117 @@ class ProfileServiceTest {
         assertThat(p.getRule()).isNull();
         assertThat(p.getBuckets()).isEmpty();
         assertThat(p.getNextMonth()).isNull();
+    }
+
+    /** Income and what was set aside are facts, so they show before a stable income is set — without targets. */
+    @Test
+    void withoutAStableIncomeTheMonthsMoneyStillShowsWithoutTargets() {
+        Category salary = category(1L, "Salary", null);
+        ledger.income(LocalDate.of(2026, 9, 7), "7000000", salary);
+        ledger.add(LocalDate.of(2026, 9, 10), TransactionType.EXPENSE, TransactionSubType.EMERGENCY_CONTRIBUTION, "200000");
+
+        ProfileResponse p = service.profile(SEP_23, "owner");
+
+        assertThat(p.getIncomeThisMonth().getTotal()).isEqualByComparingTo("7000000");
+        assertThat(p.getAllocatedThisMonth().getLines())
+                .extracting(AllocatedLine::getBucket, a -> a.getAmount().toPlainString(), AllocatedLine::getTarget)
+                .containsExactly(tuple("DONATION", "0", null), tuple("EMERGENCY", "200000", null),
+                        tuple("INVESTMENTS", "0", null));
+    }
+
+    private static Category category(Long id, String name, Category parent) {
+        Category c = TransactionLedger.category(name, false, parent);
+        c.setId(id);
+        return c;
+    }
+
+    /**
+     * Earned money only, by the category it was recorded in, dated today or earlier: the salary's
+     * two payments are one line and its advance another; borrowed money and a loan paid back are
+     * named beside; a transfer, a check-in's surplus, a payment dated later and a dollar pot are not
+     * income at all.
+     */
+    @Test
+    void incomeIsEarnedMoneyByLeafCategoryDatedByToday() {
+        income("7000000");
+        Category salary = category(1L, "Salary", null);
+        Category avans = category(2L, "Avans", salary);
+        Category freelance = category(3L, "Freelance", null);
+        freelance.setNameUz("Frilans");
+        ledger.income(LocalDate.of(2026, 9, 7), "5000000", salary);
+        ledger.income(LocalDate.of(2026, 9, 20), "1000000", salary);
+        ledger.income(LocalDate.of(2026, 9, 15), "2000000", avans);
+        ledger.income(LocalDate.of(2026, 9, 10), "500000", freelance);
+        ledger.income(LocalDate.of(2026, 9, 12), "50000", null);
+        ledger.add(LocalDate.of(2026, 9, 14), TransactionType.INCOME, TransactionSubType.LOAN_RECEIVED, "1000000");
+        ledger.add(LocalDate.of(2026, 9, 16), TransactionType.INCOME, TransactionSubType.LOAN_RETURNED_TO_ME, "300000");
+        ledger.add(LocalDate.of(2026, 9, 15), TransactionType.INCOME, TransactionSubType.TRANSFER_IN, "400000")
+                .setTransferPairId(99L);
+        ledger.add(LocalDate.of(2026, 9, 22), TransactionType.INCOME, TransactionSubType.EVERYDAY_SPENDING, "120000");
+        ledger.income(LocalDate.of(2026, 9, 28), "800000", salary);                    // dated after today
+        ledger.income(LocalDate.of(2026, 9, 18), "100", salary).setCurrency(Currency.USD); // a dollar pot
+
+        ProfileResponse.IncomeThisMonth in = service.profile(SEP_23, "owner").getIncomeThisMonth();
+
+        assertThat(in.getLines())
+                .extracting(IncomeLine::getCategoryId, IncomeLine::getName, IncomeLine::getNameUz,
+                        l -> l.getAmount().toPlainString())
+                .containsExactly(
+                        tuple(1L, "Salary", null, "6000000"),
+                        tuple(2L, "Avans", null, "2000000"),
+                        tuple(3L, "Freelance", "Frilans", "500000"),
+                        tuple(null, "Uncategorized", null, "50000"));
+        assertThat(in.getTotal()).isEqualByComparingTo("8550000");
+        assertThat(in.getExcludedBorrowed()).isEqualByComparingTo("1000000");
+        assertThat(in.getExcludedReturned()).isEqualByComparingTo("300000");
+    }
+
+    /**
+     * What was set aside, as a share of the income: each bucket against its rule amount, then the
+     * savings goals — by today (the goal payment dated the 28th is not in yet).
+     */
+    @Test
+    void setAsideIsEachBucketThenTheGoalsAsAShareOfTheIncome() {
+        income("7000000");
+        ledger.income(LocalDate.of(2026, 9, 7), "7000000", category(1L, "Salary", null));
+        ledger.add(LocalDate.of(2026, 9, 12), TransactionType.EXPENSE, TransactionSubType.EMERGENCY_CONTRIBUTION, "200000");
+        ledger.add(LocalDate.of(2026, 9, 11), TransactionType.EXPENSE, TransactionSubType.INVESTMENT, "300000")
+                .setAllocationBucket(AllocationBucket.INVESTMENTS);
+        ledger.add(LocalDate.of(2026, 9, 10), TransactionType.EXPENSE, TransactionSubType.INVESTMENT, "400000")
+                .setAllocationBucket(AllocationBucket.SAVINGS);
+        ledger.add(LocalDate.of(2026, 9, 28), TransactionType.EXPENSE, TransactionSubType.INVESTMENT, "100000")
+                .setAllocationBucket(AllocationBucket.SAVINGS);
+
+        ProfileResponse.AllocatedThisMonth set = service.profile(SEP_23, "owner").getAllocatedThisMonth();
+
+        // Level 1 with no debt: 10 / 5 / 15 % of 7M.
+        assertThat(set.getLines())
+                .extracting(AllocatedLine::getBucket, a -> a.getAmount().toPlainString(),
+                        a -> a.getPercentOfIncome().toPlainString(),
+                        a -> a.getTarget() == null ? null : a.getTarget().stripTrailingZeros().toPlainString())
+                .containsExactly(
+                        tuple("DONATION", "0", "0.0", "700000"),
+                        tuple("EMERGENCY", "200000", "2.9", "350000"),
+                        tuple("INVESTMENTS", "300000", "4.3", "1050000"),
+                        tuple("GOALS", "400000", "5.7", null));
+        assertThat(set.getTotal()).isEqualByComparingTo("900000");
+        assertThat(set.getPercentOfIncome()).isEqualByComparingTo("12.9");
+    }
+
+    @Test
+    void withNoIncomeYetThereAreNoPercentages() {
+        income("7000000");
+        ledger.add(LocalDate.of(2026, 9, 12), TransactionType.EXPENSE, TransactionSubType.EMERGENCY_CONTRIBUTION, "200000");
+
+        ProfileResponse p = service.profile(SEP_23, "owner");
+
+        assertThat(p.getIncomeThisMonth().getTotal()).isEqualByComparingTo("0");
+        assertThat(p.getIncomeThisMonth().getLines()).isEmpty();
+        assertThat(p.getAllocatedThisMonth().getTotal()).isEqualByComparingTo("200000");
+        assertThat(p.getAllocatedThisMonth().getPercentOfIncome()).isNull();
+        assertThat(p.getAllocatedThisMonth().getLines()).allSatisfy(a -> assertThat(a.getPercentOfIncome()).isNull());
+        assertThat(p.getAllocatedThisMonth().getLines()).extracting(AllocatedLine::getBucket)
+                .containsExactly("DONATION", "EMERGENCY", "INVESTMENTS");   // no goal money: no GOALS line
     }
 
     /** 25M left after bills is Level 2; with no debt its sub-level is 2.1 and the owner's rule for it applies. */
@@ -154,7 +273,7 @@ class ProfileServiceTest {
 
     /**
      * Before allocation tracking starts the Plan asks for nothing, but the configuration is already
-     * known: the profile shows it (Level 1 with no debt: 10 / 5 / 15 % of 10M − 4.2M rent).
+     * known: the profile shows it (Level 1 with no debt: 10 / 5 / 15 % of the 10M stable income).
      */
     @Test
     void theRuleIsShownEvenBeforeTrackingStarts() {
@@ -176,6 +295,6 @@ class ProfileServiceTest {
         assertThat(p.getLeftAfterBills()).isEqualByComparingTo("5800000");
         assertThat(p.getBuckets())
                 .extracting(b -> b.getPercent().toPlainString(), b -> b.getAmount().stripTrailingZeros().toPlainString())
-                .containsExactly(tuple("10", "580000"), tuple("5", "290000"), tuple("15", "870000"));
+                .containsExactly(tuple("10", "1000000"), tuple("5", "500000"), tuple("15", "1500000"));
     }
 }

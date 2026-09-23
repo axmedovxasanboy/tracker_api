@@ -17,6 +17,7 @@ import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.RecordStatus;
 import uz.tracker.trackerproject.enums.TransactionSubType;
 import uz.tracker.trackerproject.enums.TransactionType;
+import uz.tracker.trackerproject.repository.CategoryRepository;
 import uz.tracker.trackerproject.repository.BankLoanRepository;
 import uz.tracker.trackerproject.repository.DebtRepository;
 import uz.tracker.trackerproject.repository.DonationRepository;
@@ -96,20 +97,19 @@ class DailyAdviceServiceTest {
         OverviewService overview = new OverviewService(transactionRepository, monthlyPaymentRepository,
                 bankLoanRepository, loanTakenRepository, debtRepository, mock(DonationRepository.class),
                 mock(InvestmentRepository.class), mock(LevelAllocationRuleRepository.class),
-                mock(LevelConfigRepository.class), markPaidRepository, settingsService);
+                mock(LevelConfigRepository.class), markPaidRepository, settingsService, mock(CategoryRepository.class));
         service = new DailyAdviceService(overview, settingsService, transactionRepository,
                 monthlyPaymentRepository, bankLoanRepository, loanTakenRepository, debtRepository);
     }
 
     private Daily daily(LocalDate today, String have, String salaryComing) {
-        return compute(today, have, salaryComing, "0", "0").daily();
+        return compute(today, have, salaryComing, "0").daily();
     }
 
     private DailyAdviceService.Result compute(LocalDate today, String have, String salaryComing,
-                                              String setAsideLeft, String pctSum) {
+                                              String setAsideLeft) {
         return service.compute(new DailyAdviceService.Inputs(today, new BigDecimal(have),
-                new BigDecimal("7000000"), new BigDecimal(salaryComing), new BigDecimal(setAsideLeft),
-                new BigDecimal(pctSum)));
+                new BigDecimal("7000000"), new BigDecimal(salaryComing), new BigDecimal(setAsideLeft)));
     }
 
     /** The whole salary on the 7th: the main payday is the 7th. */
@@ -309,7 +309,7 @@ class DailyAdviceServiceTest {
         ledger.income(LocalDate.of(2026, 9, 15), "2000000", SALARY);
 
         Daily d = service.compute(new DailyAdviceService.Inputs(SEP_23, new BigDecimal("3000000"),
-                new BigDecimal("8000000"), new BigDecimal("1000000"), BigDecimal.ZERO, BigDecimal.ZERO)).daily();
+                new BigDecimal("8000000"), new BigDecimal("1000000"), BigDecimal.ZERO)).daily();
 
         assertThat(d.getIncomes()).extracting(IncomePart::getDate)
                 .containsExactly(LocalDate.of(2026, 10, 7), LocalDate.of(2026, 10, 15));
@@ -384,33 +384,36 @@ class DailyAdviceServiceTest {
         salaryOnThe7th();
         ledger.expense(LocalDate.of(2026, 9, 10), "2300000");   // 23 days × 100,000
 
-        DailyAdviceService.Result r = compute(SEP_23, "20000000", "0", "0", "0");
+        DailyAdviceService.Result r = compute(SEP_23, "20000000", "0", "0");
 
         Daily d = r.daily();
         assertThat(d.getPaceDaily()).isEqualByComparingTo("100000");
         assertThat(d.getRunsOutOn()).isNull();
         assertThat(d.getShortBy()).isNull();
-        // 20M + 7M on 7 October, spread over the 45 days to 6 November = 600,000 a day (the eve of
-        // payday allows more: 20M over 14 days).
+        // 20M + 7M on 7 October − October's 30% set aside out of it (Level 1, no debt: 2.1M), spread
+        // over the 45 days to 6 November = 553,333 a day (the eve of payday allows more).
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("600000");
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("553000");
         assertThat(r.surplus()).isEqualByComparingTo("18600000");
     }
 
     /**
-     * 3M in hand, the 2M rent on 5 October and the salary on the 7th, spending 100,000 a day: by the
-     * 6th only 1M − 1.4M is left — nothing is spare, however much the 7th brings in.
+     * 3M in hand, the 2M rent on 5 October and a 10M salary on the 7th, spending 100,000 a day. By
+     * the horizon's end 1.5M would be left over — but on the 6th only 1M − 1.4M is: nothing is spare.
      */
     @Test
     void aDipBeforePaydayIsWhatMakesMoneyNotSpare() {
-        salaryOnThe7th();
+        settings.setMonthlyStableIncome(new BigDecimal("10000000"));
+        ledger.income(LocalDate.of(2026, 9, 7), "10000000", SALARY);
         bill(1, "Rent", "2000000", 5);
         ledger.billPaid(LocalDate.of(2026, 9, 5), "2000000", 1);
         ledger.expense(LocalDate.of(2026, 9, 10), "2300000");   // 100,000 a day
 
-        DailyAdviceService.Result r = compute(SEP_23, "3000000", "0", "0", "0");
+        DailyAdviceService.Result r = service.compute(new DailyAdviceService.Inputs(SEP_23,
+                new BigDecimal("3000000"), new BigDecimal("10000000"), BigDecimal.ZERO, BigDecimal.ZERO));
 
-        // 3M − 2M on the 5th − 14 days × 100,000 on the 6th
+        // At the end: 3M + 10M − 3M (October's 30%) − 2 × 2M rent − 45 × 100,000 = 1.5M.
+        // On the 6th: 3M − 2M − 14 × 100,000 = −400,000 — the surplus.
         assertThat(r.surplus()).isEqualByComparingTo("-400000");
         assertThat(r.daily().getRunsOutOn()).isEqualTo(LocalDate.of(2026, 10, 5));
     }
@@ -484,9 +487,9 @@ class DailyAdviceServiceTest {
     }
 
     /**
-     * The salary is in, so September's 884,000 is set aside today; October's 15% of (7M − 5.3M
-     * bills) = 255,000 on 7 October, out of the salary that funds it. November's falls on
-     * 7 November with its salary — both past the horizon (6 November).
+     * The salary is in, so September's 884,000 is set aside today; October's rule (Level 1 with no
+     * debt: 10 / 5 / 15 %) of its projected 7M salary = 2,100,000 on 7 October, out of the salary
+     * that funds it. November's falls on 7 November with its salary — both past the horizon.
      */
     @Test
     void savingsAreReservedTodayAndOnEachLaterMainPaydayAtTheLevelsPercentages() {
@@ -496,17 +499,17 @@ class DailyAdviceServiceTest {
         ledger.billPaid(LocalDate.of(2026, 9, 8), "4200000", 1);
         ledger.billPaid(LocalDate.of(2026, 9, 9), "1100000", 2);
 
-        Daily d = compute(SEP_23, "20000000", "0", "884000", "15").daily();
+        Daily d = compute(SEP_23, "20000000", "0", "884000").daily();
 
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("1139000");
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2984000");
         assertThat(d.getBreakdown().getComingIn()).isEqualByComparingTo("7000000");
         assertThat(d.getBreakdown().getGoingOut()).isEqualByComparingTo("5300000");
-        // 20M + 7M − 5.3M − 1.139M
-        assertThat(d.getBreakdown().getNet()).isEqualByComparingTo("20561000");
+        // 20M + 7M − 5.3M − 2.984M
+        assertThat(d.getBreakdown().getNet()).isEqualByComparingTo("18716000");
         assertThat(d.getBreakdown().getDays()).isEqualTo(45);
-        // 20,561,000 ÷ 45 = 456,911 → 456,000
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("456000");
+        // 18,716,000 ÷ 45 = 415,911 → 415,000
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("415000");
     }
 
     /** A legacy debt with no payment-start month always counts (the Plan's rule), asked on the 1st. */
@@ -534,7 +537,7 @@ class DailyAdviceServiceTest {
     private DailyAdviceService.Result withGoal(LocalDate today, String have, String salaryComing,
                                                DailyAdviceService.Goal goal) {
         return service.compute(new DailyAdviceService.Inputs(today, new BigDecimal(have),
-                new BigDecimal("7000000"), new BigDecimal(salaryComing), BigDecimal.ZERO, BigDecimal.ZERO,
+                new BigDecimal("7000000"), new BigDecimal(salaryComing), BigDecimal.ZERO,
                 List.of(goal)));
     }
 
@@ -565,7 +568,8 @@ class DailyAdviceServiceTest {
 
     /**
      * 23 September, the salary in: this month's 700,000 today, then the full 1M on 7 October — but
-     * never more in all than is missing to reach the target.
+     * never more in all than is missing to reach the target. (October's buckets, 30% of the 7M,
+     * are set aside on the 7th as well: 2,100,000.)
      */
     @Test
     void laterMonthsGetTheFullPaymentOnTheirPaydayCappedAtTheTarget() {
@@ -573,12 +577,12 @@ class DailyAdviceServiceTest {
 
         Daily open = withGoal(SEP_23, "5000000", "0", car("300000", null)).daily();
         assertThat(open.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(open.getBreakdown().getSavings()).isEqualByComparingTo("1700000");
+        assertThat(open.getBreakdown().getSavings()).isEqualByComparingTo("3800000");     // 0.7M + 1M + 2.1M
 
         Daily capped = withGoal(SEP_23, "5000000", "0", car("300000", "1000000")).daily();
-        assertThat(capped.getBreakdown().getSavings()).isEqualByComparingTo("1000000");  // 700,000 + 300,000
-        // 5M − 0.7M + 7M − 0.3M over 45 days
-        assertThat(capped.getSafePerDay()).isEqualByComparingTo("244000");
+        assertThat(capped.getBreakdown().getSavings()).isEqualByComparingTo("3100000");   // 0.7M + 0.3M + 2.1M
+        // 5M − 0.7M + 7M − 0.3M − 2.1M over 45 days
+        assertThat(capped.getSafePerDay()).isEqualByComparingTo("197000");
     }
 
     /** A contribution recorded for the 28th is set aside on the 28th — and not again today. */
@@ -590,8 +594,8 @@ class DailyAdviceServiceTest {
 
         Daily d = withGoal(SEP_23, "5000000", "0", car("0", null)).daily();
 
-        // 600,000 today + 400,000 on the 28th + 1M on 7 October
+        // 600,000 today + 400,000 on the 28th + 1M on 7 October (+ October's buckets, 2.1M)
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2000000");
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("4100000");
     }
 }

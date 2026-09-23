@@ -7,6 +7,7 @@ import uz.tracker.trackerproject.entity.Investment;
 import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.TransactionSubType;
+import uz.tracker.trackerproject.repository.CategoryRepository;
 import uz.tracker.trackerproject.repository.BankLoanRepository;
 import uz.tracker.trackerproject.repository.DebtRepository;
 import uz.tracker.trackerproject.repository.DonationRepository;
@@ -67,7 +68,7 @@ class ClosedMonthBucketStabilityTest {
                 mock(LevelAllocationRuleRepository.class),
                 mock(LevelConfigRepository.class),
                 mock(MarkPaidRepository.class),
-                mock(SettingsService.class));
+                mock(SettingsService.class), mock(CategoryRepository.class));
         when(donationRepository.findByDonationDateBetweenOrderByDonationDateDesc(any(), any()))
                 .thenReturn(List.of());
         when(transactionRepository.sumBySubTypeCurrencyDateRange(any(), any(), any(), any()))

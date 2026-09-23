@@ -13,6 +13,7 @@ import uz.tracker.trackerproject.dto.response.TierAllocation;
 import uz.tracker.trackerproject.dto.response.TierAllocation.ActionItem;
 import uz.tracker.trackerproject.dto.response.TierAllocation.AllocationLine;
 import uz.tracker.trackerproject.entity.BankLoan;
+import uz.tracker.trackerproject.entity.Category;
 import uz.tracker.trackerproject.entity.Debt;
 import uz.tracker.trackerproject.entity.Donation;
 import uz.tracker.trackerproject.entity.Investment;
@@ -23,9 +24,11 @@ import uz.tracker.trackerproject.entity.LoanTaken;
 import uz.tracker.trackerproject.entity.MarkPaid;
 import uz.tracker.trackerproject.entity.MonthlyPayment;
 import uz.tracker.trackerproject.entity.Settings;
+import uz.tracker.trackerproject.enums.CategoryType;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.TransactionType;
 import uz.tracker.trackerproject.repository.BankLoanRepository;
+import uz.tracker.trackerproject.repository.CategoryRepository;
 import uz.tracker.trackerproject.repository.DebtRepository;
 import uz.tracker.trackerproject.repository.DonationRepository;
 import uz.tracker.trackerproject.repository.InvestmentRepository;
@@ -51,6 +54,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
@@ -88,6 +92,7 @@ public class OverviewService {
     private final LevelConfigRepository levelConfigRepository;
     private final MarkPaidRepository markPaidRepository;
     private final SettingsService settingsService;
+    private final CategoryRepository categoryRepository;
 
     @Transactional(readOnly = true)
     public OverviewIncomeResponse getIncome(YearMonth month, Currency displayCurrency) {
@@ -129,7 +134,9 @@ public class OverviewService {
      */
     @Transactional(readOnly = true)
     public OverviewTierResponse getTier(YearMonth month, Currency displayCurrency) {
-        return tier(month, displayCurrency, true, true);
+        // No day comes with a month: the month under way counts the salary received up to the
+        // server's today (see salaryReceivedUzs).
+        return tier(month, displayCurrency, true, true, LocalDate.now());
     }
 
     /**
@@ -140,7 +147,14 @@ public class OverviewService {
      */
     @Transactional(readOnly = true)
     public OverviewTierResponse getTierIgnoringSubscriptions(YearMonth month, Currency displayCurrency) {
-        return tier(month, displayCurrency, false, true);
+        return tier(month, displayCurrency, false, true, LocalDate.now());
+    }
+
+    /** The same, counting the salary received up to {@code asOf} — the owner's own today. */
+    @Transactional(readOnly = true)
+    public OverviewTierResponse getTierIgnoringSubscriptions(YearMonth month, Currency displayCurrency,
+                                                             LocalDate asOf) {
+        return tier(month, displayCurrency, false, true, asOf);
     }
 
     /**
@@ -150,12 +164,16 @@ public class OverviewService {
      * started it is exactly {@link #getTierIgnoringSubscriptions}, so the two quote the same amounts.
      */
     @Transactional(readOnly = true)
-    public OverviewTierResponse getTierForProfile(YearMonth month) {
-        return tier(month, Currency.UZS, false, false);
+    public OverviewTierResponse getTierForProfile(YearMonth month, LocalDate asOf) {
+        return tier(month, Currency.UZS, false, false, asOf);
     }
 
+    /**
+     * @param asOf the day the salary is counted up to in a month still under way (see
+     *             {@link #salaryReceivedUzs}); a month already over counts all of its own
+     */
     private OverviewTierResponse tier(YearMonth month, Currency displayCurrency, boolean subscriptionsGate,
-                                      boolean trackingGate) {
+                                      boolean trackingGate, LocalDate asOf) {
         Settings s = settingsService.getOrCreate();
         boolean missingIncome = s.getMonthlyStableIncome() == null
                 || s.getMonthlyStableIncome().signum() <= 0;
@@ -185,14 +203,14 @@ public class OverviewService {
         String subLevel = computeSubLevel(level, debtPaymentsUzs, debtRatio);
         String levelLabel = computeLevelLabel(level, subLevel, missingIncome);
 
-        // Allocation base = the "left balance" — stable income minus mandatory subscriptions, minus
-        // this month's debt charge (bank installment + 34% debt), clamped at zero — PLUS the income
-        // received this month in bonus-flagged categories, so a bonus raises every bucket's target by
-        // that bucket's share of it. The bonus moves nothing else: the level, the sub-level and the
-        // tight-vs-comfortable split stay on the stable-income anchor. (Display-only from 2026-06-08
-        // until the owner asked for the share back on 2026-09-17.)
+        // Allocation base = what the owner earns: max(stable income, the salary actually received this
+        // month) + the bonus received (owner's decision, 2026-09-23 — see allocationBaseUzs). It used to
+        // be the "left balance", stable − subscriptions − debt charge + bonus. Only the amount the
+        // percentages multiply changed: the level, the sub-level, the tight-vs-comfortable split and
+        // the percentages themselves stay on the stable-income anchor.
         BigDecimal bonusUzs = sumBonusIncomeUzs(month);
-        BigDecimal allocBaseUzs = clampZero(leftMoneyUzs.subtract(debtPaymentsUzs)).add(bonusUzs);
+        BigDecimal salaryUzs = salaryReceivedUzs(month, asOf, salaryTree());
+        BigDecimal allocBaseUzs = allocationBaseUzs(incomeUzs, salaryUzs, bonusUzs);
 
         // Paid-this-month per bucket (display currency), including "already paid" bucket marks.
         // The marks are also carried on their own so each line can say how much of its "paid"
@@ -245,6 +263,7 @@ public class OverviewService {
                 .leftMoney(leftMoneyUzs)
                 .allocationBase(allocBaseUzs)
                 .bonusIncome(bonusUzs)
+                .salaryReceived(salaryUzs)
                 .debtPayments(debtPaymentsUzs)
                 .debtBreakdown(OverviewTierResponse.DebtBreakdown.builder()
                         .bankLoans(bankUzs)
@@ -323,9 +342,8 @@ public class OverviewService {
     /**
      * Running allocation ledger from the configured start month to {@code selected}. For each
      * month we recompute the tier scenario (so the % can vary as bank loans, loans and debts start
-     * or end), apply it to that month's base — the "left balance" (stable income minus
-     * subscriptions minus that month's debt charge) plus that month's bonus income, the same base
-     * the tier card uses — to get the recommended amount, and net it against what was actually
+     * or end), apply it to that month's base — max(stable income, that month's salary received) plus that
+     * month's bonus income, the same base the tier card uses — to get the recommended amount, and net it against what was actually
      * paid. The balance is cumulative — overpaying a later month clears an earlier shortfall. The
      * level stays anchored to stable income.
      */
@@ -399,6 +417,8 @@ public class OverviewService {
         List<MonthBreakdown> months = new ArrayList<>();
         YearMonth earliestDue = null, latestDue = null;
 
+        LocalDate today = LocalDate.now();
+        Set<Long> salaryTree = salaryTree();
         for (YearMonth m = start; !m.isAfter(selected); m = m.plusMonths(1)) {
             // Each month is charged the bank loans that ran in IT. Asking about today instead
             // charged July for a loan taken in September, and dropped a paid-off loan from the
@@ -413,9 +433,8 @@ public class OverviewService {
             BigDecimal bonusUzs = sumBonusIncomeUzs(m);
 
             // Bucket %s by scenario (Level 1 from stable income; Levels 2–6 from configured rules).
-            // The base the %s multiply is the "left balance" = leftMoney − debtPayments (stable
-            // income minus mandatory subscriptions, minus the monthly debt charge) plus that
-            // month's bonus income — consistent with the tier card.
+            // The base the %s multiply is the tier card's: max(stable income, that month's salary
+            // received) + that month's bonus.
             String[] pct;
             if (level != null && level == 1) {
                 pct = computeLevel1Plan(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
@@ -423,8 +442,7 @@ public class OverviewService {
             } else {
                 pct = bucketPercents(level, subLevel);
             }
-            BigDecimal allocBaseUzs = clampZero(stableUzs.subtract(mandatoryUzs).subtract(debtPaymentsUzs))
-                    .add(bonusUzs);
+            BigDecimal allocBaseUzs = allocationBaseUzs(stableUzs, salaryReceivedUzs(m, today, salaryTree), bonusUzs);
 
             // Marks read once per month and folded in here, so the loop never queries them twice.
             BucketPaid marksUzs = computeBucketMarks(m);
@@ -489,7 +507,7 @@ public class OverviewService {
             }
         }
 
-        // Effective-% denominator is the selected month's allocation base (its left balance).
+        // Effective-% denominator is the selected month's allocation base.
         BigDecimal incomeBaseSelUzs = allocBaseSelectedUzs;
         List<BucketLedger> buckets = new ArrayList<>(LEDGER_WIDTH);
         BigDecimal totalDueNowUzs = BigDecimal.ZERO;
@@ -558,6 +576,106 @@ public class OverviewService {
             if (!Boolean.TRUE.equals(m.getActive())) continue;
             if (m.getAmount() == null || m.getCurrency() == null) continue;
             total = total.add(m.getAmount());
+        }
+        return total;
+    }
+
+    // ── The allocation base: what the percentages multiply ─────────────────────
+
+    /**
+     * The allocation base, decided by the owner on 2026-09-23: the savings percentages apply to what
+     * they earn — salary, advance and bonus — rather than to what is left after bills and debt.
+     *
+     * <pre>allocationBase = max(stable income, salary received) + bonus received</pre>
+     *
+     * The stable income is the floor, so before payday the targets are already the month's, and a
+     * salary above Settings raises them. (Until then: max(0, stable − subscriptions − debt charge)
+     * + bonus.)
+     */
+    static BigDecimal allocationBaseUzs(BigDecimal stableUzs, BigDecimal salaryReceivedUzs, BigDecimal bonusUzs) {
+        return nullToZero(stableUzs).max(nullToZero(salaryReceivedUzs)).add(nullToZero(bonusUzs));
+    }
+
+    /**
+     * The categories the salary is recorded in — the SALARY TREE — as ids; null when there is none,
+     * and then every non-bonus regular income counts as salary.
+     * <ol>
+     *   <li>The root category above the bonus-flagged categories, with all its descendants — the
+     *       owner's Salary → {Salary, Avans, Bonus}. A bonus category that is a root itself names no
+     *       tree.</li>
+     *   <li>Else the root income category named "Salary" (any case), with its descendants.</li>
+     *   <li>Else no tree.</li>
+     * </ol>
+     * "Other income", freelance or an investment's return are therefore not salary unless they are
+     * recorded under the salary's root.
+     */
+    Set<Long> salaryTree() {
+        List<Category> all = categoryRepository.findAll();
+        if (all == null) return null;
+        Set<Long> roots = new java.util.HashSet<>();
+        for (Category c : all) {
+            if (Boolean.TRUE.equals(c.getBonusIncome()) && c.getParent() != null) {
+                Long root = rootOf(c).getId();
+                if (root != null) roots.add(root);
+            }
+        }
+        if (roots.isEmpty()) {
+            for (Category c : all) {
+                if (c.getParent() == null && c.getType() != CategoryType.EXPENSE && c.getId() != null
+                        && c.getName() != null && "salary".equalsIgnoreCase(c.getName().trim())) {
+                    roots.add(c.getId());
+                }
+            }
+        }
+        if (roots.isEmpty()) return null;
+        Set<Long> tree = new java.util.HashSet<>();
+        for (Category c : all) {
+            if (c.getId() != null && roots.contains(rootOf(c).getId())) tree.add(c.getId());
+        }
+        return tree;
+    }
+
+    /** The top of a category's tree (a guard against a parent cycle in bad data). */
+    private static Category rootOf(Category c) {
+        Category at = c;
+        for (int depth = 0; at.getParent() != null && depth < 32; depth++) at = at.getParent();
+        return at;
+    }
+
+    /** A bonus category: flagged itself, or under a flagged parent — the test the bonus sum's query applies. */
+    static boolean isBonusCategory(Category c) {
+        return c != null && (Boolean.TRUE.equals(c.getBonusIncome())
+                || (c.getParent() != null && Boolean.TRUE.equals(c.getParent().getBonusIncome())));
+    }
+
+    /** Whether a row of income is salary: in the salary tree (any category without one), never a bonus. */
+    static boolean isSalaryCategory(Category c, Set<Long> tree) {
+        if (isBonusCategory(c)) return false;
+        return tree == null || (c != null && c.getId() != null && tree.contains(c.getId()));
+    }
+
+    /**
+     * The salary received in {@code month}: REGULAR_INCOME in the salary tree, bonus categories left
+     * out, UZS only (transfers, loans and loans paid back are other sub-types). A month under way
+     * counts only rows dated up to {@code asOf} — money recorded for a later day has not come yet;
+     * a month that has not begun counts nothing.
+     */
+    BigDecimal salaryReceivedUzs(YearMonth month, LocalDate asOf) {
+        return salaryReceivedUzs(month, asOf, salaryTree());
+    }
+
+    private BigDecimal salaryReceivedUzs(YearMonth month, LocalDate asOf, Set<Long> tree) {
+        LocalDate start = month.atDay(1);
+        LocalDate end = asOf == null || asOf.isAfter(month.atEndOfMonth()) ? month.atEndOfMonth() : asOf;
+        if (end.isBefore(start)) return BigDecimal.ZERO;
+        BigDecimal total = BigDecimal.ZERO;
+        List<Transaction> rows = transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+                uz.tracker.trackerproject.enums.TransactionSubType.REGULAR_INCOME, start, end);
+        if (rows == null) return total;
+        for (Transaction t : rows) {
+            if (t.getType() != TransactionType.INCOME || t.getAmount() == null) continue;
+            if (t.getCurrency() != null && t.getCurrency() != Currency.UZS) continue;
+            if (isSalaryCategory(t.getCategory(), tree)) total = total.add(t.getAmount());
         }
         return total;
     }
@@ -937,7 +1055,7 @@ public class OverviewService {
      * went on quoting the frozen month-close snapshot. Ticking "emergency fund" did the same in
      * reverse (it clears savingsGoal). See {@link AllocationBucket}.
      */
-    private boolean isSavingsGoalTx(Transaction t) {
+    boolean isSavingsGoalTx(Transaction t) {
         if (t.getAllocationBucket() != null) {
             return AllocationBucket.SAVINGS.equals(t.getAllocationBucket());
         }
@@ -1233,12 +1351,12 @@ public class OverviewService {
         }
 
         // Level-1 engine: the SCENARIO (case A/B/C, tight-vs-comfortable split, bucket %s) is
-        // selected from stable income per the owner's spec (decisions D1–D4), and the base the
-        // percentages multiply is the "left balance" = stable income − subscriptions − this
-        // month's debt charge (the owner's 2026-06-08 decision; for Level 1 it equals the plan's
-        // calc base) plus this month's bonus income, which never takes part in choosing the
-        // scenario. loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is
-        // debt (34%).
+        // selected from stable income per the owner's spec (decisions D1–D4); the plan's calc base
+        // (stable − subscriptions − the debt charge) still decides tight vs comfortable. The base
+        // the percentages multiply is allocBaseUzs — max(stable income, the salary received this
+        // month) + this month's bonus (the owner's 2026-09-23 decision; before it, the calc base +
+        // bonus) — and neither the salary nor the bonus takes part in choosing the scenario.
+        // loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is debt (34%).
         Level1Plan plan = computeLevel1Plan(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
                 debt34Uzs, debtRatio, minLeftoverUzs(1));
         String[] p = plan.pct();
@@ -1401,7 +1519,7 @@ public class OverviewService {
             actions.add(payBank(monthPaid, bankMonthlyUzs));
         }
         // The same asks as Level 1. This used to charge 34% of what REMAINS on each loan and debt,
-        // while the sub-level and the left balance above were already built from 34% of the
+        // while the sub-level above was already built from 34% of the
         // ORIGINAL total — so one page quoted two different monthly debt charges.
         addDebtActions(actions, nullToZero(debt34Uzs), plannedSetAsideUzs, displayCurrency, monthPaid);
         if (rule.getNote() != null && !rule.getNote().isBlank()) {

@@ -9,6 +9,7 @@ import uz.tracker.trackerproject.dto.response.AdvisorResponse.IncomePart;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.ShortBy;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Upcoming;
 import uz.tracker.trackerproject.dto.response.OverviewTierResponse.PendingSubscription;
+import uz.tracker.trackerproject.dto.response.TierAllocation;
 import uz.tracker.trackerproject.entity.BankLoan;
 import uz.tracker.trackerproject.entity.Category;
 import uz.tracker.trackerproject.entity.Debt;
@@ -76,8 +77,8 @@ import java.util.TreeMap;
  *       due today.</li>
  *   <li><b>Savings, out of the salary that funds them.</b> This month's unset-aside buckets on this
  *       month's main payday while its main part is still to come, else today; on each later
- *       month's main payday (the 1st without a history), the current level's percentages of that
- *       month's projected salary after bills and debt.</li>
+ *       month's main payday (the 1st without a history), that month's rule's percentages of its
+ *       projected salary — the allocation base of a month without a bonus.</li>
  *   <li><b>Per day.</b> safePerDay = min over the horizon of net(c) ÷ days to c, rounded down to
  *       1,000; zero, with {@code shortBy}, when some day's net is below zero.</li>
  *   <li><b>Pace.</b> Everyday spending over the last 30 days (never before tracking started) —
@@ -131,15 +132,14 @@ public class DailyAdviceService {
      * @param stableIncome the monthly stable income from Settings (positive)
      * @param salaryComing what this month's salary still owes: stable income − non-bonus regular income this month
      * @param setAsideLeft this month's set-asides not yet made
-     * @param pctSum       the current level's bucket percentages added up (Level 1 tight: 5 + 2 + 8)
      * @param goals        savings goals with a monthly payment, still short of their target
      */
     public record Inputs(LocalDate today, BigDecimal have, BigDecimal stableIncome, BigDecimal salaryComing,
-                         BigDecimal setAsideLeft, BigDecimal pctSum, List<Goal> goals) {
+                         BigDecimal setAsideLeft, List<Goal> goals) {
         /** With no savings goal to set aside for. */
         public Inputs(LocalDate today, BigDecimal have, BigDecimal stableIncome, BigDecimal salaryComing,
-                      BigDecimal setAsideLeft, BigDecimal pctSum) {
-            this(today, have, stableIncome, salaryComing, setAsideLeft, pctSum, List.of());
+                      BigDecimal setAsideLeft) {
+            this(today, have, stableIncome, salaryComing, setAsideLeft, List.of());
         }
     }
 
@@ -182,7 +182,7 @@ public class DailyAdviceService {
         LocalDate listTo = today.plusDays(UPCOMING_DAYS);
         LocalDate computeTo = YearMonth.from(until).atEndOfMonth();
         if (listTo.isAfter(computeTo)) computeTo = listTo;
-        Obligations due = obligations(today, computeTo, later);
+        List<Upcoming> due = obligations(today, computeTo, later);
 
         // ── 4. Savings, set aside out of the salary that funds them ──
         NavigableMap<LocalDate, BigDecimal> savings = new TreeMap<>();
@@ -202,18 +202,14 @@ public class DailyAdviceService {
             laterPaydays.add(on);
             laterMonths.add(ym);
         }
-        BigDecimal pct = nz(in.pctSum());
-        if (pct.signum() > 0) {
-            BigDecimal monthlySalary = pattern == null ? stable : pattern.total();
-            for (int i = 0; i < laterMonths.size(); i++) {
-                YearMonth ym = laterMonths.get(i);
-                // The Plan's base without a bonus: salary − bills − (bank installments + debt asks).
-                BigDecimal base = clampZero(monthlySalary.subtract(due.billsMonthly())
-                        .subtract(due.bankByMonth().getOrDefault(ym, BigDecimal.ZERO))
-                        .subtract(due.asksByMonth().getOrDefault(ym, BigDecimal.ZERO)));
-                BigDecimal estimate = base.multiply(pct).divide(HUNDRED, 0, RoundingMode.HALF_UP);
-                if (estimate.signum() > 0) savings.merge(laterPaydays.get(i), estimate, BigDecimal::add);
-            }
+        // A later month's set-asides: that month's own rule (a repayment plan starting can change
+        // it) applied to its projected salary — the allocation base of a month without a bonus,
+        // the projected parts never counting more than Settings says.
+        BigDecimal monthlySalary = pattern == null ? stable : pattern.total();
+        for (int i = 0; i < laterMonths.size(); i++) {
+            BigDecimal pct = percentagesOf(laterMonths.get(i), today);
+            BigDecimal estimate = monthlySalary.multiply(pct).divide(HUNDRED, 0, RoundingMode.HALF_UP);
+            if (estimate.signum() > 0) savings.merge(laterPaydays.get(i), estimate, BigDecimal::add);
         }
         // Savings goals' monthly payments, on the same days: what this month still owes (less what
         // is recorded for a later day — the walk takes that on its own day), then the full payment
@@ -233,7 +229,7 @@ public class DailyAdviceService {
         // ── 5–7. Walk the days ──
         NavigableMap<LocalDate, BigDecimal> change = new TreeMap<>();
         for (IncomePart i : incomes) change.merge(i.getDate(), i.getAmount(), BigDecimal::add);
-        for (Upcoming u : due.items()) {
+        for (Upcoming u : due) {
             if (!u.getDate().isAfter(until)) change.merge(u.getDate(), u.getAmount().negate(), BigDecimal::add);
         }
         savings.forEach((d, a) -> change.merge(d, a.negate(), BigDecimal::add));
@@ -274,13 +270,13 @@ public class DailyAdviceService {
                 .safePerDay(safePerDay)
                 .until(until)
                 .tightestOn(tightestOn)
-                .breakdown(breakdown(have, incomes, due.items(), savings, today, tightestOn))
+                .breakdown(breakdown(have, incomes, due, savings, today, tightestOn))
                 .paceDaily(paceDaily)
                 .paceFrom(pace == null ? null : pace.from())
                 .paceTo(pace == null ? null : pace.to())
                 .runsOutOn(runsOutOn)
                 .shortBy(isShort ? ShortBy.builder().date(minNetOn).amount(minNet.negate()).build() : null)
-                .upcoming(due.items().stream().filter(u -> !u.getDate().isAfter(listTo)).toList())
+                .upcoming(due.stream().filter(u -> !u.getDate().isAfter(listTo)).toList())
                 .incomes(incomes)
                 .build();
         return new Result(daily, minHeadroom);
@@ -464,27 +460,19 @@ public class DailyAdviceService {
 
     // ── Must-pays ─────────────────────────────────────────────────────────────
 
-    /**
-     * Every must-pay from today to {@code to}, date ascending; plus, for the savings estimate,
-     * the monthly bills and each later month's bank installments and loan/debt asks.
-     */
-    record Obligations(List<Upcoming> items, BigDecimal billsMonthly,
-                       Map<YearMonth, BigDecimal> bankByMonth, Map<YearMonth, BigDecimal> asksByMonth) {}
-
-    private Obligations obligations(LocalDate today, LocalDate to, List<Transaction> later) {
+    /** Every must-pay from today to {@code to}, date ascending. */
+    private List<Upcoming> obligations(LocalDate today, LocalDate to, List<Transaction> later) {
         List<Upcoming> items = new ArrayList<>();
         // Paid by today: a payment dated later this month is still in the wallets.
         OverviewService.MonthPaid paid = overviewService.computeMonthPaid(YearMonth.from(today), Currency.UZS, today);
-        BigDecimal billsMonthly = bills(today, to, later, items);
-        Map<YearMonth, BigDecimal> bankByMonth = new HashMap<>();
-        bankLoans(today, to, paid == null ? BigDecimal.ZERO : nz(paid.bankInstallments()), later, items, bankByMonth);
-        Map<YearMonth, BigDecimal> asksByMonth = new HashMap<>();
-        loansAndDebts(today, to, paid, later, items, asksByMonth);
+        bills(today, to, later, items);
+        bankLoans(today, to, paid == null ? BigDecimal.ZERO : nz(paid.bankInstallments()), later, items);
+        loansAndDebts(today, to, paid, later, items);
         items.sort(Comparator.comparing(Upcoming::getDate)
                 .thenComparing(Upcoming::getAmount, Comparator.reverseOrder())
                 .thenComparing(Upcoming::getKind)
                 .thenComparing(Upcoming::getRefId, Comparator.nullsLast(Comparator.naturalOrder())));
-        return new Obligations(items, billsMonthly, bankByMonth, asksByMonth);
+        return items;
     }
 
     /** One of this month's asks while it is being placed: what it still owes, and when that falls due. */
@@ -533,9 +521,9 @@ public class DailyAdviceService {
      * Active bills on their due day. This month's owes what the advisor's bill list says is left —
      * payments linked to the bill and "already paid" marks — counting payments made by today; one
      * recorded for a later day is paid on that day, and the rest falls due today once its day has
-     * passed. Returns Σ of the monthly amounts.
+     * passed.
      */
-    private BigDecimal bills(LocalDate today, LocalDate to, List<Transaction> later, List<Upcoming> out) {
+    private void bills(LocalDate today, LocalDate to, List<Transaction> later, List<Upcoming> out) {
         YearMonth current = YearMonth.from(today);
         Map<Long, BigDecimal> leftThisMonth = new HashMap<>();
         List<PendingSubscription> pending = overviewService.pendingSubscriptions(current, today);
@@ -544,12 +532,10 @@ public class DailyAdviceService {
                 leftThisMonth.put(p.getId(), clampZero(nz(p.getAmount()).subtract(nz(p.getPaid()))));
             }
         }
-        BigDecimal monthly = BigDecimal.ZERO;
         for (MonthlyPayment m : monthlyPaymentRepository.findAll()) {
             if (!Boolean.TRUE.equals(m.getActive()) || !isUzs(m.getCurrency())) continue;
             BigDecimal amount = nz(m.getAmount());
             if (amount.signum() <= 0) continue;
-            monthly = monthly.add(amount);
             int day = m.getDueDay() == null ? 1 : m.getDueDay();
             Ask ask = new Ask(BILL, m.getId(), m.getName(), dayIn(current, day),
                     leftThisMonth.getOrDefault(m.getId(), BigDecimal.ZERO), false);
@@ -562,7 +548,6 @@ public class DailyAdviceService {
                 if (!date.isAfter(to)) out.add(item(date, BILL, m.getId(), m.getName(), amount, false));
             }
         }
-        return monthly;
     }
 
     /**
@@ -573,7 +558,7 @@ public class DailyAdviceService {
      * loan: it is paid on its day against the first one still owing.
      */
     private void bankLoans(LocalDate today, LocalDate to, BigDecimal paidByToday, List<Transaction> later,
-                           List<Upcoming> out, Map<YearMonth, BigDecimal> bankByMonth) {
+                           List<Upcoming> out) {
         YearMonth current = YearMonth.from(today);
         List<BankLoan> loans = bankLoanRepository.findAll().stream()
                 .filter(b -> b.getMonthlyPayment() != null && b.getMonthlyPayment().signum() > 0
@@ -599,7 +584,6 @@ public class DailyAdviceService {
         for (YearMonth ym = current.plusMonths(1); !ym.atDay(1).isAfter(to); ym = ym.plusMonths(1)) {
             for (BankLoan b : loans) {
                 if (!OverviewService.bankLoanRunsIn(b, ym)) continue;
-                bankByMonth.merge(ym, b.getMonthlyPayment(), BigDecimal::add);
                 LocalDate date = installmentDate(b, ym);
                 if (!date.isAfter(to)) out.add(item(date, BANK, b.getId(), bankName(b), b.getMonthlyPayment(), false));
             }
@@ -625,7 +609,7 @@ public class DailyAdviceService {
      * names neither goes to the first 34% ask still owing).
      */
     private void loansAndDebts(LocalDate today, LocalDate to, OverviewService.MonthPaid paid,
-                               List<Transaction> later, List<Upcoming> out, Map<YearMonth, BigDecimal> asksByMonth) {
+                               List<Transaction> later, List<Upcoming> out) {
         YearMonth current = YearMonth.from(today);
         List<Owed> owed = new ArrayList<>();
         for (LoanTaken l : loanTakenRepository.findAll()) {
@@ -697,7 +681,6 @@ public class DailyAdviceService {
                 BigDecimal ask = o.ask(remaining);
                 if (ask.signum() <= 0) break;
                 out.add(item(date, o.kind(), o.id(), o.name(), ask, false));
-                asksByMonth.merge(ym, ask, BigDecimal::add);
                 remaining = remaining.subtract(ask);
             }
         }
@@ -759,6 +742,17 @@ public class DailyAdviceService {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** The bucket percentages {@code month}'s rule asks for, added up — the Plan's own choice for it. */
+    private BigDecimal percentagesOf(YearMonth month, LocalDate today) {
+        TierAllocation allocation = overviewService.getTierIgnoringSubscriptions(month, Currency.UZS, today)
+                .getAllocation();
+        if (allocation == null || allocation.getLines() == null) return BigDecimal.ZERO;
+        return allocation.getLines().stream()
+                .filter(l -> l.isRecommended() && l.getMinPercent() != null)
+                .map(TierAllocation.AllocationLine::getMinPercent)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
 
     /**
      * Sets {@code amount} aside on {@code on}, but no more than {@code cap} allows (null: no cap).

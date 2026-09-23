@@ -138,7 +138,7 @@ class MonthEnvelopeReconciliationTest {
         overviewService = new OverviewService(
                 transactionRepository, monthlyPaymentRepository, bankLoanRepository,
                 loanTakenRepository, debtRepository, donationRepository, investmentRepository,
-                ruleRepository, levelConfigRepository, markPaidRepository, settingsService);
+                ruleRepository, levelConfigRepository, markPaidRepository, settingsService, mock(CategoryRepository.class));
 
         // One card, no cash pot — the smallest wallet set that still exercises the close.
         Card card = new Card();
