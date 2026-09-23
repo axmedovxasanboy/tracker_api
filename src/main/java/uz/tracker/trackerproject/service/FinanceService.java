@@ -398,7 +398,7 @@ public class FinanceService {
         if (Boolean.TRUE.equals(req.getUpdateAmountForFuture())) {
             m.setAmount(amount);
         }
-        m.setNextDueDate(advanceDueDate(m, req.getPaymentDate()));
+        m.setNextDueDate(nextDueAfterPayment(m.getDueDay(), req.getPaymentDate()));
         monthlyPaymentRepository.save(m);
 
         return enrichMonthlyPayment(m);
@@ -422,16 +422,21 @@ public class FinanceService {
         return card;
     }
 
-    /** Move nextDueDate one month forward, anchored to the subscription's dueDay. */
-    private java.time.LocalDate advanceDueDate(MonthlyPayment m, java.time.LocalDate paymentDate) {
-        java.time.LocalDate base = m.getNextDueDate() != null ? m.getNextDueDate() : paymentDate;
-        java.time.LocalDate next = base.plusMonths(1);
-        Integer dueDay = m.getDueDay();
-        if (dueDay != null) {
-            int safeDay = Math.min(dueDay, next.lengthOfMonth());
-            next = next.withDayOfMonth(safeDay);
-        }
-        return next;
+    /**
+     * The bill's next due date after a payment: its due day in the month AFTER the one the payment
+     * is dated in — the month every other screen (the Plan, the advisor) counts that payment toward.
+     *
+     * <p>This used to add one month to the STORED date on every payment. So each extra payment in
+     * the same month — the rest of a partial payment, or a payment re-recorded after deleting the
+     * first — pushed it a further month out, and so did a date already set a month ahead when the
+     * bill was created (the web form had a "Next due date" field until 2026-09-07). A bill paid
+     * once in September then read "next due in November". Anchoring on the payment's own month
+     * makes it idempotent.
+     */
+    static LocalDate nextDueAfterPayment(Integer dueDay, LocalDate paymentDate) {
+        YearMonth next = YearMonth.from(paymentDate).plusMonths(1);
+        int day = dueDay == null ? paymentDate.getDayOfMonth() : dueDay;
+        return next.atDay(Math.min(Math.max(day, 1), next.lengthOfMonth()));
     }
 
     private MonthlyPaymentResponse enrichMonthlyPayment(MonthlyPayment m) {
@@ -625,6 +630,11 @@ public class FinanceService {
         // nothing shows as spent now) and it won't count toward this month's Investments bucket.
         if (Boolean.TRUE.equals(req.getOpeningBalance())) {
             return InvestmentResponse.from(saveInvestment(new Investment(), req, null));
+        }
+        // Only an opening balance may start at 0 (a goal with nothing saved yet): a funded one
+        // moves money out of a wallet, and a 0 transaction would be noise in every list.
+        if (req.getInvestedAmount().signum() <= 0) {
+            throw new IllegalArgumentException("The amount must be more than 0.");
         }
         // Direct creation. Mirror to an EXPENSE Transaction so the investment also shows in the
         // transactions list and in the bucket payment history. Emergency-fund investments book an

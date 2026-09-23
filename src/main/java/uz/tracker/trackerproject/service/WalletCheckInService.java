@@ -37,13 +37,17 @@ import java.util.Set;
  *
  * <h2>The rules</h2>
  * <ul>
+ *   <li>A check-in can be recorded on any day of a month that is not closed, its last days
+ *       included. They used to be refused once the next check-in would fall in next month, on the
+ *       grounds that the month close was at most {@link #INTERVAL_DAYS} days away — but the web app
+ *       no longer offers the close, and its owner was left with no way to reconcile for about five
+ *       days every month. The bot still offers the close; it reconciles the month's last day from
+ *       real balances, so it comes out the same however many check-ins came before it.</li>
  *   <li>A check-in is suggested every {@link #INTERVAL_DAYS} days after the last reconciliation —
- *       a check-in, or the end of the last closed month. It is suggested, not enforced: an owner
- *       who just paid a lot in cash, or mistyped a balance yesterday, should not be locked out of
- *       making the numbers right.</li>
- *   <li>It is NOT offered once the next one would fall in next month. By then the close is at most
- *       {@link #INTERVAL_DAYS} days away, and the close reconciles the same wallets.</li>
- *   <li>It is not offered in a closed month, which is locked.</li>
+ *       a check-in, or the end of the last closed month — and the next suggested day may fall in
+ *       next month. It is suggested, not enforced: an owner who just paid a lot in cash, or
+ *       mistyped a balance yesterday, should not be locked out of making the numbers right.</li>
+ *   <li>It is not allowed in a closed month, which is locked, nor on a day that has not come yet.</li>
  * </ul>
  */
 @Service
@@ -143,7 +147,7 @@ public class WalletCheckInService {
                 .lines(lines)
                 .everydayRecorded(recorded)
                 .everydaySoFar(monthCloseService.everydayRecorded(month.atDay(1), month.atEndOfMonth()))
-                .nextDueOn(nextDueAfter(date))
+                .nextDueOn(date.plusDays(INTERVAL_DAYS))
                 .build();
     }
 
@@ -156,17 +160,12 @@ public class WalletCheckInService {
         YearMonth month = YearMonth.from(date);
         int daysLeft = (int) ChronoUnit.DAYS.between(date, month.atEndOfMonth());
 
+        // A closed month is the only thing that refuses a check-in (MONTH_ENDING is no longer sent).
         String code = null;
         String reason = null;
         if (monthCloseService.isClosed(month)) {
             code = "MONTH_CLOSED";
             reason = "The month " + month + " is closed — its wallets were reconciled at the close.";
-        } else if (!openWindow(date)) {
-            code = "MONTH_ENDING";
-            reason = (daysLeft == 0 ? "This month ends today" : "This month ends in " + daysLeft
-                    + (daysLeft == 1 ? " day" : " days"))
-                    + " — your wallets will be reconciled when you close it, from "
-                    + month.plusMonths(1).atDay(1) + ".";
         }
         boolean allowed = code == null;
 
@@ -176,34 +175,12 @@ public class WalletCheckInService {
         boolean due = allowed && (daysSince == null || daysSince >= INTERVAL_DAYS);
         LocalDate nextDue = null;
         if (allowed) {
-            // Measured against THIS month, not the month of the last reconciliation: closing
-            // August on the 31st makes a check-in due on 5 September, and "is that next month?"
-            // asked of August would wrongly say yes and never suggest one.
+            // Five days after the last reconciliation, even when that is in next month; closing
+            // August on the 31st makes one due on 5 September.
             LocalDate candidate = last == null ? date : last.plusDays(INTERVAL_DAYS);
-            if (candidate.isBefore(date)) candidate = date; // overdue: it is due today
-            nextDue = !YearMonth.from(candidate).isAfter(month) && openWindow(candidate) ? candidate : null;
+            nextDue = candidate.isBefore(date) ? date : candidate; // overdue: it is due today
         }
         return new Rules(allowed, code, reason, daysLeft, last, daysSince, due, nextDue);
-    }
-
-    /**
-     * Whether {@code day} is inside the window a check-in is offered in: the next one, five days
-     * later, would still fall in the same month. Outside it the month close is at most five days
-     * away and reconciles the same wallets, so a check-in would only be redone days later.
-     */
-    static boolean openWindow(LocalDate day) {
-        return !YearMonth.from(day.plusDays(INTERVAL_DAYS)).isAfter(YearMonth.from(day));
-    }
-
-    /**
-     * The day a check-in is next suggested after one on {@code day} — or null when the close comes
-     * first. A suggested day has to be one a check-in can actually happen on: on the 24th of a
-     * 31-day month the 29th is five days on, but nothing can be recorded on the 29th, so the next
-     * reconciliation is the close.
-     */
-    private static LocalDate nextDueAfter(LocalDate day) {
-        LocalDate next = day.plusDays(INTERVAL_DAYS);
-        return openWindow(next) && !YearMonth.from(next).isAfter(YearMonth.from(day)) ? next : null;
     }
 
     /** The later of the last check-in and the last day of the last closed month: both reconcile. */

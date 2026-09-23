@@ -115,29 +115,25 @@ class WalletCheckInServiceTest {
     }
 
     @Test
-    void whenTheNextOneWouldFallInNextMonthTheCloseTakesOver() {
-        // September has 30 days: 26 + 5 = 1 October.
+    void theLastDaysOfAMonthAllowACheckInToo() {
+        // September has 30 days: 26 + 5 = 1 October, which used to refuse it (MONTH_ENDING). The web
+        // app no longer closes months, so a check-in is its only way to reconcile until the 1st.
         WalletCheckInStatusResponse s = service.status(LocalDate.parse("2026-09-26"));
-        assertThat(s.isAllowed()).isFalse();
-        assertThat(s.getBlockedCode()).isEqualTo("MONTH_ENDING");
+        assertThat(s.isAllowed()).isTrue();
+        assertThat(s.getBlockedCode()).isNull();
+        assertThat(s.getBlockedReason()).isNull();
+        assertThat(s.isDue()).isTrue();   // never reconciled
+        assertThat(s.getNextDueOn()).isEqualTo(LocalDate.parse("2026-09-26"));
         assertThat(s.getDaysUntilMonthEnd()).isEqualTo(4);
         assertThat(s.getNextMonthStart()).isEqualTo(LocalDate.parse("2026-10-01"));
-        assertThat(s.getBlockedReason()).contains("ends in 4 days").contains("2026-10-01");
-        assertThat(s.getNextDueOn()).isNull();
     }
 
     @Test
-    void theLastDayItIsStillAllowedIsWhenTodayPlusFiveIsTheMonthsLastDay() {
-        assertThat(service.status(LocalDate.parse("2026-09-25")).isAllowed()).isTrue();
-        assertThat(service.status(LocalDate.parse("2026-09-26")).isAllowed()).isFalse();
-        // February 2027 has 28 days: 23 + 5 = 28 is fine, 24 + 5 = 1 March is not.
-        assertThat(service.status(LocalDate.parse("2027-02-23")).isAllowed()).isTrue();
-        assertThat(service.status(LocalDate.parse("2027-02-24")).isAllowed()).isFalse();
-    }
-
-    @Test
-    void onTheLastDayTheReasonSaysToday() {
-        assertThat(service.status(LocalDate.parse("2026-09-30")).getBlockedReason()).startsWith("This month ends today");
+    void everyDayOfAnOpenMonthIsAllowedTheLastOneIncluded() {
+        for (String day : List.of("2026-09-01", "2026-09-25", "2026-09-26", "2026-09-30",
+                "2027-02-24", "2027-02-28")) {
+            assertThat(service.status(LocalDate.parse(day)).isAllowed()).as(day).isTrue();
+        }
     }
 
     @Test
@@ -245,38 +241,41 @@ class WalletCheckInServiceTest {
     }
 
     @Test
-    void theNextOneIsOnlySuggestedForADayItCouldActuallyHappen() {
-        // August has 31 days, so the 26th is the last day a check-in is offered (26 + 5 = 31).
+    void theNextOneIsFiveDaysOnEvenWhenThatIsNextMonth() {
         WalletCheckInRequest req = new WalletCheckInRequest();
         req.setWallets(List.of());
         req.setDate(LocalDate.parse("2026-08-21"));
         assertThat(service.checkIn(req).getNextDueOn()).isEqualTo(LocalDate.parse("2026-08-26"));
 
-        // From the 22nd the 27th is five days on — but nothing can be recorded on the 27th, so the
-        // next reconciliation is the close, not a date the owner would find refused.
-        req.setDate(LocalDate.parse("2026-08-24"));
-        assertThat(service.checkIn(req).getNextDueOn()).isNull();
+        req.setDate(LocalDate.parse("2026-08-28"));
+        assertThat(service.checkIn(req).getNextDueOn()).isEqualTo(LocalDate.parse("2026-09-02"));
     }
 
     @Test
-    void theStatusNeverSuggestsADayTheWindowHasClosedOn() {
-        lastCheckIn("2026-08-22");
-        WalletCheckInStatusResponse s = service.status(LocalDate.parse("2026-08-24"));
-        assertThat(s.isAllowed()).isTrue();   // 24 + 5 = 29: still inside the window today
+    void theStatusCountsFiveDaysAcrossTheMonthEnd() {
+        lastCheckIn("2026-08-29");
+        WalletCheckInStatusResponse s = service.status(LocalDate.parse("2026-08-31"));
+        assertThat(s.isAllowed()).isTrue();
         assertThat(s.isDue()).isFalse();
-        assertThat(s.getNextDueOn()).isNull(); // the 27th would be outside it
+        assertThat(s.getNextDueOn()).isEqualTo(LocalDate.parse("2026-09-03"));
+
+        assertThat(service.status(LocalDate.parse("2026-09-03")).isDue()).isTrue();
     }
 
     @Test
-    void theServerRefusesWhatTheRulesRefuse() {
+    void aMonthsLastDaysAreRecordedButAClosedMonthIsRefused() {
         WalletCheckInRequest req = new WalletCheckInRequest();
-        req.setDate(LocalDate.parse("2026-08-28")); // 28 + 5 = 2 September
+        req.setDate(LocalDate.parse("2026-08-28")); // 28 + 5 = 2 September: refused before
         req.setWallets(List.of(entry("CARD", 1L, "900000")));
+        assertThat(service.checkIn(req).getEverydayRecorded()).isEqualByComparingTo("100000");
+
+        lastClosed("2026-08-01");
         assertThatThrownBy(() -> service.checkIn(req))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("ends in 3 days");
-        verify(transactionRepository, never()).save(any(Transaction.class));
-        verify(checkInRepository, never()).save(any(WalletCheckIn.class));
+                .hasMessageContaining("is closed");
+        // Only the first check-in booked anything.
+        verify(transactionRepository, times(1)).save(any(Transaction.class));
+        verify(checkInRepository, times(1)).save(any(WalletCheckIn.class));
     }
 
     @Test

@@ -256,10 +256,22 @@ public class OverviewService {
      * Active subscriptions not yet fully paid for {@code month}, measured from real recorded
      * payments (transactions carrying that {@code monthlyPaymentId}, dated within the month).
      * Amounts stay in each subscription's own currency — that's what the Pay modal expects.
+     *
+     * <p>Package-private so {@link DailyAdviceService} asks "is this month's bill paid?" the same
+     * way the Plan and the advisor's bill list do.
      */
-    private List<OverviewTierResponse.PendingSubscription> pendingSubscriptions(YearMonth month) {
+    List<OverviewTierResponse.PendingSubscription> pendingSubscriptions(YearMonth month) {
+        return pendingSubscriptions(month, month.atEndOfMonth());
+    }
+
+    /**
+     * The same, counting only payments dated on or before {@code asOf}: the daily advice weighs
+     * the wallets as of today, and a payment recorded for a later day has not left them yet.
+     * "Already paid" marks always count — they carry a month, not a day, and move no money.
+     */
+    List<OverviewTierResponse.PendingSubscription> pendingSubscriptions(YearMonth month, LocalDate asOf) {
         LocalDate start = month.atDay(1);
-        LocalDate end = month.atEndOfMonth();
+        LocalDate end = asOf.isBefore(month.atEndOfMonth()) ? asOf : month.atEndOfMonth();
         List<OverviewTierResponse.PendingSubscription> pending = new ArrayList<>();
         for (MonthlyPayment m : monthlyPaymentRepository.findAll()) {
             if (!Boolean.TRUE.equals(m.getActive())) continue;
@@ -561,16 +573,22 @@ public class OverviewService {
      * that month's installment.
      */
     private BigDecimal sumBankLoanMonthlyPaymentsUzs(YearMonth month) {
-        LocalDate first = month.atDay(1);
-        LocalDate last = month.atEndOfMonth();
         BigDecimal total = BigDecimal.ZERO;
         for (BankLoan b : bankLoanRepository.findAll()) {
             if (b.getMonthlyPayment() == null || b.getMonthlyPayment().signum() <= 0) continue;
-            if (b.getTakenDate() != null && b.getTakenDate().isAfter(last)) continue;
-            if (b.getEndDate() != null && b.getEndDate().isBefore(first)) continue;
+            if (!bankLoanRunsIn(b, month)) continue;
             total = total.add(b.getMonthlyPayment());
         }
         return total;
+    }
+
+    /**
+     * Whether a bank loan owes an installment in {@code month}: taken on or before its last day,
+     * and not ended before its first. The one test the Plan and the daily advice both use.
+     */
+    static boolean bankLoanRunsIn(BankLoan b, YearMonth month) {
+        if (b.getTakenDate() != null && b.getTakenDate().isAfter(month.atEndOfMonth())) return false;
+        return b.getEndDate() == null || !b.getEndDate().isBefore(month.atDay(1));
     }
 
     /**
@@ -706,7 +724,7 @@ public class OverviewService {
      * month. True when its payment-start month is on or before {@code month}. Legacy rows
      * (null start) always count, preserving prior behaviour.
      */
-    private boolean hasStartedBy(LocalDate paymentStartDate, YearMonth month) {
+    static boolean hasStartedBy(LocalDate paymentStartDate, YearMonth month) {
         if (paymentStartDate == null) return true;
         return !YearMonth.from(paymentStartDate).isAfter(month);
     }
@@ -772,9 +790,18 @@ public class OverviewService {
      */
     record MonthPaid(BigDecimal bankInstallments, BigDecimal ruleRepayments, BigDecimal planRepayments) {}
 
-    private MonthPaid computeMonthPaid(YearMonth month, Currency displayCurrency) {
+    /** Package-private so {@link DailyAdviceService} counts this month's installments the Plan's way. */
+    MonthPaid computeMonthPaid(YearMonth month, Currency displayCurrency) {
+        return computeMonthPaid(month, displayCurrency, month.atEndOfMonth());
+    }
+
+    /**
+     * The same, counting only repayments dated on or before {@code asOf} (see
+     * {@link #pendingSubscriptions(YearMonth, LocalDate)}); the month's marks always count.
+     */
+    MonthPaid computeMonthPaid(YearMonth month, Currency displayCurrency, LocalDate asOf) {
         LocalDate start = month.atDay(1);
-        LocalDate end = month.atEndOfMonth();
+        LocalDate end = asOf.isBefore(month.atEndOfMonth()) ? asOf : month.atEndOfMonth();
         // The set-aside and the 34% pay-down are two separate asks, so a repayment must count toward
         // the one it pays. Both used to read ALL of the month's repayments, which let paying only the
         // larger ask satisfy the smaller one too and unlock the buckets while money was still owed.

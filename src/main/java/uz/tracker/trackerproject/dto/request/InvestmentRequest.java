@@ -20,7 +20,9 @@ public class InvestmentRequest {
     @NotNull
     private InvestmentType type;
 
-    @NotNull @DecimalMin("0.01")
+    /** 0 is allowed only for an {@link #openingBalance} — a savings goal with nothing saved yet.
+        A holding funded from a wallet must be more than 0 (checked in FinanceService). */
+    @NotNull @DecimalMin("0")
     private BigDecimal investedAmount;
 
     @NotNull

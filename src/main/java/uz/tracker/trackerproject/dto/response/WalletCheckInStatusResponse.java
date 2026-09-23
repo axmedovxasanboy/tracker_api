@@ -22,11 +22,8 @@ public class WalletCheckInStatusResponse {
     private boolean allowed;
     /**
      * Why not, when {@link #allowed} is false, as a code a client can translate:
-     * <ul>
-     *   <li>{@code MONTH_ENDING} — the next check-in would already fall in next month, so the
-     *       month close, a few days away, is the reconciliation;</li>
-     *   <li>{@code MONTH_CLOSED} — this month is closed and locked.</li>
-     * </ul>
+     * {@code MONTH_CLOSED} — this month is closed and locked. ({@code MONTH_ENDING}, which refused
+     * a month's last days, is no longer sent: a check-in is allowed on any day of an open month.)
      */
     private String blockedCode;
     /** The same, as an English sentence — the fallback for a client with no translation. */
@@ -45,7 +42,7 @@ public class WalletCheckInStatusResponse {
     private int intervalDays;
     /** True when a check-in is allowed and at least {@link #intervalDays} days have passed. */
     private boolean due;
-    /** When the next check-in is due, or null when the month close will come first. */
+    /** When the next check-in is due — possibly in next month; null only when one is not {@link #allowed}. */
     private LocalDate nextDueOn;
 
     /** Net everyday spending recorded in this month so far — in an open month, the check-ins'. */

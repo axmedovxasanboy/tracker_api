@@ -151,6 +151,13 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
                                                  @Param("start") java.time.LocalDate start,
                                                  @Param("end") java.time.LocalDate end);
 
+    /**
+     * Every transaction dated within a window, whatever its kind. The daily advice reads the last
+     * few weeks with it and decides in code which rows were everyday spending, so the rule lives in
+     * one readable place (see DailyAdviceService.isEverydaySpend) rather than in a query.
+     */
+    List<Transaction> findByTransactionDateBetween(java.time.LocalDate start, java.time.LocalDate end);
+
     /** Transactions of one sub-type within a date window — used for the Stocks bucket history. */
     List<Transaction> findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
             uz.tracker.trackerproject.enums.TransactionSubType subType,

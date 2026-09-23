@@ -82,6 +82,22 @@ public class AdvisorResponse {
     /** What to do next, most urgent first. */
     private List<Suggestion> suggestions;
 
+    // ── Per day (added for the new Home; every field above is unchanged) ─────
+
+    /**
+     * How much can be spent a day without running short, counting the next salaries, bills, loan
+     * payments and savings up to {@link Daily#until} — and how that compares with what is actually
+     * spent. Null while the stable income is unset. See {@code DailyAdviceService}.
+     */
+    private Daily daily;
+
+    /**
+     * Every allocation bucket with a target this month, INCLUDING the ones already met — the same
+     * figures as {@link #setAside}, which lists only what is still to put aside. Empty while the
+     * stable income is unset.
+     */
+    private List<SavingsRow> savingsThisMonth;
+
     @Getter @Builder
     public static class Wallet {
         /** CARD | CASH */
@@ -125,11 +141,106 @@ public class AdvisorResponse {
         private BigDecimal remaining;
     }
 
+    /** One bucket's set-aside this month, met or not. */
+    @Getter @Builder
+    public static class SavingsRow {
+        /** DONATION | EMERGENCY | INVESTMENTS */
+        private String bucket;
+        private BigDecimal percent;
+        private BigDecimal target;
+        private BigDecimal paid;
+        /** max(0, target − paid); zero once the bucket is met. */
+        private BigDecimal remaining;
+    }
+
+    /**
+     * The daily figure and everything behind it. Money is UZS; every date is the owner's local day.
+     *
+     * <p>For each day c from {@link AdvisorResponse#date} to {@link #until}:
+     * net(c) = have + income due by c − must-pays due by c − savings reserved by c, and
+     * {@link #safePerDay} is the smallest net(c) ÷ (days from today to c, inclusive), rounded down
+     * to 1,000 — the most that can be spent every day without any later payment going unmet.
+     */
+    @Getter @Builder
+    public static class Daily {
+        /** Rounded DOWN to 1,000; 0 when {@link #shortBy} is set. */
+        private BigDecimal safePerDay;
+        /** The horizon's last day (inclusive): the day before the second upcoming main payday. */
+        private LocalDate until;
+        /** The day that sets {@link #safePerDay} (earliest on ties); the shortfall day when short. */
+        private LocalDate tightestOn;
+        /** The sum behind {@link #safePerDay}, for the window [today, {@link #tightestOn}]. */
+        private Breakdown breakdown;
+        /** Average everyday spending per day over [{@link #paceFrom}, {@link #paceTo}]; null under 7 days of data. */
+        private BigDecimal paceDaily;
+        private LocalDate paceFrom;
+        private LocalDate paceTo;
+        /** First day the money no longer covers what is due if {@link #paceDaily} is spent every day; null if it lasts. */
+        private LocalDate runsOutOn;
+        /** Set when even spending nothing leaves the must-pays and savings unmet. */
+        private ShortBy shortBy;
+        /** Must-pays dated today … today + 34, overdue ones dated today; date ascending. */
+        private List<Upcoming> upcoming;
+        /** Projected income in [today, {@link #until}]; date ascending. */
+        private List<IncomePart> incomes;
+    }
+
+    /** net = have + comingIn − goingOut − savings, over {@code days} days. */
+    @Getter @Builder
+    public static class Breakdown {
+        private BigDecimal have;
+        private BigDecimal comingIn;
+        private BigDecimal goingOut;
+        private BigDecimal savings;
+        private BigDecimal net;
+        private int days;
+    }
+
+    @Getter @Builder
+    public static class ShortBy {
+        /** The day the money is lowest. */
+        private LocalDate date;
+        /** How much is missing on {@link #date} even with no spending at all. */
+        private BigDecimal amount;
+    }
+
+    /**
+     * One must-pay on one day: either still owed, or a payment the owner already recorded for that
+     * day ({@link #recorded}). Both are money leaving the wallets on {@link #date}; only an owed one
+     * is something to pay.
+     */
+    @Getter @Builder
+    public static class Upcoming {
+        private LocalDate date;
+        /** BILL | BANK | LOAN | DEBT */
+        private String kind;
+        /** The MonthlyPayment / BankLoan / LoanTaken / Debt id. */
+        private Long refId;
+        private String name;
+        private BigDecimal amount;
+        /** True when it was due earlier this month and is still unpaid — it is then dated today. */
+        private boolean overdue;
+        /**
+         * True when this row is a payment the owner ALREADY recorded, dated later this month: it has
+         * not left the wallets yet (they are as of today), so it stays in the list on its own day —
+         * but paying it again would record it twice. False for a due that is still owed.
+         */
+        private boolean recorded;
+    }
+
+    @Getter @Builder
+    public static class IncomePart {
+        private LocalDate date;
+        private String name;
+        private BigDecimal amount;
+    }
+
     /**
      * One piece of advice. {@code code} is a translation key the client renders with
      * {@code params}; {@code text} is the same sentence in English for a client without it.
-     * Amounts are never inside {@code params} — {@link #amount} carries the number and each client
-     * formats it its own way.
+     * Amounts are not inside {@code params} — {@link #amount} carries the number and each client
+     * formats it its own way. The per-day warnings are not suggestions: see {@code Daily.shortBy}
+     * and {@code Daily.runsOutOn}.
      */
     @Getter @Builder
     public static class Suggestion {
@@ -138,13 +249,12 @@ public class AdvisorResponse {
         private String text;
         /**
          * DO — something due now (a bill, a wallet check, a month to close, a set-aside);
-         * IDEA — optional encouragement (start a goal, put spare money to work);
-         * WARN — a heads-up with nothing to tap.
+         * IDEA — optional encouragement (start a goal, put spare money to work).
          */
         private String kind;
         /**
          * What the client's button does: SET_INCOME, PAY_SUBSCRIPTION, PAY_BANK, PAY_DEBT,
-         * CLOSE_MONTH, CHECK_IN, SET_ASIDE, ADD_GOAL — or null for WARN.
+         * CLOSE_MONTH, CHECK_IN, SET_ASIDE, ADD_GOAL.
          */
         private String action;
         /** PAY_SUBSCRIPTION: the subscription id. SET_ASIDE into a goal: the goal's id. */

@@ -2,7 +2,11 @@ package uz.tracker.trackerproject.service;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse;
+import uz.tracker.trackerproject.dto.response.AdvisorResponse.Daily;
+import uz.tracker.trackerproject.dto.response.AdvisorResponse.SavingsRow;
+import uz.tracker.trackerproject.dto.response.AdvisorResponse.ShortBy;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Suggestion;
 import uz.tracker.trackerproject.dto.response.MonthClosePreviewResponse.WalletLine;
 import uz.tracker.trackerproject.dto.response.OverviewTierResponse;
@@ -31,13 +35,16 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * The advisor adds up figures the other services already compute, so these tests hand it those
  * figures directly and pin what it does with them: the four totals, the order of the advice, and
  * when it stays quiet. The owner's own numbers are used where they fit — 8M salary, rent 4.2M,
- * 1Fit 558K, 10/5/15 of a 3.242M left balance.
+ * 1Fit 558K, 10/5/15 of a 3.242M left balance. The per-day walk is handed in the same way (its
+ * own arithmetic is DailyAdviceServiceTest's; the two together, AdvisorOwnerSeptemberTest's).
  */
 class AdvisorServiceTest {
 
@@ -51,6 +58,7 @@ class AdvisorServiceTest {
     private LoanGivenRepository loanGivenRepository;
     private InvestmentRepository investmentRepository;
     private EmergencyRepository emergencyRepository;
+    private DailyAdviceService dailyAdviceService;
     private AdvisorService service;
 
     // What each test changes before calling advise().
@@ -73,8 +81,10 @@ class AdvisorServiceTest {
         loanGivenRepository = mock(LoanGivenRepository.class);
         investmentRepository = mock(InvestmentRepository.class);
         emergencyRepository = mock(EmergencyRepository.class);
+        dailyAdviceService = mock(DailyAdviceService.class);
         service = new AdvisorService(overviewService, walletCheckInService, monthCloseService,
-                transactionRepository, loanGivenRepository, investmentRepository, emergencyRepository);
+                transactionRepository, loanGivenRepository, investmentRepository, emergencyRepository,
+                dailyAdviceService);
 
         wallets = new ArrayList<>(List.of(card("MinCon", "1500000"), cash("510000")));
         daysSinceChecked = 2;
@@ -165,6 +175,25 @@ class AdvisorServiceTest {
         i.setTargetAmount(target == null ? null : new BigDecimal(target));
         i.setInvestedAmount(new BigDecimal(invested));
         return i;
+    }
+
+    /** A per-day answer that lasts: 300,000 a day is safe to 6 November, the owner spends 100,000. */
+    private static Daily.DailyBuilder daily() {
+        return Daily.builder()
+                .safePerDay(new BigDecimal("300000"))
+                .until(LocalDate.of(2026, 11, 6))
+                .tightestOn(LocalDate.of(2026, 11, 6))
+                .paceDaily(new BigDecimal("100000"))
+                .paceFrom(LocalDate.of(2026, 9, 1))
+                .paceTo(SEP_18)
+                .upcoming(List.of())
+                .incomes(List.of());
+    }
+
+    /** The walk leaves {@code surplus} at its horizon at the owner's own pace. */
+    private void spare(String surplus) {
+        when(dailyAdviceService.compute(any())).thenReturn(
+                new DailyAdviceService.Result(daily().build(), new BigDecimal(surplus)));
     }
 
     private static List<String> codes(AdvisorResponse r) {
@@ -289,17 +318,77 @@ class AdvisorServiceTest {
         assertThat(codes(advise(SEP_18))).doesNotContain("advisor.s.startEmergency");
     }
 
+    /**
+     * Rent unpaid, the salary in and already spent. The month-only {@code free} still says so; the
+     * per-day shortfall travels in {@code daily} (the web's Home shows it), never as a suggestion.
+     */
     @Test
-    void aMonthThatAsksForMoreThanThereIsSaysSo() {
+    void aMonthThatAsksForMoreThanThereIsSaysSoInDaily() {
         wallets.clear();
         pending.add(sub(1, "Kvartira Arenda", "4200000", "0"));
         salaryRecorded("8000000"); // in, and already spent: nothing left in the wallets
+        when(dailyAdviceService.compute(any())).thenReturn(new DailyAdviceService.Result(
+                daily().safePerDay(BigDecimal.ZERO).runsOutOn(SEP_18)
+                        .shortBy(ShortBy.builder().date(SEP_18).amount(new BigDecimal("5172600")).build())
+                        .build(),
+                new BigDecimal("-9000000")));
 
         AdvisorResponse r = advise(SEP_18);
 
         assertThat(r.getFree()).isEqualByComparingTo("-5172600");
-        assertThat(find(r, "advisor.s.short").getAmount()).isEqualByComparingTo("5172600");
-        assertThat(find(r, "advisor.s.short").getKind()).isEqualTo("WARN");
+        assertThat(r.getDaily().getShortBy().getAmount()).isEqualByComparingTo("5172600");
+        assertThat(codes(r)).doesNotContain("advisor.s.short", "advisor.s.paceWarning");
+        assertThat(codes(r).getFirst()).isEqualTo("advisor.s.paySubscription");
+    }
+
+    @Test
+    void runningOutAtTheOwnersOwnPaceTravelsInDailyNotAsASuggestion() {
+        pending.add(sub(1, "Kvartira Arenda", "4200000", "0"));
+        Daily daily = daily().safePerDay(new BigDecimal("188000")).paceDaily(new BigDecimal("526000"))
+                .runsOutOn(LocalDate.of(2026, 10, 10)).build();
+        when(dailyAdviceService.compute(any())).thenReturn(new DailyAdviceService.Result(daily, new BigDecimal("-15207000")));
+
+        AdvisorResponse r = advise(SEP_18);
+
+        assertThat(r.getDaily()).isSameAs(daily);
+        assertThat(codes(r)).doesNotContain("advisor.s.paceWarning", "advisor.s.short");
+        assertThat(codes(r).getFirst()).isEqualTo("advisor.s.paySubscription");
+    }
+
+    @Test
+    void theWalkIsHandedTheMonthsOwnFigures() {
+        salaryRecorded("5000000");
+
+        advise(SEP_18);
+
+        ArgumentCaptor<DailyAdviceService.Inputs> in = ArgumentCaptor.forClass(DailyAdviceService.Inputs.class);
+        verify(dailyAdviceService).compute(in.capture());
+        assertThat(in.getValue().today()).isEqualTo(SEP_18);
+        assertThat(in.getValue().have()).isEqualByComparingTo("2010000");
+        assertThat(in.getValue().stableIncome()).isEqualByComparingTo("8000000");
+        assertThat(in.getValue().salaryComing()).isEqualByComparingTo("3000000");
+        assertThat(in.getValue().setAsideLeft()).isEqualByComparingTo("972600");
+        assertThat(in.getValue().pctSum()).isEqualByComparingTo("30");
+    }
+
+    /** Every bucket with a target, met or not; one that is not asked for at this tier is left out. */
+    @Test
+    void savingsThisMonthListsEveryBucketWithATargetIncludingTheOnesMet() {
+        lines = new ArrayList<>(List.of(
+                line("DONATION", "5", "884000", "0"),
+                AllocationLine.builder().bucket("EMERGENCY").label("EMERGENCY").recommended(false)
+                        .paidAmount(BigDecimal.ZERO).build(),
+                line("INVESTMENTS", "5", "884000", "884000")));
+
+        AdvisorResponse r = advise(SEP_18);
+
+        assertThat(r.getSetAside()).extracting(AdvisorResponse.SetAside::getBucket).containsExactly("DONATION");
+        assertThat(r.getSavingsThisMonth()).extracting(SavingsRow::getBucket).containsExactly("DONATION", "INVESTMENTS");
+        SavingsRow met = r.getSavingsThisMonth().get(1);
+        assertThat(met.getPercent()).isEqualByComparingTo("5");
+        assertThat(met.getTarget()).isEqualByComparingTo("884000");
+        assertThat(met.getPaid()).isEqualByComparingTo("884000");
+        assertThat(met.getRemaining()).isEqualByComparingTo("0");
     }
 
     // ── Wallet checks and closing a month ─────────────────────────────────────
@@ -356,15 +445,15 @@ class AdvisorServiceTest {
     }
 
     /**
-     * Sep 20, 11 days left. The plan leaves 3,242,000 × 70% = 2,269,400 a month to live on, so
-     * 832,113.33 for the rest of September. 3,000,000 free − that = 2,167,886.67 spare → half,
-     * rounded down to 10,000 → 1,080,000 towards the goal.
+     * The walk leaves 2,170,000 at its horizon at the owner's own pace → half, rounded down to
+     * 10,000 → 1,080,000 towards the first goal still short of its target.
      */
     @Test
     void spareMoneyIsHalfSuggestedForTheFirstGoalStillShortOfItsTarget() {
         wallets = new ArrayList<>(List.of(card("MinCon", "3000000")));
         salaryRecorded("8000000");
         everythingPaid();
+        spare("2170000");
         when(investmentRepository.findAll()).thenReturn(List.of(
                 goal(4, "Phone", "10000000", "10000000"),   // reached
                 goal(5, "Home", "200000000", "5000000")));
@@ -375,6 +464,8 @@ class AdvisorServiceTest {
         assertThat(extra.getRefId()).isEqualTo(5L);
         assertThat(extra.getBucket()).isEqualTo("SAVINGS");
         assertThat(extra.getParams()).isEqualTo(Map.of("name", "Home"));
+        assertThat(extra.getText()).isEqualTo("You have about 2 170 000 UZS more than you need until 6 November"
+                + " at your usual pace. Put 1 080 000 UZS towards Home?");
     }
 
     @Test
@@ -382,18 +473,22 @@ class AdvisorServiceTest {
         wallets = new ArrayList<>(List.of(card("MinCon", "3000000")));
         salaryRecorded("8000000");
         everythingPaid();
+        spare("3000000");
         LocalDate sep20 = LocalDate.of(2026, 9, 20);
 
         assertThat(find(advise(sep20), "advisor.s.extraToEmergency").getBucket()).isEqualTo("EMERGENCY");
 
         when(emergencyRepository.count()).thenReturn(3L);
-        assertThat(find(advise(sep20), "advisor.s.extraToInvestments").getBucket()).isEqualTo("INVESTMENTS");
+        Suggestion invest = find(advise(sep20), "advisor.s.extraToInvestments");
+        assertThat(invest.getBucket()).isEqualTo("INVESTMENTS");
+        assertThat(invest.getAmount()).isEqualByComparingTo("1500000");
     }
 
     @Test
-    void noSpareMoneyAdviceBeforeTheSalaryOnAStaleBalanceOrWithBillsUnpaid() {
+    void noSpareMoneyAdviceBeforeTheSalaryOnAStaleBalanceWithBillsUnpaidOrWithoutAPace() {
         wallets = new ArrayList<>(List.of(card("MinCon", "9000000")));
         everythingPaid();
+        spare("5000000");
         LocalDate sep20 = LocalDate.of(2026, 9, 20);
         String[] extras = {"advisor.s.extraToGoal", "advisor.s.extraToEmergency", "advisor.s.extraToInvestments"};
 
@@ -413,6 +508,57 @@ class AdvisorServiceTest {
 
         pending.clear();
         assertThat(codes(advise(sep20))).containsAnyOf(extras);
+
+        // No pace yet (under a week of data): nothing is known about what living costs.
+        when(dailyAdviceService.compute(any())).thenReturn(new DailyAdviceService.Result(
+                daily().paceDaily(null).paceFrom(null).paceTo(null).build(), null));
+        assertThat(codes(advise(sep20))).doesNotContain(extras);
+
+        spare("199999"); // below EXTRA_MIN
+        assertThat(codes(advise(sep20))).doesNotContain(extras);
+    }
+
+    /**
+     * The owner's 23 September in miniature: 9M in the wallets, the month paid for, the salary in,
+     * the wallets just checked — the month-only view calls most of it free. At the owner's pace the
+     * money does not even last to the next rent, so nothing is offered for investing.
+     */
+    @Test
+    void aBigBalanceIsNotSpareWhenTheOwnersPaceWillSpendIt() {
+        wallets = new ArrayList<>(List.of(card("MinCon", "9000000")));
+        salaryRecorded("8000000");
+        everythingPaid();
+        when(emergencyRepository.count()).thenReturn(1L);
+        spare("-15207000");
+
+        AdvisorResponse r = advise(LocalDate.of(2026, 9, 23));
+
+        assertThat(r.getFree()).isEqualByComparingTo("9000000");
+        assertThat(codes(r)).doesNotContain("advisor.s.extraToInvestments", "advisor.s.extraToEmergency",
+                "advisor.s.extraToGoal");
+    }
+
+    /** While the walk says short or running out, nothing is spare — whatever the surplus reads. */
+    @Test
+    void noSpareMoneyIdeaWhileTheWalkSaysShortOrRunningOut() {
+        wallets = new ArrayList<>(List.of(card("MinCon", "9000000")));
+        salaryRecorded("8000000");
+        everythingPaid();
+        when(emergencyRepository.count()).thenReturn(1L);
+        LocalDate sep20 = LocalDate.of(2026, 9, 20);
+        String[] extras = {"advisor.s.extraToGoal", "advisor.s.extraToEmergency", "advisor.s.extraToInvestments"};
+
+        when(dailyAdviceService.compute(any())).thenReturn(new DailyAdviceService.Result(
+                daily().runsOutOn(LocalDate.of(2026, 10, 10)).build(), new BigDecimal("5000000")));
+        assertThat(codes(advise(sep20))).doesNotContain(extras);
+
+        when(dailyAdviceService.compute(any())).thenReturn(new DailyAdviceService.Result(
+                daily().shortBy(ShortBy.builder().date(LocalDate.of(2026, 10, 5)).amount(new BigDecimal("1500000"))
+                        .build()).build(), new BigDecimal("5000000")));
+        assertThat(codes(advise(sep20))).doesNotContain(extras);
+
+        spare("5000000");   // neither: offered
+        assertThat(codes(advise(sep20))).contains("advisor.s.extraToInvestments");
     }
 
     // ── No income yet ─────────────────────────────────────────────────────────
@@ -426,8 +572,11 @@ class AdvisorServiceTest {
 
         assertThat(r.isMissingStableIncome()).isTrue();
         assertThat(r.getFree()).isNull();
+        assertThat(r.getDaily()).isNull();
+        assertThat(r.getSavingsThisMonth()).isEmpty();
         assertThat(r.getHave()).isEqualByComparingTo("2010000");
         assertThat(codes(r)).first().isEqualTo("advisor.s.setIncome");
         assertThat(codes(r)).doesNotContain("advisor.s.addGoal");
+        verify(dailyAdviceService, never()).compute(any());
     }
 }

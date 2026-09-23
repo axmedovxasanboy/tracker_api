@@ -5,7 +5,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Bill;
+import uz.tracker.trackerproject.dto.response.AdvisorResponse.Daily;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Owed;
+import uz.tracker.trackerproject.dto.response.AdvisorResponse.SavingsRow;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.SetAside;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Suggestion;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Wallet;
@@ -27,9 +29,11 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -41,6 +45,13 @@ import java.util.Map;
  * what I need to set aside, and nudge me towards goals — with as little input as possible. So the
  * salary is never asked about (it is recorded when it arrives and simply stops being "coming"),
  * and the only thing the advisor ever asks the owner to type is a wallet's real balance.
+ *
+ * <p>The month-scoped figures ({@code free} and the lists before it) are kept as they were for the
+ * clients that read them. The per-day answer that looks past the month's end — through the next
+ * salary to the one after — is {@link DailyAdviceService}'s, and it alone decides whether any money
+ * is spare. Its warnings (short even spending nothing, or running out at the owner's own pace) live
+ * in {@code daily} only: the web shows them on Home, and the Telegram bot — kept unchanged by the
+ * owner's choice — never sees a sentence it has no translation for.
  */
 @Service
 @RequiredArgsConstructor
@@ -50,7 +61,8 @@ public class AdvisorService {
      * How recent the last wallet reconciliation must be before the advisor calls money "spare".
      * Everyday spending is not recorded — a check-in finds it — so an older balance is too high
      * by however much was spent since, and advice to invest it would be advice to invest money
-     * that is already gone. Two check-in intervals: the last days of a month allow no check-in.
+     * that is already gone. Two check-in intervals, so one skipped check-in — in a month's first
+     * days the close is suggested instead — does not silence the idea.
      */
     static final int FRESH_BALANCE_DAYS = 2 * WalletCheckInService.INTERVAL_DAYS;
     /** Below this, spare money is not worth a message. */
@@ -59,7 +71,8 @@ public class AdvisorService {
     private static final BigDecimal ROUND_TO = new BigDecimal("10000");
     /** A month-end close is only suggested in the new month's first days, while its balances are still known. */
     static final int CLOSE_WINDOW_DAYS = 5;
-    private static final BigDecimal HUNDRED = new BigDecimal("100");
+    /** "10 October" — for the English fallback sentences only. */
+    private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("d MMMM", Locale.ENGLISH);
 
     private final OverviewService overviewService;
     private final WalletCheckInService walletCheckInService;
@@ -68,6 +81,7 @@ public class AdvisorService {
     private final LoanGivenRepository loanGivenRepository;
     private final InvestmentRepository investmentRepository;
     private final EmergencyRepository emergencyRepository;
+    private final DailyAdviceService dailyAdviceService;
 
     @Transactional(readOnly = true)
     public AdvisorResponse advise(LocalDate date) {
@@ -160,6 +174,11 @@ public class AdvisorService {
         // ── Free ──
         BigDecimal free = missingIncome ? null : have.add(coming).subtract(billsLeft).subtract(setAsideLeft);
 
+        // ── Per day: past this month, up to the salary after next ──
+        DailyAdviceService.Result perDay = missingIncome ? null : dailyAdviceService.compute(
+                new DailyAdviceService.Inputs(date, have, expected, coming, setAsideLeft, pctSum));
+        Daily daily = perDay == null ? null : perDay.daily();
+
         // ── What to do next ──
         List<Investment> holdings = investmentRepository.findAll();
         boolean hasEmergencyFund = emergencyRepository.count() > 0
@@ -199,12 +218,8 @@ public class AdvisorService {
                             .build());
                 }
             }
-            if (free.signum() < 0) {
-                suggestions.add(Suggestion.builder().code("advisor.s.short").params(Map.of())
-                        .text("Heads up: after bills and set-asides you'd be " + fmt(free.negate())
-                                + " short this month.")
-                        .kind("WARN").amount(free.negate()).build());
-            }
+            // "Short" is now daily.shortBy: it sees past this month's end, where the rent after
+            // next payday lives, so the month-only check it replaced is gone.
 
             List<Investment> goals = holdings.stream()
                     .filter(i -> Boolean.TRUE.equals(i.getSavingsGoal()))
@@ -214,8 +229,7 @@ public class AdvisorService {
                         "Saving for something — a home, a car, a trip? Add it as a goal and I'll help you get there."));
             }
 
-            Suggestion extra = extraSuggestion(date, tier, pctSum, free, coming, afterBills, check,
-                    goals, hasEmergencyFund);
+            Suggestion extra = extraSuggestion(perDay, coming, afterBills, check, goals, hasEmergencyFund);
             if (extra != null) suggestions.add(extra);
         }
 
@@ -241,7 +255,27 @@ public class AdvisorService {
                 .setAsideAfterBills(afterBills)
                 .free(free)
                 .suggestions(suggestions)
+                .daily(daily)
+                .savingsThisMonth(missingIncome ? List.of() : savingsRows(allocation))
                 .build();
+    }
+
+    /**
+     * Every bucket with a target this month, met or not — the {@link SetAside} figures without the
+     * "still to do" filter, so a screen can show a bucket as done rather than as missing.
+     */
+    private static List<SavingsRow> savingsRows(TierAllocation allocation) {
+        List<SavingsRow> rows = new ArrayList<>();
+        if (allocation == null || allocation.getLines() == null) return rows;
+        for (TierAllocation.AllocationLine line : allocation.getLines()) {
+            if (!line.isRecommended()) continue;
+            BigDecimal target = nz(line.getMinAmount());
+            if (target.signum() <= 0) continue;
+            rows.add(SavingsRow.builder().bucket(line.getBucket()).percent(line.getMinPercent())
+                    .target(target).paid(nz(line.getPaidAmount()))
+                    .remaining(nz(line.getRemainingAmount())).build());
+        }
+        return rows;
     }
 
     /** The Plan's action item as a bill kind: the bank installment, the loan plan, or the 34% pay-down. */
@@ -296,40 +330,45 @@ public class AdvisorService {
     }
 
     /**
-     * Money beyond what the rest of the month needs, and where to put half of it.
+     * Money beyond what the owner will really need, and where to put half of it.
      *
-     * <p>"What the month needs" is the owner's own plan, not a rule of thumb: the living money a
-     * normal month leaves — the left balance after bills, debts and the regular set-asides — for
-     * the days still to go. Only offered when that estimate can be trusted: the salary is in (money
-     * still to come is not money to invest), the bills are paid, and the wallets were checked
-     * recently. Half, because the rest is the owner's cushion to decide about.
+     * <p>"Really need" is measured, not assumed: the spare money is the LEAST the per-day walk ever
+     * has in hand, on any day to the end of its horizon (the day before the salary after next),
+     * once every bill, loan payment and saving due by then is met AND the owner keeps spending at
+     * their own recorded pace — {@code min over d of net(d) − paceDaily × days(d)}. Every day, not
+     * just the last: money that carries the owner to payday is not spare because the next salary
+     * refills the account afterwards. (Measured only on the last day, a walk short by 5.1M before
+     * payday still offered to invest 1.2M — more than the wallets held.) The old month-scoped
+     * estimate took a month's living costs to be whatever the plan left over (about 1.1M) while the
+     * owner spent over 12M.
+     *
+     * <p>Offered only with a known pace, never while the walk says short or running out, with at
+     * least {@link #EXTRA_MIN} to spare, and still only once the bills are paid, the salary is in
+     * and the wallets were checked recently — a stale balance overstates both the money and, with
+     * spending unrecorded since, understates the pace. Half, because the rest is the owner's cushion
+     * to decide about.
      */
-    private Suggestion extraSuggestion(LocalDate date, OverviewTierResponse tier, BigDecimal pctSum,
-                                       BigDecimal free, BigDecimal coming, boolean afterBills,
+    private Suggestion extraSuggestion(DailyAdviceService.Result perDay, BigDecimal coming, boolean afterBills,
                                        WalletCheckInStatusResponse check, List<Investment> goals,
                                        boolean hasEmergencyFund) {
-        if (afterBills || coming.signum() > 0 || free == null) return null;
+        if (perDay == null || perDay.daily() == null || perDay.surplus() == null) return null;
+        if (perDay.daily().getShortBy() != null || perDay.daily().getRunsOutOn() != null) return null;
+        if (afterBills || coming.signum() > 0) return null;
         Integer days = check.getDaysSinceLastReconciled();
         if (days == null || days > FRESH_BALANCE_DAYS) return null;
 
-        BigDecimal monthlyBase = clampZero(nz(tier.getAllocationBase()).subtract(nz(tier.getBonusIncome())));
-        BigDecimal monthlyLiving = monthlyBase.multiply(HUNDRED.subtract(pctSum)).divide(HUNDRED, 2, RoundingMode.HALF_UP);
-        int daysInMonth = date.lengthOfMonth();
-        int daysLeft = daysInMonth - date.getDayOfMonth() + 1;
-        BigDecimal livingLeft = monthlyLiving.multiply(BigDecimal.valueOf(daysLeft))
-                .divide(BigDecimal.valueOf(daysInMonth), 2, RoundingMode.HALF_UP);
-
-        BigDecimal spare = free.subtract(livingLeft);
+        BigDecimal spare = perDay.surplus();
         if (spare.compareTo(EXTRA_MIN) < 0) return null;
         BigDecimal amount = spare.divide(BigDecimal.valueOf(2), 0, RoundingMode.DOWN)
                 .divide(ROUND_TO, 0, RoundingMode.DOWN).multiply(ROUND_TO);
         if (amount.signum() <= 0) return null;
+        String horizon = "until " + DAY.format(perDay.daily().getUntil()) + " at your usual pace";
 
         Investment goal = goals.stream().filter(AdvisorService::belowTarget).findFirst().orElse(null);
         if (goal != null) {
             return Suggestion.builder()
                     .code("advisor.s.extraToGoal").params(Map.of("name", goal.getName() == null ? "" : goal.getName()))
-                    .text("You have about " + fmt(spare) + " more than this month needs. Put "
+                    .text("You have about " + fmt(spare) + " more than you need " + horizon + ". Put "
                             + fmt(amount) + " towards " + goal.getName() + "?")
                     .kind("IDEA").action("SET_ASIDE").bucket("SAVINGS").refId(goal.getId()).amount(amount)
                     .build();
@@ -338,7 +377,7 @@ public class AdvisorService {
         return Suggestion.builder()
                 .code(hasEmergencyFund ? "advisor.s.extraToInvestments" : "advisor.s.extraToEmergency")
                 .params(Map.of())
-                .text("You have about " + fmt(spare) + " more than this month needs. Put " + fmt(amount)
+                .text("You have about " + fmt(spare) + " more than you need " + horizon + ". Put " + fmt(amount)
                         + (hasEmergencyFund ? " into investments?" : " into an emergency fund?"))
                 .kind("IDEA").action("SET_ASIDE").bucket(bucket).amount(amount)
                 .build();
@@ -366,7 +405,11 @@ public class AdvisorService {
 
     /** "1 250 000 UZS" — only for the English fallback sentence; clients format {@code amount} themselves. */
     private static String fmt(BigDecimal n) {
-        return n.setScale(0, RoundingMode.HALF_UP).toPlainString()
-                .replaceAll("(\\d)(?=(\\d{3})+$)", "$1 ") + " UZS";
+        return plain(n).replaceAll("(\\d)(?=(\\d{3})+$)", "$1 ") + " UZS";
+    }
+
+    /** "1250000" — whole som, no grouping: how an amount travels inside {@code params}. */
+    private static String plain(BigDecimal n) {
+        return n.setScale(0, RoundingMode.HALF_UP).toPlainString();
     }
 }

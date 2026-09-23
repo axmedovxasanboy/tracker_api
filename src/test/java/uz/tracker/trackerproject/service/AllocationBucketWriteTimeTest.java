@@ -30,9 +30,11 @@ import java.time.LocalDate;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -193,6 +195,33 @@ class AllocationBucketWriteTimeTest {
         financeService.createInvestment(newHolding(false));
 
         assertThat(savedTransaction().getAllocationBucket()).isEqualTo("INVESTMENTS");
+    }
+
+    /** A goal can start empty: "I already have" left blank saves 0 as an opening balance. */
+    @Test
+    void anEmptyGoalIsAnOpeningBalanceOfZeroAndMovesNoMoney() {
+        InvestmentRequest req = newHolding(true);
+        req.setInvestedAmount(BigDecimal.ZERO);
+        req.setOpeningBalance(true);
+        when(investmentRepository.save(any(Investment.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        financeService.createInvestment(req);
+
+        verify(transactionRepository, never()).save(any(Transaction.class));
+        ArgumentCaptor<Investment> saved = ArgumentCaptor.forClass(Investment.class);
+        verify(investmentRepository).save(saved.capture());
+        assertThat(saved.getValue().getInvestedAmount()).isEqualByComparingTo("0");
+    }
+
+    @Test
+    void aHoldingFundedFromAWalletMustBeMoreThanZero() {
+        InvestmentRequest req = newHolding(false);
+        req.setInvestedAmount(BigDecimal.ZERO);
+
+        assertThatThrownBy(() -> financeService.createInvestment(req))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("more than 0");
+        verify(transactionRepository, never()).save(any(Transaction.class));
     }
 
     @Test
