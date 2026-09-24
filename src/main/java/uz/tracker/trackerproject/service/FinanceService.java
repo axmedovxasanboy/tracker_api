@@ -141,7 +141,16 @@ public class FinanceService {
 
     @Transactional
     public LoanGivenResponse createLoanGiven(LoanGivenRequest req) {
-        return LoanGivenResponse.from(saveLoanGiven(new LoanGiven(), req, null));
+        LoanGiven l = saveLoanGiven(new LoanGiven(), req, null);
+        if (Boolean.TRUE.equals(req.getMoveMoney())) {
+            // Out of the wallet in the same step: the LOAN_GIVEN transaction the record then
+            // originates from, as if it had been recorded first (TransactionService's path).
+            Transaction tx = mirrorTransaction(TransactionType.EXPENSE, TransactionSubType.LOAN_GIVEN,
+                    l.getTotalAmount(), l.getCurrency(), l.getLentDate(), req.getCardId(), null, l.getDebtorName());
+            l.setOriginatingTransactionId(tx.getId());
+            l = loanGivenRepository.save(l);
+        }
+        return LoanGivenResponse.from(l);
     }
 
     public LoanGiven createLoanGivenFromTransaction(LoanGivenRequest req, Long transactionId) {
@@ -201,6 +210,10 @@ public class FinanceService {
         l.setExpectedReturnDate(req.getExpectedReturnDate());
         if (req.getStatus() != null) l.setStatus(req.getStatus());
         l.setDescription(req.getDescription());
+        // The transaction it came from follows — unless money was lent again on top of it, when the
+        // total is no longer that one transaction's amount.
+        syncMirror(l.getOriginatingTransactionId(), l.getTotalAmount(), l.getLentDate(),
+                !transactionRepository.existsByLoanGivenId(l.getId()));
         return LoanGivenResponse.from(loanGivenRepository.save(l));
     }
 
@@ -212,6 +225,7 @@ public class FinanceService {
             throw new IllegalArgumentException(
                     "Cannot delete a lent loan with payments received. Clear received amount first.");
         }
+        deleteMirror(l.getOriginatingTransactionId());
         loanGivenRepository.delete(l);
     }
 
@@ -224,7 +238,16 @@ public class FinanceService {
 
     @Transactional
     public LoanTakenResponse createLoanTaken(LoanTakenRequest req) {
-        return LoanTakenResponse.from(saveLoanTaken(new LoanTaken(), req, null));
+        LoanTaken l = saveLoanTaken(new LoanTaken(), req, null);
+        if (Boolean.TRUE.equals(req.getMoveMoney())) {
+            // Into the wallet in the same step: the LOAN_RECEIVED transaction the record then
+            // originates from, as if it had been recorded first (TransactionService's path).
+            Transaction tx = mirrorTransaction(TransactionType.INCOME, TransactionSubType.LOAN_RECEIVED,
+                    l.getTotalAmount(), l.getCurrency(), l.getBorrowedDate(), req.getCardId(), null, l.getLenderName());
+            l.setOriginatingTransactionId(tx.getId());
+            l = loanTakenRepository.save(l);
+        }
+        return LoanTakenResponse.from(l);
     }
 
     public LoanTaken createLoanTakenFromTransaction(LoanTakenRequest req, Long transactionId) {
@@ -275,6 +298,7 @@ public class FinanceService {
             l.setMonthlyPayment(deriveMonthlyContribution(
                     l.getTotalAmount(), l.getPaidAmount(), l.getDueDate()));
         }
+        syncMirror(l.getOriginatingTransactionId(), l.getTotalAmount(), l.getBorrowedDate(), true);
         return LoanTakenResponse.from(loanTakenRepository.save(l));
     }
 
@@ -286,6 +310,7 @@ public class FinanceService {
             throw new IllegalArgumentException(
                     "Cannot delete a borrowed loan with payments recorded. Clear the paid amount first.");
         }
+        deleteMirror(l.getOriginatingTransactionId());
         loanTakenRepository.delete(l);
     }
 
@@ -1139,15 +1164,40 @@ public class FinanceService {
             TransactionSubType subType, boolean savingsGoalTarget,
             BigDecimal amount, uz.tracker.trackerproject.enums.Currency currency,
             java.time.LocalDate date, Long cardId, Long categoryId, String description) {
-        settingsService.assertStableIncomeSet();
-        monthCloseService.assertMonthOpen(date);
-        Transaction tx = new Transaction();
-        tx.setType(TransactionType.EXPENSE);
-        tx.setSubType(subType);
+        Transaction tx = newWalletTransaction(TransactionType.EXPENSE, subType, amount, currency, date,
+                cardId, categoryId, description);
         // Record the bucket now, while the holding's flags are the ones the user is actually
         // funding. Deriving it later from a flag that stays editable for the life of the holding
         // is what let one checkbox move money out of a closed month (see AllocationBucket).
         tx.setAllocationBucket(AllocationBucket.forSubType(subType, savingsGoalTarget));
+        return transactionRepository.save(tx);
+    }
+
+    /**
+     * The wallet transaction a borrowed or lent loan originates from when it is recorded with
+     * {@code moveMoney}: what TransactionService books for a LOAN_RECEIVED / LOAN_GIVEN, so deleting or
+     * editing either side then behaves exactly as for a loan recorded through a transaction.
+     */
+    private Transaction mirrorTransaction(TransactionType type, TransactionSubType subType, BigDecimal amount,
+                                          Currency currency, LocalDate date, Long cardId, Long categoryId,
+                                          String description) {
+        return transactionRepository.save(newWalletTransaction(type, subType, amount, currency, date,
+                cardId, categoryId, description));
+    }
+
+    /**
+     * A new transaction moving {@code amount} into (INCOME) or out of (EXPENSE) a wallet — the card, or
+     * cash when {@code cardId} is null — behind the same gates as every write: a stable income, an open
+     * month, a card in the payment's currency, and, for money going out of a card, enough on it.
+     */
+    private Transaction newWalletTransaction(TransactionType type, TransactionSubType subType, BigDecimal amount,
+                                             Currency currency, LocalDate date, Long cardId, Long categoryId,
+                                             String description) {
+        settingsService.assertStableIncomeSet();
+        monthCloseService.assertMonthOpen(date);
+        Transaction tx = new Transaction();
+        tx.setType(type);
+        tx.setSubType(subType);
         tx.setAmount(amount);
         tx.setCurrency(currency);
         tx.setDescription(description);
@@ -1159,7 +1209,7 @@ public class FinanceService {
                 throw new IllegalArgumentException(
                         "Card currency (" + card.getCurrency() + ") does not match payment currency (" + currency + ")");
             }
-            cardService.assertSufficientBalance(card, amount);
+            if (type == TransactionType.EXPENSE) cardService.assertSufficientBalance(card, amount);
             tx.setCard(card);
             tx.setCashAmount(BigDecimal.ZERO);
         } else {
@@ -1174,7 +1224,46 @@ public class FinanceService {
             List<Category> matches = categoryRepository.findByApplicableSubTypeAndParentIsNull(subType);
             if (matches.size() == 1) tx.setCategory(matches.get(0));
         }
-        return transactionRepository.save(tx);
+        return tx;
+    }
+
+    /**
+     * Keep the transaction a loan originates from in step with an edit of the loan — the reverse of
+     * TransactionService, which moves the loan when its transaction is edited. The amount and date
+     * follow only when {@code amountFollows} (money lent again on top of a loan makes its total more
+     * than that one transaction); either change is gated on the old and the new month being open,
+     * and more money out of a card on there being enough on it. The transaction's description is its
+     * own (it may have been written on the transaction), so it is left alone.
+     */
+    private void syncMirror(Long txId, BigDecimal amount, LocalDate date, boolean amountFollows) {
+        if (txId == null) return;
+        Transaction tx = transactionRepository.findById(txId).orElse(null);
+        if (tx == null) return;
+        boolean moved = amountFollows && (tx.getAmount() == null || tx.getAmount().compareTo(amount) != 0
+                || !java.util.Objects.equals(tx.getTransactionDate(), date));
+        if (!moved) return;
+        monthCloseService.assertMonthOpen(tx.getTransactionDate());
+        monthCloseService.assertMonthOpen(date);
+        BigDecimal more = amount.subtract(tx.getAmount() == null ? BigDecimal.ZERO : tx.getAmount());
+        if (tx.getType() == TransactionType.EXPENSE && tx.getCard() != null && more.signum() > 0) {
+            cardService.assertSufficientBalance(tx.getCard(), more);
+        }
+        tx.setAmount(amount);
+        tx.setTransactionDate(date);
+        if (tx.getCard() == null) tx.setCashAmount(amount);
+        transactionRepository.save(tx);
+    }
+
+    /**
+     * Deleting a loan takes the transaction it originates from with it — the money goes back — as
+     * deleting that transaction already takes the loan (TransactionService.reverseAutoCreated).
+     */
+    private void deleteMirror(Long txId) {
+        if (txId == null) return;
+        transactionRepository.findById(txId).ifPresent(tx -> {
+            monthCloseService.assertMonthOpen(tx.getTransactionDate());
+            transactionRepository.delete(tx);
+        });
     }
 
     private void attachCardAndCategory(Transaction tx, RepaymentRequest req) {

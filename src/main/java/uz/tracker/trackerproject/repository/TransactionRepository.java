@@ -136,6 +136,8 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
     /** Repayment lookup helpers — newest payment first for the per-loan history view. */
     List<Transaction> findByRepaidLoanTakenIdOrderByTransactionDateDesc(Long loanTakenId);
     List<Transaction> findByRepaidLoanGivenIdOrderByTransactionDateDesc(Long loanGivenId);
+    /** Whether money was lent again on top of loan {@code loanGivenId} ("he asked again" top-ups). */
+    boolean existsByLoanGivenId(Long loanGivenId);
     List<Transaction> findByRepaidDebtIdOrderByTransactionDateDesc(Long debtId);
 
     /** Subscription payment history + aggregates (per MonthlyPayment). */

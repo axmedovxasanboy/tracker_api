@@ -38,4 +38,15 @@ public class LoanGivenRequest {
     private RecordStatus status;
 
     private String description;
+
+    /**
+     * True: book the money out of a wallet in the same step — {@link #cardId}, or cash when that is
+     * null — as a transaction the record then belongs to, exactly as if the owner had recorded the
+     * transaction first. Null or false (the bot, which never sends it): only the record. Read on
+     * create; an edit ignores it.
+     */
+    private Boolean moveMoney;
+
+    /** The wallet for {@link #moveMoney}: a UZS card; null = cash. */
+    private Long cardId;
 }
