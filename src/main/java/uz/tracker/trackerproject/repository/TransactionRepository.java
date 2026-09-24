@@ -18,8 +18,8 @@ import java.util.Optional;
 public interface TransactionRepository extends JpaRepository<Transaction, Long>, JpaSpecificationExecutor<Transaction> {
 
     /**
-     * Sum of amount by type+currency, EXCLUDING transfer + exchange halves. Both kinds
-     * just move money between wallets and shouldn't inflate dashboard income/expense totals.
+     * Sum of amount by type+currency, EXCLUDING transfer halves and money taken out of an
+     * investment. Both just move the owner's own money and shouldn't inflate income totals.
      */
     @Query("""
             SELECT SUM(t.amount)
@@ -27,7 +27,8 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
             WHERE t.type = :type AND t.currency = :currency
               AND (t.subType IS NULL OR t.subType NOT IN (
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_IN,
-                    uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT))
+                    uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT,
+                    uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT_WITHDRAWAL))
             """)
     BigDecimal sumByTypeAndCurrency(@Param("type") TransactionType type,
                                     @Param("currency") Currency currency);
@@ -53,7 +54,8 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
               AND (t.subType IS NULL OR t.subType NOT IN (
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_IN,
                     uz.tracker.trackerproject.enums.TransactionSubType.TRANSFER_OUT,
-                    uz.tracker.trackerproject.enums.TransactionSubType.EVERYDAY_SPENDING))
+                    uz.tracker.trackerproject.enums.TransactionSubType.EVERYDAY_SPENDING,
+                    uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT_WITHDRAWAL))
             """)
     BigDecimal sumByTypeCurrencyDateRange(
             @Param("type") TransactionType type,
@@ -127,6 +129,7 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
               AND t.currency = :currency
               AND t.transactionDate >= :start AND t.transactionDate <= :end
               AND (c.bonusIncome = true OR p.bonusIncome = true)
+              AND (t.subType IS NULL OR t.subType <> uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT_WITHDRAWAL)
             """)
     BigDecimal sumBonusIncomeByCurrencyDateRange(
             @Param("currency") Currency currency,

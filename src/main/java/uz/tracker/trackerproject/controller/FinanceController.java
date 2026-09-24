@@ -205,6 +205,16 @@ public class FinanceController {
         return ResponseEntity.ok(financeService.contributeToInvestment(id, req));
     }
 
+    /**
+     * Take money out of an investment — all of it or a part — into a wallet: an INCOME
+     * INVESTMENT_WITHDRAWAL transaction, and the holding's invested total and tracked value go down.
+     */
+    @PostMapping("/investments/{id}/withdraw")
+    public ResponseEntity<InvestmentResponse> withdrawFromInvestment(
+            @PathVariable Long id, @Valid @RequestBody InvestmentWithdrawRequest req) {
+        return ResponseEntity.ok(financeService.withdrawFromInvestment(id, req));
+    }
+
     @PostMapping("/investments/{id}/value")
     public ResponseEntity<InvestmentResponse> updateInvestmentValue(
             @PathVariable Long id, @Valid @RequestBody InvestmentValueRequest req) {

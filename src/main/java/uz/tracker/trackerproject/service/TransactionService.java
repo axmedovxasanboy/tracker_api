@@ -295,7 +295,7 @@ public class TransactionService {
                 FROM transactions
                 WHERE currency = :currency
                   AND EXTRACT(YEAR FROM transaction_date) = :year
-                  AND (sub_type IS NULL OR sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT'))
+                  AND (sub_type IS NULL OR sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT', 'INVESTMENT_WITHDRAWAL'))
                 GROUP BY EXTRACT(MONTH FROM transaction_date)
                 ORDER BY EXTRACT(MONTH FROM transaction_date)
                 """)
@@ -332,7 +332,7 @@ public class TransactionService {
                 FROM transactions t
                 JOIN categories c ON c.id = t.category_id
                 WHERE t.type = :type AND t.currency = :currency
-                  AND (t.sub_type IS NULL OR t.sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT'))
+                  AND (t.sub_type IS NULL OR t.sub_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT', 'INVESTMENT_WITHDRAWAL'))
                 """);
         if (year != null)  sql.append(" AND EXTRACT(YEAR  FROM t.transaction_date) = :year");
         if (month != null) sql.append(" AND EXTRACT(MONTH FROM t.transaction_date) = :month");
@@ -430,6 +430,12 @@ public class TransactionService {
                     financeService.createInvestmentFromTransaction(ir, transactionId);
                 }
             }
+            case INVESTMENT_WITHDRAWAL -> {
+                // Money taken out of a holding: the holding goes down by it.
+                if (req.getInvestmentId() != null) {
+                    financeService.applyWithdrawal(req.getInvestmentId(), req.getAmount());
+                }
+            }
             case EMERGENCY_CONTRIBUTION -> {
                 // Only "top up an existing emergency fund" applies here. A bare
                 // EMERGENCY_CONTRIBUTION with no investmentId (the Emergencies-tab shape) has
@@ -470,7 +476,8 @@ public class TransactionService {
         // record and recreate from scratch — simpler and avoids subtle field-by-field bugs.
         if ((previousSubType != req.getSubType() && !relabelledTopUp)
                 || ((req.getSubType() == TransactionSubType.INVESTMENT
-                        || req.getSubType() == TransactionSubType.EMERGENCY_CONTRIBUTION)
+                        || req.getSubType() == TransactionSubType.EMERGENCY_CONTRIBUTION
+                        || req.getSubType() == TransactionSubType.INVESTMENT_WITHDRAWAL)
                     && !java.util.Objects.equals(previousInvestmentId, req.getInvestmentId()))
                 || (req.getSubType() == TransactionSubType.LOAN_GIVEN
                     && !java.util.Objects.equals(previousLoanGivenId, req.getLoanGivenId()))) {
@@ -531,6 +538,14 @@ public class TransactionService {
                         }
                         donationRepository.save(d);
                     });
+            case INVESTMENT_WITHDRAWAL -> {
+                // Edited withdrawal: only the difference moves the holding.
+                if (req.getInvestmentId() != null) {
+                    BigDecimal diff = req.getAmount().subtract(previousAmount);
+                    if (diff.signum() > 0) financeService.applyWithdrawal(req.getInvestmentId(), diff);
+                    else if (diff.signum() < 0) financeService.reverseWithdrawal(req.getInvestmentId(), diff.abs());
+                }
+            }
             case INVESTMENT, EMERGENCY_CONTRIBUTION -> {
                 if (req.getInvestmentId() != null) {
                     // "Add funds to existing" — diff the amount and apply.
@@ -575,6 +590,10 @@ public class TransactionService {
                             });
             case DONATION -> donationRepository.findByOriginatingTransactionId(tx.getId())
                     .ifPresent(donationRepository::delete);
+            // A withdrawal deleted: the money goes back into the holding.
+            case INVESTMENT_WITHDRAWAL -> {
+                if (investmentId != null) financeService.reverseWithdrawal(investmentId, amount);
+            }
             case INVESTMENT, EMERGENCY_CONTRIBUTION -> {
                 // The tx that ORIGINATED an investment deletes the record itself; a
                 // contribution tx (investmentId set) just backs its amount out of the fund.

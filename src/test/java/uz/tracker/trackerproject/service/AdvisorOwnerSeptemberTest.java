@@ -390,6 +390,31 @@ class AdvisorOwnerSeptemberTest {
                         tuple(LocalDate.of(2026, 10, 7), "LOAN", "2244000", true));
     }
 
+    /**
+     * 1,000,000 taken out of an investment into the card on the 20th is the owner's own money coming
+     * back: not a salary, not income, not the savings base, not spending pace, and it takes nothing
+     * off what was set aside this month. Only the wallet has it (the stand-in balances here).
+     */
+    @Test
+    void moneyTakenOutOfAnInvestmentIsNeverIncome() {
+        ledger.add(LocalDate.of(2026, 9, 20), TransactionType.INCOME, TransactionSubType.INVESTMENT_WITHDRAWAL, "1000000")
+                .setInvestmentId(99L);
+
+        AdvisorResponse r = advisor.advise(TODAY);
+        assertThat(r.getSalaryReceived()).isEqualByComparingTo("7989000");
+        assertThat(r.getDaily().getPaceDaily()).isEqualByComparingTo("526000");
+        assertThat(r.getSavingsThisMonth())
+                .extracting(s -> s.getPaid().stripTrailingZeros().toPlainString())
+                .containsExactly("0", "353600", "1414400");
+        OverviewTierResponse tier = overview.getTierIgnoringSubscriptions(YearMonth.of(2026, 9), Currency.UZS, TODAY);
+        assertThat(tier.getSalaryReceived()).isEqualByComparingTo("7889000");
+        assertThat(tier.getAllocationBase()).isEqualByComparingTo("24269000");
+
+        ProfileResponse profile = new ProfileService(overview, transactionRepository).profile(TODAY, "owner");
+        assertThat(profile.getIncomeThisMonth().getTotal()).isEqualByComparingTo("24369000");
+        assertThat(profile.getIncomeThisMonth().getExcludedWithdrawn()).isEqualByComparingTo("1000000");
+    }
+
     @Test
     void theWarningStaysInDailyAndInvestingTheRentIsNoLongerSuggested() {
         AdvisorResponse r = advisor.advise(TODAY);
@@ -475,7 +500,7 @@ class AdvisorOwnerSeptemberTest {
                      {"categoryId":11,"name":"Salary","nameUz":null,"amount":5889000,"inBase":true},
                      {"categoryId":12,"name":"Avans","nameUz":null,"amount":2000000,"inBase":true},
                      {"categoryId":13,"name":"Other income","nameUz":null,"amount":100000,"inBase":false}],
-                   "excludedBorrowed":1955000,"excludedReturned":300000},
+                   "excludedBorrowed":1955000,"excludedReturned":300000,"excludedWithdrawn":0},
                  "allocatedThisMonth":{"total":1768000,"percentOfIncome":7.3,"percentOfBase":7.3,"lines":[
                      {"bucket":"DONATION","amount":0,"percentOfIncome":0.0,"percentOfBase":0.0,
                       "target":1213450,"over":0},

@@ -38,6 +38,14 @@ public class InvestmentResponse {
     private BigDecimal currentValue;
     /** currentValue / targetAmount as a percentage; null when there is no target. */
     private BigDecimal progressPercent;
+    /** What the owner has put in, net of what was taken out (= investedAmount). */
+    private BigDecimal putIn;
+    /** What it is worth: currentValue, else investedAmount. */
+    private BigDecimal value;
+    /** value − putIn: what it grew (negative when it lost). */
+    private BigDecimal growth;
+    /** growth ÷ putIn × 100, one decimal; null when nothing is put in. */
+    private BigDecimal growthPercent;
     /** True when recorded as an opening balance (already-owned holding; no transaction, excluded
         from the monthly allocation buckets). */
     private boolean openingBalance;
@@ -67,6 +75,12 @@ public class InvestmentResponse {
                 .paymentStartDate(i.getPaymentStartDate())
                 .currentValue(value)
                 .progressPercent(progress)
+                .putIn(i.getInvestedAmount())
+                .value(value)
+                .growth(value == null || i.getInvestedAmount() == null ? null : value.subtract(i.getInvestedAmount()))
+                .growthPercent(i.getInvestedAmount() == null || i.getInvestedAmount().signum() == 0 || value == null ? null
+                        : value.subtract(i.getInvestedAmount()).multiply(BigDecimal.valueOf(100))
+                                .divide(i.getInvestedAmount(), 1, RoundingMode.HALF_UP))
                 .openingBalance(Boolean.TRUE.equals(i.getOpeningBalance()))
                 .createdAt(i.getCreatedAt())
                 .build();

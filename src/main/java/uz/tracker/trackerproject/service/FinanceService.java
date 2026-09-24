@@ -760,6 +760,65 @@ public class FinanceService {
         investmentRepository.save(i);
     }
 
+    /**
+     * Take money out of an investment into a wallet (the owner's "take 1M from IMAN"): an INCOME
+     * INVESTMENT_WITHDRAWAL transaction linked to the holding — so deleting it puts the money back
+     * and editing it re-applies it (TransactionService) — then the holding goes down by it. Never
+     * more than the holding's value. The money is the owner's own coming back: it is not income in
+     * any figure, and it takes nothing off what was set aside in the month the holding was funded.
+     */
+    @Transactional
+    public InvestmentResponse withdrawFromInvestment(Long id, InvestmentWithdrawRequest req) {
+        Investment i = investmentRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Investment", id));
+        if (req.getCurrency() != i.getCurrency()) {
+            throw new IllegalArgumentException(
+                    "Withdrawal currency (" + req.getCurrency() + ") does not match investment currency (" + i.getCurrency() + ")");
+        }
+        BigDecimal value = i.getCurrentValue() != null ? i.getCurrentValue() : i.getInvestedAmount();
+        if (req.getAmount().compareTo(value == null ? BigDecimal.ZERO : value) > 0) {
+            throw new IllegalArgumentException(String.format(
+                    "Only %s %s is in %s — you can take out at most that.", value, i.getCurrency(), i.getName()));
+        }
+        String description = req.getDescription() != null && !req.getDescription().isBlank()
+                ? req.getDescription() : "Taken from " + i.getName();
+        Transaction tx = mirrorTransaction(TransactionType.INCOME, TransactionSubType.INVESTMENT_WITHDRAWAL,
+                req.getAmount(), req.getCurrency(), req.getDate(), req.getCardId(), null, description);
+        tx.setInvestmentId(i.getId());
+        transactionRepository.save(tx);
+        takeOut(i, req.getAmount());
+        return InvestmentResponse.from(investmentRepository.save(i));
+    }
+
+    /** A withdrawal recorded (or grown) from the Transactions page: the holding goes down by it. */
+    @Transactional
+    public void applyWithdrawal(Long id, BigDecimal amount) {
+        investmentRepository.findById(id).ifPresent(i -> {
+            takeOut(i, amount);
+            investmentRepository.save(i);
+        });
+    }
+
+    /** A withdrawal deleted (or shrunk): the money goes back into the holding. */
+    @Transactional
+    public void reverseWithdrawal(Long id, BigDecimal amount) {
+        investmentRepository.findById(id).ifPresent(i -> {
+            i.setInvestedAmount(i.getInvestedAmount().add(amount));
+            if (i.getCurrentValue() != null) i.setCurrentValue(i.getCurrentValue().add(amount));
+            investmentRepository.save(i);
+        });
+    }
+
+    /** Invested total down by {@code amount}, never below 0; a tracked value down by it too. */
+    private static void takeOut(Investment i, BigDecimal amount) {
+        BigDecimal invested = i.getInvestedAmount().subtract(amount);
+        i.setInvestedAmount(invested.signum() < 0 ? BigDecimal.ZERO : invested);
+        if (i.getCurrentValue() != null) {
+            BigDecimal value = i.getCurrentValue().subtract(amount);
+            i.setCurrentValue(value.signum() < 0 ? BigDecimal.ZERO : value);
+        }
+    }
+
     /** Subtract from an investment's invested total (used when a fund-add transaction is removed or shrunk). */
     @Transactional
     public void removeFundsFromInvestment(Long id, BigDecimal amount) {

@@ -177,6 +177,7 @@ public class ProfileService {
         List<Transaction> rows = transactionRepository.findByTransactionDateBetween(month.atDay(1), month.atEndOfMonth());
         for (Transaction t : rows == null ? List.<Transaction>of() : rows) {
             if (t.getType() != TransactionType.INCOME || t.getAmount() == null || !isUzs(t.getCurrency())) continue;
+            if (t.getSubType() == TransactionSubType.INVESTMENT_WITHDRAWAL) continue;   // never income
             Category category = t.getCategory();
             boolean bonus = OverviewService.isBonusCategory(category);
             boolean salary = t.getSubType() == TransactionSubType.REGULAR_INCOME && !t.getTransactionDate().isAfter(date)
@@ -202,6 +203,7 @@ public class ProfileService {
         Map<Long, IncomeGroup> groups = new LinkedHashMap<>();
         BigDecimal borrowed = BigDecimal.ZERO;
         BigDecimal returned = BigDecimal.ZERO;
+        BigDecimal withdrawn = BigDecimal.ZERO;
         List<Transaction> rows = transactionRepository.findByTransactionDateBetween(start, date);
         for (Transaction t : rows == null ? List.<Transaction>of() : rows) {
             if (t.getType() != TransactionType.INCOME || t.getAmount() == null || !isUzs(t.getCurrency())) continue;
@@ -212,6 +214,10 @@ public class ProfileService {
             }
             if (st == TransactionSubType.LOAN_RETURNED_TO_ME) {
                 returned = returned.add(t.getAmount());
+                continue;
+            }
+            if (st == TransactionSubType.INVESTMENT_WITHDRAWAL) {    // the owner's own money back
+                withdrawn = withdrawn.add(t.getAmount());
                 continue;
             }
             if (st == TransactionSubType.TRANSFER_IN || t.getTransferPairId() != null) continue;
@@ -230,6 +236,7 @@ public class ProfileService {
                 .lines(lines)
                 .excludedBorrowed(borrowed)
                 .excludedReturned(returned)
+                .excludedWithdrawn(withdrawn)
                 .build();
     }
 

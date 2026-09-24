@@ -5,6 +5,9 @@ public enum TransactionSubType {
     REGULAR_INCOME,
     LOAN_RECEIVED,       // Borrowed money → creates LoanTaken
     LOAN_RETURNED_TO_ME, // Someone paid back a loan I gave → updates LoanGiven
+    INVESTMENT_WITHDRAWAL, // Money taken back out of an investment / savings goal into a wallet →
+                           // lowers the Investment. Booked as INCOME so the wallet rises, but it is
+                           // the owner's own money coming back: never income in any figure.
 
     // Expense
     REGULAR_EXPENSE,

@@ -72,7 +72,8 @@ public class ProfileResponse {
     /**
      * This month's income dated today or earlier, by the category it was recorded in (a salary
      * advance under Salary is its own line), largest first. Money that is not earned is left out:
-     * borrowed money and loans paid back to the owner (their sums reported beside), transfers
+     * borrowed money, loans paid back to the owner and money taken out of their own investments
+     * (their sums reported beside), transfers
      * between the owner's own wallets, a wallet check-in's surplus correction, and non-UZS pots.
      */
     @Getter @Builder
@@ -83,6 +84,8 @@ public class ProfileResponse {
         private BigDecimal excludedBorrowed;
         /** Σ of money paid back to the owner (LOAN_RETURNED_TO_ME) left out. */
         private BigDecimal excludedReturned;
+        /** Σ of money taken out of the owner's investments and savings goals (INVESTMENT_WITHDRAWAL) left out. */
+        private BigDecimal excludedWithdrawn;
     }
 
     @Getter @Builder

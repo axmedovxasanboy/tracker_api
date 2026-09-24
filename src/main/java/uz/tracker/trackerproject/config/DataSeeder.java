@@ -170,6 +170,7 @@ public class DataSeeder implements CommandLineRunner {
             Map.entry("Stocks", "Aksiyalar"),
             Map.entry("Emergency Fund", "Favqulodda jamg'arma"),
             Map.entry("Everyday Spending", "Kundalik xarajat"),
+            Map.entry("Taken from savings", "Jamg'armadan olingan"),
             Map.entry("Anonymous", "Anonim"));
 
     /**
@@ -227,11 +228,19 @@ public class DataSeeder implements CommandLineRunner {
     private void ensureBucketCategories() {
         ensureCategoryForSubType("Emergency Fund", "#f43f5e", "shield-alert", TransactionSubType.EMERGENCY_CONTRIBUTION);
         ensureCategoryForSubType("Everyday Spending", "#94a3b8", "wallet",    TransactionSubType.EVERYDAY_SPENDING);
+        // Money taken back out of an investment: an INCOME-typed row that is never income.
+        ensureCategoryForSubType("Taken from savings", CategoryType.INCOME, "#8b5cf6", "piggy-bank",
+                TransactionSubType.INVESTMENT_WITHDRAWAL);
     }
 
     private void ensureCategoryForSubType(String name, String color, String icon, TransactionSubType subType) {
+        ensureCategoryForSubType(name, CategoryType.EXPENSE, color, icon, subType);
+    }
+
+    private void ensureCategoryForSubType(String name, CategoryType type, String color, String icon,
+                                          TransactionSubType subType) {
         if (!categoryRepository.findByApplicableSubType(subType).isEmpty()) return;
-        categoryRepository.save(cat(name, CategoryType.EXPENSE, color, icon, subType));
+        categoryRepository.save(cat(name, type, color, icon, subType));
     }
 
     /**
@@ -554,6 +563,14 @@ public class DataSeeder implements CommandLineRunner {
             entityManager.createNativeQuery(
                     "ALTER TABLE transactions ADD CONSTRAINT transactions_sub_type_check " +
                             "CHECK (sub_type IS NULL OR sub_type IN (" + inList + "))"
+            ).executeUpdate();
+            // Categories carry a sub-type too (the auto-pick), under Hibernate's own CHECK.
+            entityManager.createNativeQuery(
+                    "ALTER TABLE categories DROP CONSTRAINT IF EXISTS categories_applicable_sub_type_check"
+            ).executeUpdate();
+            entityManager.createNativeQuery(
+                    "ALTER TABLE categories ADD CONSTRAINT categories_applicable_sub_type_check " +
+                            "CHECK (applicable_sub_type IS NULL OR applicable_sub_type IN (" + inList + "))"
             ).executeUpdate();
         } catch (Exception ignored) {
             // Idempotent — non-fatal if the constraint name differs or the DB doesn't
