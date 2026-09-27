@@ -127,7 +127,9 @@ public class ProfileResponse {
         private BigDecimal percentOfBase;
         /** The bucket's rule amount (= buckets[].amount); null for GOALS and while the stable income is unset. */
         private BigDecimal target;
-        /** max(0, amount − target): set aside beyond the target; null without a target. */
+        /** What earlier months carried into the bucket (= buckets[].carried); null for GOALS and without a target. */
+        private BigDecimal carried;
+        /** max(0, amount − (target + carried)): set aside beyond what was due; null without a target. */
         private BigDecimal over;
     }
 
@@ -173,6 +175,8 @@ public class ProfileResponse {
         private BigDecimal amount;
         /** percent × max(stableIncome, salary received) — the same bucket in a month without a bonus. */
         private BigDecimal normalMonthAmount;
+        /** What earlier months left unpaid in the bucket, owed on top of {@link #amount} (never negative). */
+        private BigDecimal carried;
     }
 
     @Getter @Builder

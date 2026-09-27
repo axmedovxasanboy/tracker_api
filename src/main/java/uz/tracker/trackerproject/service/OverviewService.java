@@ -349,10 +349,12 @@ public class OverviewService {
     /**
      * Running allocation ledger from the configured start month to {@code selected}. For each
      * month we recompute the tier scenario (so the % can vary as bank loans, loans and debts start
-     * or end), apply it to that month's base — max(stable income, that month's salary received) plus that
-     * month's bonus income, the same base the tier card uses — to get the recommended amount, and net it against what was actually
-     * paid. The balance is cumulative — overpaying a later month clears an earlier shortfall. The
-     * level stays anchored to stable income.
+     * or end), apply it to that month's base — max(stable income, that month's salary received) plus
+     * that month's bonus income, the same base the tier card uses — to get the recommended amount, and
+     * carry what is left unpaid by the owner's rule ({@link #carriedInto}, 2026-09-27): a month's due is
+     * its target plus what earlier months carried, and an overpayment never carries forward — it
+     * clears what was carried in, but never lowers a later month's target. The level stays anchored
+     * to stable income.
      */
     @Transactional(readOnly = true)
     public AllocationLedgerResponse getAllocationLedger(YearMonth selected, Currency display) {
@@ -410,104 +412,51 @@ public class OverviewService {
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
         Integer level = computeLevel(stableUzs.subtract(mandatoryUzs));
 
-        BigDecimal[] totalRec = zeros();
-        BigDecimal[] totalPaid = zeros();
-        BigDecimal[] prevBalance = zeros();
-        BigDecimal[] recSelected = zeros();
-        BigDecimal[] paidSelected = zeros();
-        BigDecimal[] markedSelected = zeros();
-        String[] pctSelected = new String[LEDGER_WIDTH];
-        BigDecimal bonusSelectedUzs = BigDecimal.ZERO;
-        BigDecimal allocBaseSelectedUzs = BigDecimal.ZERO;
-        String subLevelSelected = null;
+        // The owner's carry rule (see carriedInto): what a month leaves unpaid of target + carried is
+        // carried into the next; an overpayment never carries.
+        BigDecimal[] carried = zeros();
+        YearMonth[] chainStart = new YearMonth[LEDGER_WIDTH];
+        BucketMonth sel = null;
+        BigDecimal[] carriedSelected = zeros();
 
         List<MonthBreakdown> months = new ArrayList<>();
-        YearMonth earliestDue = null, latestDue = null;
-
         LocalDate today = LocalDate.now();
         Set<Long> salaryTree = salaryTree();
         for (YearMonth m = start; !m.isAfter(selected); m = m.plusMonths(1)) {
-            // Each month is charged the bank loans that ran in IT. Asking about today instead
-            // charged July for a loan taken in September, and dropped a paid-off loan from the
-            // months it was still being paid in.
-            BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(m);
-            BigDecimal loanInstallmentsUzs = bankUzs;
-            BigDecimal debt34Uzs = debtChargeUzs(m);
-            BigDecimal debtPaymentsUzs = loanInstallmentsUzs.add(debt34Uzs);
-            BigDecimal debtRatio = stableUzs.signum() > 0 ? debtPaymentsUzs.divide(stableUzs, MC) : null;
-            String subLevel = computeSubLevel(level, debtPaymentsUzs, debtRatio);
-
-            BigDecimal bonusUzs = sumBonusIncomeUzs(m);
-
-            // Bucket %s by scenario (Level 1 from stable income; Levels 2–6 from configured rules).
-            // The base the %s multiply is the tier card's: max(stable income, that month's salary
-            // received) + that month's bonus.
-            String[] pct;
-            if (level != null && level == 1) {
-                pct = computeLevel1Plan(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
-                        debt34Uzs, debtRatio, minLeftoverUzs(1)).pct();
-            } else {
-                pct = bucketPercents(level, subLevel);
-            }
-            BigDecimal allocBaseUzs = allocationBaseUzs(stableUzs, salaryReceivedUzs(m, today, salaryTree), bonusUzs);
-
-            // Marks read once per month and folded in here, so the loop never queries them twice.
-            BucketPaid marksUzs = computeBucketMarks(m);
-            BucketPaid paidUzs = withBucketMarks(computePaidThisMonth(m, Currency.UZS, false), marksUzs);
-            BigDecimal[] paidArr = {paidUzs.donation(), paidUzs.emergency(), paidUzs.investments()};
-            BigDecimal[] markedArr = {marksUzs.donation(), marksUzs.emergency(), marksUzs.investments()};
-
+            BucketMonth bm = bucketMonth(m, stableUzs, mandatoryUzs, level, salaryTree, today);
             boolean isSelected = m.equals(selected);
             boolean monthHasActivity = false;
-            BigDecimal monthNetUzs = BigDecimal.ZERO;
             List<MonthBucketLine> lines = new ArrayList<>(LEDGER_WIDTH);
-
             for (int b = 0; b < LEDGER_WIDTH; b++) {
-                BigDecimal recUzs = pct[b] == null ? BigDecimal.ZERO
-                        : allocBaseUzs.multiply(new BigDecimal(pct[b]), MC).divide(HUNDRED, MC);
-                BigDecimal paidB = paidArr[b];
-                BigDecimal net = recUzs.subtract(paidB);
-
-                totalRec[b] = totalRec[b].add(recUzs);
-                totalPaid[b] = totalPaid[b].add(paidB);
-                if (!isSelected) prevBalance[b] = prevBalance[b].add(net);
-                else {
-                    recSelected[b] = recUzs;
-                    paidSelected[b] = paidB;
-                    markedSelected[b] = markedArr[b];
-                    pctSelected[b] = pct[b];
-                }
-                monthNetUzs = monthNetUzs.add(net);
-
-                if (recUzs.signum() > 0 || paidB.signum() > 0) {
+                BigDecimal net = bm.target()[b].subtract(bm.paid()[b]);
+                if (bm.target()[b].signum() > 0 || bm.paid()[b].signum() > 0) {
                     monthHasActivity = true;
                     lines.add(MonthBucketLine.builder()
                             .bucket(LEDGER_BUCKETS[b])
-                            .percent(pct[b] == null ? null : new BigDecimal(pct[b]))
-                            .recommended(recUzs)
-                            .paid(paidB)
+                            .percent(bm.pct()[b] == null ? null : new BigDecimal(bm.pct()[b]))
+                            .recommended(bm.target()[b])
+                            .paid(bm.paid()[b])
                             .net(net)
                             .build());
                 }
+                if (isSelected) {
+                    carriedSelected[b] = carried[b];
+                } else {
+                    BigDecimal next = clampZero(bm.target()[b].add(carried[b]).subtract(bm.paid()[b]));
+                    if (next.signum() > 0 && carried[b].signum() == 0) chainStart[b] = m;
+                    if (next.signum() == 0) chainStart[b] = null;
+                    carried[b] = next;
+                }
             }
-
-            if (isSelected) {
-                bonusSelectedUzs = bonusUzs;
-                allocBaseSelectedUzs = allocBaseUzs;
-                subLevelSelected = subLevel;
-            } else if (monthNetUzs.signum() > 0) {
-                if (earliestDue == null) earliestDue = m;
-                latestDue = m;
-            }
-
+            if (isSelected) sel = bm;
             if (monthHasActivity) {
                 months.add(MonthBreakdown.builder()
                         .month(m.toString())
                         .level(level)
-                        .subLevel(subLevel)
+                        .subLevel(bm.subLevel())
                         .stableIncome(stableUzs)
-                        .bonus(bonusUzs)
-                        .allocationBase(allocBaseUzs)
+                        .bonus(bm.bonus())
+                        .allocationBase(bm.base())
                         .selected(isSelected)
                         .lines(lines)
                         .build());
@@ -515,38 +464,49 @@ public class OverviewService {
         }
 
         // Effective-% denominator is the selected month's allocation base.
-        BigDecimal incomeBaseSelUzs = allocBaseSelectedUzs;
+        BigDecimal incomeBaseSelUzs = sel.base();
         List<BucketLedger> buckets = new ArrayList<>(LEDGER_WIDTH);
         BigDecimal totalDueNowUzs = BigDecimal.ZERO;
         BigDecimal carriedPrevUzs = BigDecimal.ZERO;
         BigDecimal dueThisMonthUzs = BigDecimal.ZERO;
+        YearMonth earliestDue = null;
+        YearMonth latestDue = null;
 
         for (int b = 0; b < LEDGER_WIDTH; b++) {
-            BigDecimal balance = totalRec[b].subtract(totalPaid[b]);          // net through selected
-            BigDecimal outstanding = balance.signum() > 0 ? balance : BigDecimal.ZERO;
-            BigDecimal carried = prevBalance[b];                              // can be negative (ahead)
-            BigDecimal effPct = (paidSelected[b].signum() > 0 && incomeBaseSelUzs.signum() > 0)
-                    ? paidSelected[b].multiply(HUNDRED, MC).divide(incomeBaseSelUzs, MC)
+            BigDecimal target = sel.target()[b];
+            BigDecimal paid = sel.paid()[b];
+            BigDecimal outstanding = clampZero(target.add(carriedSelected[b]).subtract(paid));
+            BigDecimal effPct = (paid.signum() > 0 && incomeBaseSelUzs.signum() > 0)
+                    ? paid.multiply(HUNDRED, MC).divide(incomeBaseSelUzs, MC)
                     : null;
-            boolean over = paidSelected[b].compareTo(recSelected[b]) > 0;
+            boolean over = paid.compareTo(target.add(carriedSelected[b])) > 0;
 
             buckets.add(BucketLedger.builder()
                     .bucket(LEDGER_BUCKETS[b])
                     .label(LEDGER_LABELS[b])
-                    .percent(pctSelected[b] == null ? null : new BigDecimal(pctSelected[b]))
-                    .recommended(recSelected[b])
-                    .paid(paidSelected[b])
-                    .marked(markedSelected[b])
-                    .carried(carried)
+                    .percent(sel.pct()[b] == null ? null : new BigDecimal(sel.pct()[b]))
+                    .recommended(target)
+                    .paid(paid)
+                    .marked(sel.marked()[b])
+                    .carried(carriedSelected[b])
                     .outstanding(outstanding)
                     .effectivePercent(effPct)
                     .overAllocated(over)
                     .build());
 
             totalDueNowUzs = totalDueNowUzs.add(outstanding);
-            if (carried.signum() > 0) carriedPrevUzs = carriedPrevUzs.add(carried);
-            dueThisMonthUzs = dueThisMonthUzs.add(recSelected[b]);
+            carriedPrevUzs = carriedPrevUzs.add(carriedSelected[b]);
+            dueThisMonthUzs = dueThisMonthUzs.add(target);
+            if (carriedSelected[b].signum() > 0) {
+                if (earliestDue == null || (chainStart[b] != null && chainStart[b].isBefore(earliestDue))) {
+                    earliestDue = chainStart[b];
+                }
+                latestDue = selected.minusMonths(1);
+            }
         }
+        BigDecimal bonusSelectedUzs = sel.bonus();
+        BigDecimal allocBaseSelectedUzs = sel.base();
+        String subLevelSelected = sel.subLevel();
 
         return AllocationLedgerResponse.builder()
                 .currency(display)
@@ -566,6 +526,85 @@ public class OverviewService {
                 .buckets(buckets)
                 .months(months)
                 .build();
+    }
+
+    // ── Carry-over of unpaid savings ──────────────────────────────────────────
+
+    /**
+     * One month of the savings rule: its sub-level and each bucket's percentage, its allocation base,
+     * each bucket's target (percentage × base) and what was paid into it (marks included).
+     */
+    private record BucketMonth(String subLevel, String[] pct, BigDecimal bonus, BigDecimal base,
+                               BigDecimal[] target, BigDecimal[] paid, BigDecimal[] marked) {}
+
+    /**
+     * {@code m}'s figures as the ledger has always rebuilt them: that month's bank loans and debt
+     * asks pick its sub-level and percentages (Level 1 from the stable income; Levels 2–6 from the
+     * configured rules), its salary and bonus make its base.
+     */
+    private BucketMonth bucketMonth(YearMonth m, BigDecimal stableUzs, BigDecimal mandatoryUzs, Integer level,
+                                    Set<Long> salaryTree, LocalDate today) {
+        // Each month is charged the bank loans that ran in IT. Asking about today instead charged
+        // July for a loan taken in September, and dropped a paid-off loan from the months it was
+        // still being paid in.
+        BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(m);
+        BigDecimal debt34Uzs = debtChargeUzs(m);
+        BigDecimal debtPaymentsUzs = bankUzs.add(debt34Uzs);
+        BigDecimal debtRatio = stableUzs.signum() > 0 ? debtPaymentsUzs.divide(stableUzs, MC) : null;
+        String subLevel = computeSubLevel(level, debtPaymentsUzs, debtRatio);
+        String[] pct = level != null && level == 1
+                ? computeLevel1Plan(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
+                        debt34Uzs, debtRatio, minLeftoverUzs(1)).pct()
+                : bucketPercents(level, subLevel);
+        BigDecimal bonusUzs = sumBonusIncomeUzs(m);
+        BigDecimal base = allocationBaseUzs(stableUzs, salaryReceivedUzs(m, today, salaryTree), bonusUzs);
+        // Marks read once per month and folded in here, so the loop never queries them twice.
+        BucketPaid marks = computeBucketMarks(m);
+        BucketPaid paid = withBucketMarks(computePaidThisMonth(m, Currency.UZS, false), marks);
+        BigDecimal[] target = zeros();
+        for (int b = 0; b < LEDGER_WIDTH; b++) {
+            if (pct[b] != null) target[b] = base.multiply(new BigDecimal(pct[b]), MC).divide(HUNDRED, MC);
+        }
+        return new BucketMonth(subLevel, pct, bonusUzs, base, target,
+                new BigDecimal[]{paid.donation(), paid.emergency(), paid.investments()},
+                new BigDecimal[]{marks.donation(), marks.emergency(), marks.investments()});
+    }
+
+    /**
+     * What each bucket (DONATION, EMERGENCY, INVESTMENTS) carries into {@code month} from the months
+     * before it, by the owner's rule (2026-09-27), from the tracking start:
+     * <pre>
+     *   due_m          = target_m + carried_m
+     *   carried_{m+1}  = max(0, due_m − paid_m)          carried = 0 at the tracking start
+     * </pre>
+     * An overpayment never carries: 2.5M paid against a 2M target leaves nothing owed, and does not
+     * lower next month's target. Savings goals are not carried — they keep their own schedule. All
+     * zero without a stable income or a tracking start, and for a month not after the start.
+     */
+    Map<String, BigDecimal> carriedInto(YearMonth month) {
+        Map<String, BigDecimal> out = new java.util.LinkedHashMap<>();
+        for (String b : LEDGER_BUCKETS) out.put(b, BigDecimal.ZERO);
+        Settings s = settingsService.getOrCreate();
+        if (s == null || s.getMonthlyStableIncome() == null || s.getMonthlyStableIncome().signum() <= 0
+                || s.getAllocationTrackingStartMonth() == null) {
+            return out;
+        }
+        YearMonth start = YearMonth.from(s.getAllocationTrackingStartMonth());
+        if (!month.isAfter(start)) return out;
+        BigDecimal stableUzs = s.getMonthlyStableIncome();
+        BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
+        Integer level = computeLevel(stableUzs.subtract(mandatoryUzs));
+        Set<Long> salaryTree = salaryTree();
+        LocalDate today = LocalDate.now();
+        BigDecimal[] carried = zeros();
+        for (YearMonth m = start; m.isBefore(month); m = m.plusMonths(1)) {
+            BucketMonth bm = bucketMonth(m, stableUzs, mandatoryUzs, level, salaryTree, today);
+            for (int b = 0; b < LEDGER_WIDTH; b++) {
+                carried[b] = clampZero(bm.target()[b].add(carried[b]).subtract(bm.paid()[b]));
+            }
+        }
+        for (int b = 0; b < LEDGER_WIDTH; b++) out.put(LEDGER_BUCKETS[b], carried[b]);
+        return out;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -662,34 +701,54 @@ public class OverviewService {
     }
 
     /**
-     * The salary received in {@code month}: REGULAR_INCOME in the salary tree, bonus categories left
-     * out, UZS only (transfers, loans and loans paid back are other sub-types). A month under way
-     * counts only rows dated up to {@code asOf} — money recorded for a later day has not come yet;
-     * a month that has not begun counts nothing.
+     * The salary received for {@code month}: REGULAR_INCOME in the salary tree, bonus categories left
+     * out, UZS only (transfers, loans and loans paid back are other sub-types) — counted in its
+     * accounting month ({@link #regularIncomeFor}): September's salary paid on 3 October is
+     * September's. Only rows dated up to {@code asOf} count — money recorded for a later day has not
+     * come yet; a month that has not begun counts nothing.
      */
     BigDecimal salaryReceivedUzs(YearMonth month, LocalDate asOf) {
         return salaryReceivedUzs(month, asOf, salaryTree());
     }
 
     private BigDecimal salaryReceivedUzs(YearMonth month, LocalDate asOf, Set<Long> tree) {
-        LocalDate start = month.atDay(1);
-        LocalDate end = asOf == null || asOf.isAfter(month.atEndOfMonth()) ? month.atEndOfMonth() : asOf;
-        if (end.isBefore(start)) return BigDecimal.ZERO;
         BigDecimal total = BigDecimal.ZERO;
-        List<Transaction> rows = transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
-                uz.tracker.trackerproject.enums.TransactionSubType.REGULAR_INCOME, start, end);
-        if (rows == null) return total;
-        for (Transaction t : rows) {
+        for (Transaction t : regularIncomeFor(month)) {
             if (t.getType() != TransactionType.INCOME || t.getAmount() == null) continue;
             if (t.getCurrency() != null && t.getCurrency() != Currency.UZS) continue;
+            if (asOf != null && t.getTransactionDate() != null && t.getTransactionDate().isAfter(asOf)) continue;
             if (isSalaryCategory(t.getCategory(), tree)) total = total.add(t.getAmount());
         }
         return total;
     }
 
     /**
-     * Bonus-tagged income received in {@code month}, in the reporting currency: INCOME in a category
-     * flagged {@code bonusIncome}, or under a flagged parent. Added to that month's allocation base.
+     * Regular income that counts in {@code month} (its accounting month, Transaction.salaryMonth):
+     * dated in it unless marked as another month's salary, plus what is marked as its salary
+     * whatever day it arrived. Package-private: the profile reads the same rows.
+     */
+    List<Transaction> regularIncomeFor(YearMonth month) {
+        LocalDate start = month.atDay(1);
+        LocalDate end = month.atEndOfMonth();
+        List<Transaction> out = new ArrayList<>();
+        List<Transaction> dated = transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+                uz.tracker.trackerproject.enums.TransactionSubType.REGULAR_INCOME, start, end);
+        for (Transaction t : dated == null ? List.<Transaction>of() : dated) {
+            if (t.getSalaryMonth() == null || t.getSalaryMonth().equals(start)) out.add(t);
+        }
+        List<Transaction> marked = transactionRepository.findBySalaryMonth(start);
+        for (Transaction t : marked == null ? List.<Transaction>of() : marked) {
+            if (t.getSubType() != uz.tracker.trackerproject.enums.TransactionSubType.REGULAR_INCOME) continue;
+            LocalDate on = t.getTransactionDate();
+            if (on != null && (on.isBefore(start) || on.isAfter(end))) out.add(t);   // dated elsewhere
+        }
+        return out;
+    }
+
+    /**
+     * Bonus-tagged income received for {@code month}, in the reporting currency: INCOME in a category
+     * flagged {@code bonusIncome}, or under a flagged parent — counted in its accounting month (a
+     * bonus marked as August's is August's). Added to that month's allocation base.
      */
     private BigDecimal sumBonusIncomeUzs(YearMonth month) {
         LocalDate start = month.atDay(1);

@@ -88,6 +88,8 @@ public class ProfileService {
         BigDecimal salaryBase = stable.max(salaryReceived);
         BigDecimal savingsBase = nz(tier.getAllocationBase());
 
+        // What earlier months left unpaid, per bucket — the advisor's figure (an overpayment never carries).
+        Map<String, BigDecimal> carried = overviewService.carriedInto(month);
         List<Bucket> buckets = new ArrayList<>(BUCKETS.size());
         for (String name : BUCKETS) {
             AllocationLine line = askedLine(tier.getAllocation(), name);
@@ -98,6 +100,7 @@ public class ProfileService {
                     // The engine's own figure, so it is the advisor's savingsThisMonth target.
                     .amount(line == null ? BigDecimal.ZERO : nz(line.getMinAmount()))
                     .normalMonthAmount(share(salaryBase, percent))
+                    .carried(nz(carried == null ? null : carried.get(name)))
                     .build());
         }
         Rule rule = rule(tier.getAllocation());
@@ -170,14 +173,18 @@ public class ProfileService {
 
     /**
      * The income behind the savings base, by category, largest first: the salary rows the engine
-     * counts (salary tree, dated up to today) and the bonus rows it adds (the whole month).
+     * counts (salary tree, arrived up to today) and the bonus rows it adds — each in its accounting
+     * month (Transaction.salaryMonth): September's salary paid on 3 October is September's.
      */
     private List<BaseLine> baseLines(YearMonth month, LocalDate date, Set<Long> salaryTree) {
         Map<Long, IncomeGroup> groups = new LinkedHashMap<>();
-        List<Transaction> rows = transactionRepository.findByTransactionDateBetween(month.atDay(1), month.atEndOfMonth());
-        for (Transaction t : rows == null ? List.<Transaction>of() : rows) {
+        LocalDate start = month.atDay(1);
+        List<Transaction> rows = withMarkedSalary(month,
+                transactionRepository.findByTransactionDateBetween(start, month.atEndOfMonth()), null);
+        for (Transaction t : rows) {
             if (t.getType() != TransactionType.INCOME || t.getAmount() == null || !isUzs(t.getCurrency())) continue;
             if (t.getSubType() == TransactionSubType.INVESTMENT_WITHDRAWAL) continue;   // never income
+            if (t.getSalaryMonth() != null && !t.getSalaryMonth().equals(start)) continue;   // another month's
             Category category = t.getCategory();
             boolean bonus = OverviewService.isBonusCategory(category);
             boolean salary = t.getSubType() == TransactionSubType.REGULAR_INCOME && !t.getTransactionDate().isAfter(date)
@@ -204,10 +211,18 @@ public class ProfileService {
         BigDecimal borrowed = BigDecimal.ZERO;
         BigDecimal returned = BigDecimal.ZERO;
         BigDecimal withdrawn = BigDecimal.ZERO;
-        List<Transaction> rows = transactionRepository.findByTransactionDateBetween(start, date);
-        for (Transaction t : rows == null ? List.<Transaction>of() : rows) {
+        List<Transaction> rows = withMarkedSalary(YearMonth.from(start),
+                transactionRepository.findByTransactionDateBetween(start, date), date);
+        for (Transaction t : rows) {
             if (t.getType() != TransactionType.INCOME || t.getAmount() == null || !isUzs(t.getCurrency())) continue;
             TransactionSubType st = t.getSubType();
+            // The salary tree's and the bonus's income counts in its accounting month: a row marked
+            // as another month's salary is that month's; one marked as this month's (arrived in
+            // another) was added by withMarkedSalary. Other income stays with its date.
+            boolean base = inBase(t.getCategory(), salaryTree);
+            boolean markedElsewhere = t.getSalaryMonth() != null && !t.getSalaryMonth().equals(start);
+            if (base && markedElsewhere) continue;
+            if (!base && !YearMonth.from(t.getTransactionDate()).equals(YearMonth.from(start))) continue;
             if (st == TransactionSubType.LOAN_RECEIVED) {
                 borrowed = borrowed.add(t.getAmount());
                 continue;
@@ -241,6 +256,22 @@ public class ProfileService {
     }
 
     /**
+     * {@code dated} plus the regular income marked as {@code month}'s salary that arrived in another
+     * month (up to {@code upTo} when given).
+     */
+    private List<Transaction> withMarkedSalary(YearMonth month, List<Transaction> dated, LocalDate upTo) {
+        List<Transaction> rows = new ArrayList<>(dated == null ? List.of() : dated);
+        List<Transaction> marked = transactionRepository.findBySalaryMonth(month.atDay(1));
+        for (Transaction t : marked == null ? List.<Transaction>of() : marked) {
+            LocalDate on = t.getTransactionDate();
+            if (on == null || YearMonth.from(on).equals(month)) continue;          // already in `dated`
+            if (upTo != null && on.isAfter(upTo)) continue;
+            rows.add(t);
+        }
+        return rows;
+    }
+
+    /**
      * What has been set aside this month: each bucket at exactly the figure the advisor calls paid
      * (the Plan's own sum, "already paid" marks included), against its rule amount — then savings
      * goals, when anything went into one by {@code date}.
@@ -257,13 +288,15 @@ public class ProfileService {
         BigDecimal total = BigDecimal.ZERO;
         for (int i = 0; i < BUCKETS.size(); i++) {
             BigDecimal target = targets == null ? null : targets.get(i).getAmount();
+            BigDecimal carried = targets == null ? null : targets.get(i).getCarried();
             lines.add(AllocatedLine.builder()
                     .bucket(BUCKETS.get(i))
                     .amount(amounts[i])
                     .percentOfIncome(percentOf(amounts[i], income))
                     .percentOfBase(percentOf(amounts[i], savingsBase))
                     .target(target)
-                    .over(target == null ? null : clampZero(amounts[i].subtract(target)))
+                    .carried(carried)
+                    .over(target == null ? null : clampZero(amounts[i].subtract(target.add(nz(carried)))))
                     .build());
             total = total.add(amounts[i]);
         }

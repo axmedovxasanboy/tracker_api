@@ -11,6 +11,7 @@ import uz.tracker.trackerproject.enums.TransactionType;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 
 @Entity
 @Table(name = "transactions")
@@ -77,6 +78,26 @@ public class Transaction {
 
     @Column(name = "transfer_pair_id")
     private Long transferPairId;
+
+    /**
+     * Which month's salary this is, when that is not the month it arrived in — September's salary
+     * paid on 3 October. Stored as the 1st of that month (the setter moves any day there). Only
+     * regular INCOME carries it (TransactionService drops it elsewhere); the allocation engine reads
+     * it for salary-tree and bonus income only. Null: the month of {@link #transactionDate}.
+     * Wallets, History and pace always use the actual date.
+     */
+    @Column(name = "salary_month")
+    private LocalDate salaryMonth;
+
+    public void setSalaryMonth(LocalDate salaryMonth) {
+        this.salaryMonth = salaryMonth == null ? null : salaryMonth.withDayOfMonth(1);
+    }
+
+    /** The month this income counts in: {@link #salaryMonth}, else the month it arrived in. */
+    public YearMonth accountingMonth() {
+        if (salaryMonth != null) return YearMonth.from(salaryMonth);
+        return transactionDate == null ? null : YearMonth.from(transactionDate);
+    }
 
     /**
      * Portion of {@link #amount} paid in physical cash (not deducted from the linked card).

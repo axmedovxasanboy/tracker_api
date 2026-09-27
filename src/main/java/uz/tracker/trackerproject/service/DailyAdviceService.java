@@ -189,7 +189,11 @@ public class DailyAdviceService {
         List<Transaction> salaryThisMonth = salaryRows(current);
         SalaryPattern pattern = salaryPattern(current, stable, salaryThisMonth);
         LocalDate until = pattern == null ? current.plusMonths(1).atEndOfMonth() : horizonEnd(pattern.mainDay(), today);
-        Salary salary = projectSalary(pattern, today, until, stable, nz(in.salaryComing()), salaryThisMonth);
+        Map<YearMonth, List<Transaction>> salaryAround = Map.of(
+                current.minusMonths(1), salaryRows(current.minusMonths(1)),
+                current, salaryThisMonth,
+                current.plusMonths(1), salaryRows(current.plusMonths(1)));
+        Salary salary = projectSalary(pattern, today, until, stable, nz(in.salaryComing()), salaryAround);
         List<IncomePart> incomes = salary.incomes();
 
         // ── 3. Must-pays: through the end of the horizon's month, and at least a listing's worth ──
@@ -321,7 +325,10 @@ public class DailyAdviceService {
     // ── Income ────────────────────────────────────────────────────────────────
 
     /**
-     * The salary's shape: day of month → amount, and the day of the largest part. Package-private
+     * The salary's shape: slot → amount. A slot is a part's day of month plus 100 × (1 + the months
+     * between the salary's own month and the one it arrives in, −1..+1 — {@link #slot}): October's
+     * salary paid early on 30 September is slot 30, September's advance on the 15th slot 115, its
+     * salary paid on 3 October slot 203. Slots sort in the order a month's parts arrive. Package-private
      * for tests.
      */
     record SalaryPattern(NavigableMap<Integer, BigDecimal> parts) {
@@ -329,14 +336,36 @@ public class DailyAdviceService {
             return parts.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
         }
 
-        /** The day of the largest part; the earlier day on a tie. */
-        int mainDay() {
-            int day = parts.firstKey();
+        /** The slot of the largest part; the earlier one on a tie. */
+        int mainSlot() {
+            int slot = parts.firstKey();
             for (Map.Entry<Integer, BigDecimal> p : parts.entrySet()) {
-                if (p.getValue().compareTo(parts.get(day)) > 0) day = p.getKey();
+                if (p.getValue().compareTo(parts.get(slot)) > 0) slot = p.getKey();
             }
-            return day;
+            return slot;
         }
+
+        /**
+         * The calendar day of month the largest part arrives on — the main payday. Every calendar
+         * month has one such arrival, whichever month's salary it is.
+         */
+        int mainDay() {
+            return mainSlot() % 100;
+        }
+    }
+
+    /**
+     * A part of {@code salaryMonth}'s salary arriving on {@code on}: its day, plus 100 × (1 + how many
+     * months after the salary's own it arrives, −1..+1 — Transaction.salaryMonth allows no more).
+     */
+    static int slot(YearMonth salaryMonth, LocalDate on) {
+        long offset = java.time.temporal.ChronoUnit.MONTHS.between(salaryMonth, YearMonth.from(on));
+        return (int) (Math.max(-1, Math.min(1, offset)) + 1) * 100 + on.getDayOfMonth();
+    }
+
+    /** When the part in {@code slot} of {@code salaryMonth}'s salary arrives. */
+    static LocalDate arrival(YearMonth salaryMonth, int slot) {
+        return dayIn(salaryMonth.plusMonths(slot / 100 - 1), slot % 100);
     }
 
     /**
@@ -347,33 +376,48 @@ public class DailyAdviceService {
      */
     private SalaryPattern salaryPattern(YearMonth current, BigDecimal stable, List<Transaction> thisMonth) {
         for (int back = 1; back <= SALARY_LOOKBACK_MONTHS; back++) {
-            SalaryPattern pattern = patternOf(salaryRows(current.minusMonths(back)), stable);
+            YearMonth month = current.minusMonths(back);
+            SalaryPattern pattern = patternOf(salaryRows(month), month, stable);
             if (pattern != null) return pattern;
         }
-        return patternOf(thisMonth, stable);
+        return patternOf(thisMonth, current, stable);
     }
 
-    /** A month's salary as parts by day, or null when it is not "the salary arrived". */
-    private static SalaryPattern patternOf(List<Transaction> salary, BigDecimal stable) {
+    /** {@code month}'s salary as parts by slot, or null when it is not "the salary arrived". */
+    private static SalaryPattern patternOf(List<Transaction> salary, YearMonth month, BigDecimal stable) {
         BigDecimal total = salary.stream().map(Transaction::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
         if (total.compareTo(stable.multiply(SALARY_MONTH_SHARE)) < 0) return null;
         BigDecimal partFloor = stable.multiply(SALARY_PART_SHARE);
         NavigableMap<Integer, BigDecimal> parts = new TreeMap<>();
         for (Transaction t : salary) {
             if (t.getAmount().compareTo(partFloor) < 0) continue;
-            parts.merge(t.getTransactionDate().getDayOfMonth(), t.getAmount(), BigDecimal::add);
+            parts.merge(slot(month, t.getTransactionDate()), t.getAmount(), BigDecimal::add);
         }
         return parts.isEmpty() ? null : new SalaryPattern(capAt(parts, stable));
     }
 
-    /** A month's salary: the population of salaryReceived — regular income, bonus categories left out. */
+    /**
+     * A month's salary: the population of salaryReceived — regular income, bonus categories left out
+     * — in its accounting month: dated in {@code ym} unless marked as another month's, plus what is
+     * marked as {@code ym}'s salary whatever day it arrived (Transaction.salaryMonth).
+     */
     private List<Transaction> salaryRows(YearMonth ym) {
-        List<Transaction> rows = transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
-                TransactionSubType.REGULAR_INCOME, ym.atDay(1), ym.atEndOfMonth());
-        if (rows == null) return List.of();
-        return rows.stream()
+        LocalDate start = ym.atDay(1);
+        List<Transaction> all = new ArrayList<>();
+        List<Transaction> dated = transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+                TransactionSubType.REGULAR_INCOME, start, ym.atEndOfMonth());
+        for (Transaction t : dated == null ? List.<Transaction>of() : dated) {
+            if (t.getSalaryMonth() == null || t.getSalaryMonth().equals(start)) all.add(t);
+        }
+        List<Transaction> marked = transactionRepository.findBySalaryMonth(start);
+        for (Transaction t : marked == null ? List.<Transaction>of() : marked) {
+            if (t.getSubType() == TransactionSubType.REGULAR_INCOME && t.getTransactionDate() != null
+                    && !YearMonth.from(t.getTransactionDate()).equals(ym)) all.add(t);
+        }
+        return all.stream()
                 .filter(t -> t.getType() != TransactionType.EXPENSE && isUzs(t.getCurrency())
                         && t.getAmount() != null && t.getAmount().signum() > 0 && !isBonus(t))
+                .sorted(Comparator.comparing(Transaction::getTransactionDate))
                 .toList();
     }
 
@@ -421,52 +465,55 @@ public class DailyAdviceService {
     record Salary(List<IncomePart> incomes, LocalDate mainPartOn) {}
 
     /**
-     * Projected income in [today, until].
+     * Projected income in [today, until], salary month by salary month (Transaction.salaryMonth: a
+     * salary can arrive a month early or late — October's on 30 September, September's on 3 October).
      *
-     * <p>This month: a row recorded for a later day is income on that day. Then what the month has
-     * brought — received or recorded ahead — is matched against the usual parts in day order, and
-     * only what is still missing of each part is expected, on its own day, never more in all than
-     * {@code salaryComing}. A part whose day has passed without it is left out: it cannot be dated,
-     * and "today" would be a guess (it is expected on its day again from next month). Without a
-     * salary history, {@code salaryComing} falls on the month's last day.
+     * <p>A row recorded for a later day is income on that day. For last month, this month and next
+     * month, what each salary month has brought — received or recorded ahead — is matched against the
+     * usual parts in the order they arrive, and only what is still missing of each part is expected,
+     * on the day it arrives: this month's never more in all than {@code salaryComing}, the others
+     * never more than the stable income. A part whose day has passed without it is left out: it
+     * cannot be dated, and "today" would be a guess. Later salary months: each part on its day.
+     * Without a salary history, {@code salaryComing} falls on the month's last day and the stable
+     * income on each coming 1st.
      *
-     * <p>Later months: each part on its day — or, without a history, the stable income on the 1st.
+     * @param salaryAround last, this and next month's salary rows, by salary month
      */
     private static Salary projectSalary(SalaryPattern pattern, LocalDate today, LocalDate until, BigDecimal stable,
-                                 BigDecimal salaryComing, List<Transaction> thisMonth) {
+                                 BigDecimal salaryComing, Map<YearMonth, List<Transaction>> salaryAround) {
         YearMonth current = YearMonth.from(today);
         NavigableMap<LocalDate, BigDecimal> byDay = new TreeMap<>();
         LocalDate mainPartOn = null;
 
-        for (Transaction t : thisMonth) {
-            if (t.getTransactionDate().isAfter(today)) byDay.merge(t.getTransactionDate(), t.getAmount(), BigDecimal::add);
+        for (List<Transaction> rows : salaryAround.values()) {
+            for (Transaction t : rows) {
+                if (t.getTransactionDate().isAfter(today)) byDay.merge(t.getTransactionDate(), t.getAmount(), BigDecimal::add);
+            }
         }
         if (pattern != null) {
-            BigDecimal arrived = thisMonth.stream().map(Transaction::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
-            BigDecimal cap = salaryComing;
-            for (Map.Entry<Integer, BigDecimal> part : pattern.parts().entrySet()) {
-                BigDecimal covered = arrived.min(part.getValue());
-                arrived = arrived.subtract(covered);
-                LocalDate on = dayIn(current, part.getKey());
-                BigDecimal missing = part.getValue().subtract(covered).min(cap);
-                if (missing.signum() <= 0 || on.isBefore(today)) continue;
-                byDay.merge(on, missing, BigDecimal::add);
-                cap = cap.subtract(missing);
-                if (part.getKey() == pattern.mainDay()) mainPartOn = on;
+            for (YearMonth month = current.minusMonths(1); !month.isAfter(YearMonth.from(until).plusMonths(1));
+                 month = month.plusMonths(1)) {
+                List<Transaction> rows = salaryAround.getOrDefault(month, List.of());
+                BigDecimal arrived = rows.stream().map(Transaction::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
+                BigDecimal cap = month.equals(current) ? salaryComing : clampZero(stable.subtract(arrived));
+                for (Map.Entry<Integer, BigDecimal> part : pattern.parts().entrySet()) {
+                    BigDecimal covered = arrived.min(part.getValue());
+                    arrived = arrived.subtract(covered);
+                    LocalDate on = arrival(month, part.getKey());
+                    BigDecimal missing = part.getValue().subtract(covered).min(cap);
+                    if (missing.signum() <= 0 || on.isBefore(today) || on.isAfter(until)) continue;
+                    byDay.merge(on, missing, BigDecimal::add);
+                    cap = cap.subtract(missing);
+                    if (month.equals(current) && part.getKey() == pattern.mainSlot()) mainPartOn = on;
+                }
             }
-        } else if (salaryComing.signum() > 0) {
-            byDay.merge(current.atEndOfMonth(), salaryComing, BigDecimal::add);
-            mainPartOn = current.atEndOfMonth();
-        }
-
-        for (YearMonth ym = current.plusMonths(1); !ym.atDay(1).isAfter(until); ym = ym.plusMonths(1)) {
-            if (pattern == null) {
+        } else {
+            if (salaryComing.signum() > 0) {
+                byDay.merge(current.atEndOfMonth(), salaryComing, BigDecimal::add);
+                mainPartOn = current.atEndOfMonth();
+            }
+            for (YearMonth ym = current.plusMonths(1); !ym.atDay(1).isAfter(until); ym = ym.plusMonths(1)) {
                 byDay.merge(ym.atDay(1), stable, BigDecimal::add);
-                continue;
-            }
-            for (Map.Entry<Integer, BigDecimal> part : pattern.parts().entrySet()) {
-                LocalDate date = dayIn(ym, part.getKey());
-                if (!date.isAfter(until)) byDay.merge(date, part.getValue(), BigDecimal::add);
             }
         }
         List<IncomePart> out = new ArrayList<>();

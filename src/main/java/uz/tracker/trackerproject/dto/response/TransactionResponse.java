@@ -35,6 +35,8 @@ public class TransactionResponse {
     private Long repaidLoanTakenId;
     private Long repaidLoanGivenId;
     private Long repaidDebtId;
+    /** Which month's salary this is ('YYYY-MM'), when not the month it arrived in; null otherwise. */
+    private java.time.YearMonth salaryMonth;
 
     public static TransactionResponse from(Transaction t) {
         CardSummaryResponse card = null;
@@ -72,6 +74,7 @@ public class TransactionResponse {
                 .repaidLoanTakenId(t.getRepaidLoanTakenId())
                 .repaidLoanGivenId(t.getRepaidLoanGivenId())
                 .repaidDebtId(t.getRepaidDebtId())
+                .salaryMonth(t.getSalaryMonth() == null ? null : java.time.YearMonth.from(t.getSalaryMonth()))
                 .build();
     }
 }

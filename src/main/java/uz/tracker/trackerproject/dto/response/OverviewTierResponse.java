@@ -50,9 +50,11 @@ public class OverviewTierResponse {
     private BigDecimal allocationBase;
 
     /**
-     * The salary received this month: regular income in the salary's category tree (the root above
-     * the bonus categories — for the owner Salary, with Avans), bonus categories left out; in the
-     * month under way, dated up to today. Zero before payday, when the stable income stands in.
+     * The salary received for this month: regular income in the salary's category tree (the root
+     * above the bonus categories — for the owner Salary, with Avans), bonus categories left out,
+     * counted in its accounting month (Transaction.salaryMonth ?? its date's month — September's
+     * salary paid on 3 October is September's), arrived up to today. Zero before payday, when the
+     * stable income stands in.
      */
     private BigDecimal salaryReceived;
 

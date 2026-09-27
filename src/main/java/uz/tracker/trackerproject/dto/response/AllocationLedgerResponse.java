@@ -58,8 +58,8 @@ public class AllocationLedgerResponse {
         private BigDecimal paid;          // paid in the selected month (recorded + marks)
         /** Portion of {@link #paid} that came from "already paid" marks — no money moved. */
         private BigDecimal marked;
-        private BigDecimal carried;       // net balance from previous months (negative = ahead)
-        private BigDecimal outstanding;   // max(0, running balance through selected month)
+        private BigDecimal carried;       // carried in from earlier months (never negative: an overpayment never carries)
+        private BigDecimal outstanding;   // max(0, recommended + carried − paid) this month
         private BigDecimal effectivePercent; // paid ÷ allocation base this month, as a % (null when nothing paid)
         private boolean overAllocated;    // paid more than recommended this month
     }

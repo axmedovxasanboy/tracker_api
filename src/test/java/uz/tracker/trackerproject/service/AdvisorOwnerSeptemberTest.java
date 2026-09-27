@@ -486,9 +486,9 @@ class AdvisorOwnerSeptemberTest {
                      {"categoryId":12,"name":"Avans","nameUz":null,"amount":2000000}]},
                  "rule":{"reason":"BANK_LOAN_TIGHT","cutoff":5000000},
                  "buckets":[
-                   {"bucket":"DONATION","percent":5,"amount":1213450,"normalMonthAmount":394450},
-                   {"bucket":"EMERGENCY","percent":2,"amount":485380,"normalMonthAmount":157780},
-                   {"bucket":"INVESTMENTS","percent":8,"amount":1941520,"normalMonthAmount":631120}],
+                   {"bucket":"DONATION","percent":5,"amount":1213450,"normalMonthAmount":394450,"carried":0},
+                   {"bucket":"EMERGENCY","percent":2,"amount":485380,"normalMonthAmount":157780,"carried":0},
+                   {"bucket":"INVESTMENTS","percent":8,"amount":1941520,"normalMonthAmount":631120,"carried":0}],
                  "totalPercent":15,"totalAmount":3640350,"normalMonthTotal":1183350,
                  "nextMonth":{"month":"2026-10","reason":"BANK_AND_DEBTS","loanPayments":900000,
                    "leftForSavings":800000,"buckets":[
@@ -503,11 +503,11 @@ class AdvisorOwnerSeptemberTest {
                    "excludedBorrowed":1955000,"excludedReturned":300000,"excludedWithdrawn":0},
                  "allocatedThisMonth":{"total":1768000,"percentOfIncome":7.3,"percentOfBase":7.3,"lines":[
                      {"bucket":"DONATION","amount":0,"percentOfIncome":0.0,"percentOfBase":0.0,
-                      "target":1213450,"over":0},
+                      "target":1213450,"carried":0,"over":0},
                      {"bucket":"EMERGENCY","amount":353600,"percentOfIncome":1.5,"percentOfBase":1.5,
-                      "target":485380,"over":0},
+                      "target":485380,"carried":0,"over":0},
                      {"bucket":"INVESTMENTS","amount":1414400,"percentOfIncome":5.8,"percentOfBase":5.8,
-                      "target":1941520,"over":0}]}}
+                      "target":1941520,"carried":0,"over":0}]}}
                 """, json, org.skyscreamer.jsonassert.JSONCompareMode.STRICT);
     }
 

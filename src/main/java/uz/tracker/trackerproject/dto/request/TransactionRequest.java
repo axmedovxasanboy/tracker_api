@@ -64,6 +64,33 @@ public class TransactionRequest {
      */
     private java.time.LocalDate paymentStartDate;
 
+    /**
+     * Which month's salary this is ('YYYY-MM') when it arrives in another month — September's salary
+     * paid on 3 October, October's paid early on 30 September: the month before, of, or after the
+     * date (anything further is a 400). Regular income only; ignored (stored as null) on any other
+     * transaction. On
+     * an update a request without the key keeps the stored month (the bot never sends it); an
+     * explicit null clears it.
+     */
+    @lombok.Getter(lombok.AccessLevel.NONE) @lombok.Setter(lombok.AccessLevel.NONE)
+    private java.time.YearMonth salaryMonth;
+    @lombok.Getter(lombok.AccessLevel.NONE) @lombok.Setter(lombok.AccessLevel.NONE)
+    private boolean salaryMonthSent;
+
+    public java.time.YearMonth getSalaryMonth() {
+        return salaryMonth;
+    }
+
+    public void setSalaryMonth(java.time.YearMonth salaryMonth) {
+        this.salaryMonth = salaryMonth;
+        this.salaryMonthSent = true;
+    }
+
+    /** True when the request carried {@code salaryMonth} at all — null included. */
+    public boolean salaryMonthGiven() {
+        return salaryMonthSent;
+    }
+
     /** Portion of {@link #amount} paid in physical cash. Service enforces 0 <= cashAmount <= amount. */
     @DecimalMin(value = "0.0", message = "Cash amount cannot be negative")
     private BigDecimal cashAmount;

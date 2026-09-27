@@ -361,7 +361,8 @@ public class MonthCloseService {
     /** Which reconciliation booked an adjustment — only its wording differs. */
     enum Reconciliation {
         MONTH_END("Everyday spending (month-end reconciliation)", "Month-end surplus (reconciliation)"),
-        CHECK_IN("Everyday spending (wallet check-in)", "Surplus found at wallet check-in");
+        CHECK_IN("Everyday spending (wallet check-in)", "Surplus found at wallet check-in"),
+        CASH_UPDATE("Everyday spending (cash updated)", "Cash found (cash updated)");
 
         final String spendDescription;
         final String surplusDescription;

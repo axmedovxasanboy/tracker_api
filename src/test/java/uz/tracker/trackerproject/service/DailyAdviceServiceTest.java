@@ -307,6 +307,27 @@ class DailyAdviceServiceTest {
                         tuple(LocalDate.of(2026, 11, 7), "2244000", false, true, 12L));
     }
 
+    /**
+     * August's salary came on 3 September, marked as August's; September's advance is in. So
+     * September's salary is expected on 3 October — an inflow on its day — and October's advance on
+     * the 15th; the horizon ends the day before 3 November.
+     */
+    @Test
+    void aSalaryPaidTheMonthAfterIsExpectedOnItsDay() {
+        ledger.income(LocalDate.of(2026, 8, 15), "2000000", SALARY);
+        ledger.income(LocalDate.of(2026, 9, 3), "5000000", SALARY).setSalaryMonth(LocalDate.of(2026, 8, 1));
+        ledger.income(LocalDate.of(2026, 9, 15), "2000000", SALARY);
+
+        Daily d = daily(LocalDate.of(2026, 9, 27), "3000000", "5000000");
+
+        assertThat(d.getUntil()).isEqualTo(LocalDate.of(2026, 11, 2));
+        assertThat(d.getIncomes())
+                .extracting(IncomePart::getDate, i -> i.getAmount().toPlainString())
+                .containsExactly(
+                        tuple(LocalDate.of(2026, 10, 3), "5000000"),
+                        tuple(LocalDate.of(2026, 10, 15), "2000000"));
+    }
+
     // ── Income and the horizon ────────────────────────────────────────────────
 
     /**

@@ -645,6 +645,25 @@ public class TransactionService {
         t.setTransactionDate(req.getTransactionDate());
         t.setNote(req.getNote());
         t.setSubType(req.getSubType());
+        // Which month's salary: kept on an edit that leaves the key out (the bot), set when sent —
+        // and only on regular income; anywhere else it means nothing, so it is dropped.
+        if (req.salaryMonthGiven()) {
+            t.setSalaryMonth(req.getSalaryMonth() == null ? null : req.getSalaryMonth().atDay(1));
+        }
+        if (req.getType() != TransactionType.INCOME
+                || (req.getSubType() != null && req.getSubType() != TransactionSubType.REGULAR_INCOME)) {
+            t.setSalaryMonth(null);
+        }
+        // Pay can come a month early or late — never further: the month before, of, or after the date.
+        if (t.getSalaryMonth() != null && req.getTransactionDate() != null) {
+            long apart = java.time.temporal.ChronoUnit.MONTHS.between(
+                    java.time.YearMonth.from(req.getTransactionDate()), java.time.YearMonth.from(t.getSalaryMonth()));
+            if (Math.abs(apart) > 1) {
+                throw new IllegalArgumentException("The salary month must be the month before, the month of, or the "
+                        + "month after the date (" + java.time.YearMonth.from(t.getSalaryMonth()) + " is "
+                        + Math.abs(apart) + " months from " + req.getTransactionDate() + ").");
+            }
+        }
         t.setInvestmentId(req.getInvestmentId());
         t.setLoanGivenId(req.getLoanGivenId());
         // The allocation bucket this payment funds is recorded HERE, once, rather than re-derived

@@ -85,6 +85,9 @@ public class AdvisorService {
     private final EmergencyRepository emergencyRepository;
     private final DailyAdviceService dailyAdviceService;
 
+    /** In the month's first this-many days a salary recorded may still be last month's. */
+    static final int SALARY_MONTH_HINT_DAYS = 10;
+
     @Transactional(readOnly = true)
     public AdvisorResponse advise(LocalDate date) {
         if (date == null) throw new IllegalArgumentException("date is required (YYYY-MM-DD)");
@@ -118,8 +121,25 @@ public class AdvisorService {
         BigDecimal bonus = nz(tier.getBonusIncome());
         // Regular income minus the bonus: a bonus is booked as regular income in a bonus-flagged
         // category, and it is extra money, not the salary arriving.
+        // Counted in its accounting month: a row marked as another month's salary leaves this one,
+        // and one marked as this month's salary counts whatever day it arrived (Transaction.salaryMonth).
         BigDecimal regular = nz(transactionRepository.sumBySubTypeCurrencyDateRange(
                 TransactionSubType.REGULAR_INCOME, Currency.UZS, start, end));
+        List<Transaction> datedHere = transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+                TransactionSubType.REGULAR_INCOME, start, end);
+        for (Transaction t : datedHere == null ? List.<Transaction>of() : datedHere) {
+            if (t.getSalaryMonth() != null && !t.getSalaryMonth().equals(start) && countsAsRegularUzs(t)) {
+                regular = regular.subtract(t.getAmount());
+            }
+        }
+        List<Transaction> markedHere = transactionRepository.findBySalaryMonth(start);
+        for (Transaction t : markedHere == null ? List.<Transaction>of() : markedHere) {
+            LocalDate on = t.getTransactionDate();
+            if (t.getSubType() == TransactionSubType.REGULAR_INCOME && countsAsRegularUzs(t)
+                    && on != null && (on.isBefore(start) || on.isAfter(end))) {
+                regular = regular.add(t.getAmount());
+            }
+        }
         BigDecimal received = clampZero(regular.subtract(bonus));
         BigDecimal coming = clampZero(expected.subtract(received));
 
@@ -157,16 +177,15 @@ public class AdvisorService {
         }
         BigDecimal billsLeft = bills.stream().map(Bill::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
 
+        // What earlier months left unpaid, per bucket (the owner's carry rule: an overpayment never
+        // carries). It is owed on top of this month's target — even by a bucket this month's rule
+        // does not ask for.
+        Map<String, BigDecimal> carried = missingIncome ? Map.of() : overviewService.carriedInto(month);
         List<SetAside> setAside = new ArrayList<>();
-        if (allocation != null && allocation.getLines() != null) {
-            for (TierAllocation.AllocationLine line : allocation.getLines()) {
-                if (!line.isRecommended()) continue;
-                BigDecimal remaining = nz(line.getRemainingAmount());
-                if (remaining.signum() <= 0) continue;
-                setAside.add(SetAside.builder().bucket(line.getBucket()).percent(line.getMinPercent())
-                        .target(nz(line.getMinAmount())).paid(nz(line.getPaidAmount()))
-                        .remaining(remaining).build());
-            }
+        for (BucketDue d : bucketDues(allocation, carried)) {
+            if (d.remaining().signum() <= 0) continue;
+            setAside.add(SetAside.builder().bucket(d.bucket()).percent(d.percent()).target(d.target())
+                    .carried(d.carried()).paid(d.paid()).remaining(d.remaining()).build());
         }
         BigDecimal setAsideLeft = setAside.stream().map(SetAside::getRemaining).reduce(BigDecimal.ZERO, BigDecimal::add);
         boolean afterBills = tier.isSubscriptionsPending()
@@ -241,6 +260,7 @@ public class AdvisorService {
         return AdvisorResponse.builder()
                 .date(date)
                 .month(month.toString())
+                .suggestedSalaryMonth(suggestedSalaryMonth(date, expected))
                 .currency(Currency.UZS)
                 .missingStableIncome(missingIncome)
                 .have(have)
@@ -261,7 +281,7 @@ public class AdvisorService {
                 .free(free)
                 .suggestions(suggestions)
                 .daily(daily)
-                .savingsThisMonth(missingIncome ? List.of() : savingsRows(allocation, goalMonths, month))
+                .savingsThisMonth(missingIncome ? List.of() : savingsRows(bucketDues(allocation, carried), goalMonths, month))
                 .build();
     }
 
@@ -270,22 +290,41 @@ public class AdvisorService {
      * "still to do" filter, so a screen can show a bucket as done rather than as missing — then each
      * savings goal's monthly payment, once the goal's payment has started (its start month).
      */
-    private static List<SavingsRow> savingsRows(TierAllocation allocation, List<GoalMonth> goals, YearMonth month) {
+    private static List<SavingsRow> savingsRows(List<BucketDue> buckets, List<GoalMonth> goals, YearMonth month) {
         List<SavingsRow> rows = new ArrayList<>();
-        if (allocation != null && allocation.getLines() != null) {
-            for (TierAllocation.AllocationLine line : allocation.getLines()) {
-                if (!line.isRecommended()) continue;
-                BigDecimal target = nz(line.getMinAmount());
-                if (target.signum() <= 0) continue;
-                rows.add(SavingsRow.builder().bucket(line.getBucket()).percent(line.getMinPercent())
-                        .target(target).paid(nz(line.getPaidAmount()))
-                        .remaining(nz(line.getRemainingAmount())).build());
-            }
+        for (BucketDue d : buckets) {
+            if (d.target().signum() <= 0 && d.carried().signum() <= 0) continue;
+            rows.add(SavingsRow.builder().bucket(d.bucket()).percent(d.percent()).target(d.target())
+                    .carried(d.carried()).paid(d.paid()).remaining(d.remaining()).build());
         }
         for (GoalMonth g : goals) {
             if (g.startedBy(month)) rows.add(g.row());
         }
         return rows;
+    }
+
+    /** One bucket this month: its rule's target, what earlier months carried into it, what went in, what is left. */
+    private record BucketDue(String bucket, BigDecimal percent, BigDecimal target, BigDecimal carried,
+                             BigDecimal paid, BigDecimal remaining) {}
+
+    /**
+     * Each bucket of the Plan's allocation with what earlier months carried into it:
+     * remaining = max(0, target + carried − paid). A bucket this month's rule does not ask for has a
+     * target (and percent) of 0 — and still owes what it carries.
+     */
+    private static List<BucketDue> bucketDues(TierAllocation allocation, Map<String, BigDecimal> carried) {
+        List<BucketDue> out = new ArrayList<>();
+        if (allocation == null || allocation.getLines() == null) return out;
+        for (TierAllocation.AllocationLine line : allocation.getLines()) {
+            BigDecimal carry = nz(carried.get(line.getBucket()));
+            boolean asked = line.isRecommended();
+            BigDecimal target = asked ? nz(line.getMinAmount()) : BigDecimal.ZERO;
+            BigDecimal percent = asked ? line.getMinPercent() : BigDecimal.ZERO;
+            BigDecimal paid = nz(line.getPaidAmount());
+            out.add(new BucketDue(line.getBucket(), percent, target, carry, paid,
+                    clampZero(target.add(carry).subtract(paid))));
+        }
+        return out;
     }
 
     /**
@@ -337,6 +376,26 @@ public class AdvisorService {
             goals.add(new GoalMonth(g, monthly, paid, toTarget, g.paymentStartMonth()));
         }
         return goals;
+    }
+
+    private static boolean countsAsRegularUzs(Transaction t) {
+        return t.getType() == TransactionType.INCOME && t.getAmount() != null
+                && (t.getCurrency() == null || t.getCurrency() == Currency.UZS);
+    }
+
+    /**
+     * Which month's salary a salary recorded today most likely is: the previous month's in the first
+     * ten days while that month's salary has not reached half the stable income (September's paid
+     * on 3 October), else this month's.
+     */
+    private String suggestedSalaryMonth(LocalDate date, BigDecimal stable) {
+        YearMonth month = YearMonth.from(date);
+        if (date.getDayOfMonth() <= SALARY_MONTH_HINT_DAYS && stable.signum() > 0) {
+            YearMonth prev = month.minusMonths(1);
+            BigDecimal prevSalary = nz(overviewService.salaryReceivedUzs(prev, date));
+            if (prevSalary.compareTo(stable.multiply(new BigDecimal("0.5"))) < 0) return prev.toString();
+        }
+        return month.toString();
     }
 
     /** The Plan's action item as a bill kind: the bank installment, the loan plan, or the ASAP pay-back. */

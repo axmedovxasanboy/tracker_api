@@ -127,7 +127,8 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
             LEFT JOIN c.parent p
             WHERE t.type = uz.tracker.trackerproject.enums.TransactionType.INCOME
               AND t.currency = :currency
-              AND t.transactionDate >= :start AND t.transactionDate <= :end
+              AND ((t.salaryMonth IS NULL AND t.transactionDate >= :start AND t.transactionDate <= :end)
+                   OR t.salaryMonth = :start)
               AND (c.bonusIncome = true OR p.bonusIncome = true)
               AND (t.subType IS NULL OR t.subType <> uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT_WITHDRAWAL)
             """)
@@ -139,6 +140,9 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
     /** Repayment lookup helpers — newest payment first for the per-loan history view. */
     List<Transaction> findByRepaidLoanTakenIdOrderByTransactionDateDesc(Long loanTakenId);
     List<Transaction> findByRepaidLoanGivenIdOrderByTransactionDateDesc(Long loanGivenId);
+    /** Income marked as {@code salaryMonth}'s salary (stored as its 1st), whatever day it arrived. */
+    List<Transaction> findBySalaryMonth(java.time.LocalDate salaryMonth);
+
     /** Whether money was lent again on top of loan {@code loanGivenId} ("he asked again" top-ups). */
     boolean existsByLoanGivenId(Long loanGivenId);
     List<Transaction> findByRepaidDebtIdOrderByTransactionDateDesc(Long debtId);

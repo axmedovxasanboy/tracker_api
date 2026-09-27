@@ -25,6 +25,12 @@ public class AdvisorResponse {
     private LocalDate date;
     /** YYYY-MM of {@link #date}. */
     private String month;
+    /**
+     * YYYY-MM the add-income form should pre-select as "salary for which month": the previous month
+     * while {@code date} is in the first 10 days and that month's salary received (counted by its
+     * accounting month) is under half the stable income; else {@link #month}.
+     */
+    private String suggestedSalaryMonth;
     private Currency currency;
 
     /** True until a monthly stable income is set: nothing but the wallets can be advised on. */
@@ -137,9 +143,12 @@ public class AdvisorResponse {
         /** DONATION | EMERGENCY | INVESTMENTS */
         private String bucket;
         private BigDecimal percent;
+        /** This month's rule amount (percent × base); 0 for a bucket the rule does not ask for. */
         private BigDecimal target;
+        /** What earlier months left unpaid in this bucket (never negative: an overpayment never carries). */
+        private BigDecimal carried;
         private BigDecimal paid;
-        /** What is still to set aside this month. */
+        /** What is still to set aside this month: max(0, target + carried − paid). */
         private BigDecimal remaining;
     }
 
@@ -157,11 +166,16 @@ public class AdvisorResponse {
         private String name;
         /** The bucket's percentage; null for a GOAL, whose payment is a set amount. */
         private BigDecimal percent;
-        /** GOAL: the monthly payment — never more than what finishes the goal. */
+        /**
+         * A bucket: this month's rule amount (0 when the rule does not ask for it, though it carries).
+         * GOAL: the monthly payment — never more than what finishes the goal.
+         */
         private BigDecimal target;
+        /** A bucket: what earlier months left unpaid in it (never negative). GOAL: null — goals do not carry. */
+        private BigDecimal carried;
         /** GOAL: contributions to it this month, dated today or earlier. */
         private BigDecimal paid;
-        /** max(0, target − paid); zero once the bucket is met. */
+        /** max(0, target + carried − paid); zero once the bucket is met. */
         private BigDecimal remaining;
     }
 

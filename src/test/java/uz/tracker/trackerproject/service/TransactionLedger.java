@@ -60,9 +60,15 @@ final class TransactionLedger {
             found.sort(Comparator.comparing(Transaction::getTransactionDate).reversed());
             return found;
         });
+        when(repo.findBySalaryMonth(any())).thenAnswer(inv ->
+                select(t -> inv.getArgument(0).equals(t.getSalaryMonth())));
+        // Counted in its accounting month, as the JPQL does: dated in the range and not marked as
+        // another month's, or marked as the range's month (its first day).
         when(repo.sumBonusIncomeByCurrencyDateRange(any(), any(), any())).thenAnswer(inv ->
                 sum(t -> t.getType() == TransactionType.INCOME && t.getCurrency() == inv.getArgument(0)
-                        && within(t, inv.getArgument(1), inv.getArgument(2)) && bonus(t.getCategory())));
+                        && ((t.getSalaryMonth() == null && within(t, inv.getArgument(1), inv.getArgument(2)))
+                            || inv.getArgument(1).equals(t.getSalaryMonth()))
+                        && bonus(t.getCategory())));
     }
 
     /** One UZS row; the caller sets whatever link the row carries (a bill, a loan, a transfer pair). */

@@ -323,6 +323,59 @@ class AdvisorServiceTest {
         assertThat(codes(r)).doesNotContain("advisor.s.payBack");
     }
 
+    /**
+     * What earlier months left unpaid is owed on top of this month's target — remaining =
+     * max(0, target + carried − paid) — even in a bucket this month's rule does not ask for; an
+     * overpaid bucket asks nothing. The walk reserves it all. Goals do not carry.
+     */
+    @Test
+    void whatEarlierMonthsLeftUnpaidIsOwedOnTopEvenWhereTheRuleAsksNothing() {
+        lines = new ArrayList<>(List.of(
+                line("DONATION", "5", "350000", "100000"),
+                AllocationLine.builder().bucket("EMERGENCY").label("EMERGENCY").recommended(false)
+                        .paidAmount(BigDecimal.ZERO).build(),
+                line("INVESTMENTS", "5", "350000", "400000")));
+        when(overviewService.carriedInto(any())).thenReturn(Map.of(
+                "DONATION", new BigDecimal("700000"), "EMERGENCY", new BigDecimal("350000"),
+                "INVESTMENTS", BigDecimal.ZERO));
+        Investment car = goal(5, "Car", "12000000", "0");
+        car.setMonthlyContribution(new BigDecimal("1000000"));
+        when(investmentRepository.findAll()).thenReturn(List.of(car));
+
+        AdvisorResponse r = advise(SEP_18);
+
+        assertThat(r.getSavingsThisMonth())
+                .extracting(SavingsRow::getBucket, row -> row.getTarget().toPlainString(),
+                        row -> row.getCarried() == null ? null : row.getCarried().toPlainString(),
+                        row -> row.getRemaining().toPlainString())
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple("DONATION", "350000", "700000", "950000"),
+                        org.assertj.core.groups.Tuple.tuple("EMERGENCY", "0", "350000", "350000"),
+                        org.assertj.core.groups.Tuple.tuple("INVESTMENTS", "350000", "0", "0"),
+                        org.assertj.core.groups.Tuple.tuple("GOAL", "1000000", null, "1000000"));
+        assertThat(r.getSetAside()).extracting(AdvisorResponse.SetAside::getBucket, a -> a.getCarried().toPlainString())
+                .containsExactly(org.assertj.core.groups.Tuple.tuple("DONATION", "700000"),
+                        org.assertj.core.groups.Tuple.tuple("EMERGENCY", "350000"));
+        assertThat(r.getSetAsideLeft()).isEqualByComparingTo("1300000");
+        ArgumentCaptor<DailyAdviceService.Inputs> in = ArgumentCaptor.forClass(DailyAdviceService.Inputs.class);
+        verify(dailyAdviceService).compute(in.capture());
+        assertThat(in.getValue().setAsideLeft()).isEqualByComparingTo("1300000");
+    }
+
+    /** In the first ten days, while last month's salary is under half the stable income, it is last month's. */
+    @Test
+    void theSalaryMonthToSuggestIsLastMonthsWhileItIsUnpaidEarlyInTheMonth() {
+        LocalDate sep3 = LocalDate.of(2026, 9, 3);
+        when(overviewService.salaryReceivedUzs(org.mockito.ArgumentMatchers.eq(YearMonth.of(2026, 8)), any()))
+                .thenReturn(new BigDecimal("2000000"));
+        assertThat(advise(sep3).getSuggestedSalaryMonth()).isEqualTo("2026-08");
+
+        when(overviewService.salaryReceivedUzs(org.mockito.ArgumentMatchers.eq(YearMonth.of(2026, 8)), any()))
+                .thenReturn(new BigDecimal("8000000"));
+        assertThat(advise(sep3).getSuggestedSalaryMonth()).isEqualTo("2026-09");
+        assertThat(advise(SEP_18).getSuggestedSalaryMonth()).isEqualTo("2026-09");
+    }
+
     @Test
     void onceTheBillsArePaidEachBucketIsASetAsideAndTheFirstEmergencyOneStartsTheFund() {
         AdvisorResponse r = advise(SEP_18);
