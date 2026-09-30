@@ -13,8 +13,8 @@ import java.util.List;
  *
  * <p>The chain it explains: stableIncome − monthlyBills = leftAfterBills (which sets the level) −
  * loanPayments = leftForSavings (with the debt, it picks the rule). The percentages multiply
- * savingsBase = max(stableIncome, salary received) + bonusThisMonth; each bucket's
- * normalMonthAmount is its percent of max(stableIncome, salary received), a month without a bonus.
+ * savingsBase = stableIncome + bonusThisMonth (2026-09-30: a salary or advance never moves it);
+ * each bucket's normalMonthAmount is its percent of stableIncome, a month without a bonus.
  */
 @Getter @Builder
 public class ProfileResponse {
@@ -46,8 +46,9 @@ public class ProfileResponse {
     private BigDecimal bonusThisMonth;
     /**
      * What the percentages multiply this month — the engine's allocation base:
-     * max(stableIncome, salary received) + bonus (see {@link #baseParts}). Until 2026-09-23 it was
-     * leftForSavings + bonus; leftForSavings and loanPayments are still reported.
+     * stableIncome + bonus (see {@link #baseParts}). Until 2026-09-30 it was max(stableIncome, salary
+     * received) + bonus, until 2026-09-23 leftForSavings + bonus; leftForSavings and loanPayments are
+     * still reported.
      */
     private BigDecimal savingsBase;
     /** How {@link #savingsBase} is made up; null while the stable income is unset. */
@@ -97,7 +98,10 @@ public class ProfileResponse {
         /** Its Uzbek name, when it has one. */
         private String nameUz;
         private BigDecimal amount;
-        /** True when this income is in the savings base: the salary's category tree, bonus included. */
+        /**
+         * True for the salary's category tree, bonus included — the lines the web lists. (Its name is
+         * from before 2026-09-30: only the bonus is really in the savings base now.)
+         */
         private boolean inBase;
     }
 
@@ -133,16 +137,21 @@ public class ProfileResponse {
         private BigDecimal over;
     }
 
-    /** savingsBase = max(stableIncome, salaryReceived) + bonus. */
+    /** savingsBase = stableIncome + bonus: "Monthly income (Settings) + Bonus". */
     @Getter @Builder
     public static class BaseParts {
-        /** This month's salary so far: income in the salary's category tree, bonus left out, dated up to today. */
+        /**
+         * This month's salary so far (salary tree, bonus left out, arrived up to today) — for
+         * information only: since 2026-09-30 it is not part of the base.
+         */
         private BigDecimal salaryReceived;
+        /** The Settings figure — the base's first part. */
         private BigDecimal stableIncome;
-        /** True while the stable income is the larger — before payday, or a smaller salary than Settings. */
+        /** Always true since 2026-09-30: the base is built on the stable income, never on the salary received. */
         private boolean usesStableIncome;
+        /** This month's bonus (by accounting month) — the base's second part. */
         private BigDecimal bonus;
-        /** The salary-tree income behind it, bonus included, by category, largest first. */
+        /** ONLY the bonus-category income, by category, largest first; empty in a month without a bonus. */
         private List<BaseLine> lines;
     }
 
@@ -173,7 +182,7 @@ public class ProfileResponse {
         private BigDecimal percent;
         /** percent × savingsBase — the month's target, the same figure as the advisor's. */
         private BigDecimal amount;
-        /** percent × max(stableIncome, salary received) — the same bucket in a month without a bonus. */
+        /** percent × stableIncome — the same bucket in a month without a bonus. */
         private BigDecimal normalMonthAmount;
         /** What earlier months left unpaid in the bucket, owed on top of {@link #amount} (never negative). */
         private BigDecimal carried;

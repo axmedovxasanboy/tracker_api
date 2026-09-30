@@ -77,8 +77,8 @@ import java.util.TreeMap;
  *       due today.</li>
  *   <li><b>Savings, out of the salary that funds them.</b> This month's unset-aside buckets on this
  *       month's main payday while its main part is still to come, else today; on each later
- *       month's main payday (the 1st without a history), that month's rule's percentages of its
- *       projected salary — the allocation base of a month without a bonus.</li>
+ *       month's main payday (the 1st without a history), that month's rule's percentages of the
+ *       stable income — the allocation base of a month without a bonus.</li>
  *   <li><b>Per day.</b> safePerDay = min over the horizon of net(c) ÷ days to c, rounded down to
  *       1,000; zero, with {@code shortBy}, when some day's net is below zero.</li>
  *   <li><b>Pace.</b> Everyday spending over the last 30 days (never before tracking started) —
@@ -221,12 +221,10 @@ public class DailyAdviceService {
             laterMonths.add(ym);
         }
         // A later month's set-asides: that month's own rule (a repayment plan starting can change
-        // it) applied to its projected salary — the allocation base of a month without a bonus,
-        // the projected parts never counting more than Settings says.
-        BigDecimal monthlySalary = pattern == null ? stable : pattern.total();
+        // it) applied to the stable income — the allocation base of a month without a bonus.
         for (int i = 0; i < laterMonths.size(); i++) {
             BigDecimal pct = percentagesOf(laterMonths.get(i), today);
-            BigDecimal estimate = monthlySalary.multiply(pct).divide(HUNDRED, 0, RoundingMode.HALF_UP);
+            BigDecimal estimate = stable.multiply(pct).divide(HUNDRED, 0, RoundingMode.HALF_UP);
             if (estimate.signum() > 0) savings.merge(laterPaydays.get(i), estimate, BigDecimal::add);
         }
         // Savings goals' monthly payments, on the same days: what this month still owes (less what

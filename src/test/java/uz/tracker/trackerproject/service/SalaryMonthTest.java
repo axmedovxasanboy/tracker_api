@@ -28,7 +28,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * "Salary for which month": the owner's September salary is sometimes paid on 3 October. Marked as
- * September's, it counts in September's base — and October's base is not doubled.
+ * September's, it is September's salary received — and October's is not doubled. (Since 2026-09-30
+ * the salary is not in the savings base at all; a bonus marked the same way still is.)
  */
 class SalaryMonthTest {
 
@@ -80,15 +81,15 @@ class SalaryMonthTest {
     void aSalaryPaidOnTheThirdOfOctoberCountsInSeptember() {
         LocalDate oct5 = LocalDate.of(2026, 10, 5);
         assertThat(tier(SEP, oct5).getSalaryReceived()).isEqualByComparingTo("7500000");
-        assertThat(tier(SEP, oct5).getAllocationBase()).isEqualByComparingTo("7500000");
-        // Before it came, September had the advance alone: the stable income stands in.
+        // Before it came, September had the advance alone.
         assertThat(tier(SEP, LocalDate.of(2026, 10, 1)).getSalaryReceived()).isEqualByComparingTo("2500000");
-        assertThat(tier(SEP, LocalDate.of(2026, 10, 1)).getAllocationBase()).isEqualByComparingTo("7000000");
+        // The base is the stable income either way: a salary never moves it.
+        assertThat(tier(SEP, oct5).getAllocationBase()).isEqualByComparingTo("7000000");
     }
 
-    /** October has not been paid yet: its base is the stable income, not the 5M that came on its 3rd. */
+    /** October's own salary is its advance alone — not the 5M that came on its 3rd for September. */
     @Test
-    void octobersBaseIsNotDoubled() {
+    void octobersSalaryIsNotDoubled() {
         ledger.income(LocalDate.of(2026, 10, 15), "2500000", salary);                // October's advance
         OverviewTierResponse oct = tier(OCT, LocalDate.of(2026, 10, 20));
         assertThat(oct.getSalaryReceived()).isEqualByComparingTo("2500000");
@@ -100,7 +101,9 @@ class SalaryMonthTest {
     void aBonusCountsInItsSalaryMonth() {
         ledger.income(LocalDate.of(2026, 10, 3), "1000000", bonus).setSalaryMonth(SEP.atDay(1));
         assertThat(tier(SEP, LocalDate.of(2026, 10, 5)).getBonusIncome()).isEqualByComparingTo("1000000");
+        assertThat(tier(SEP, LocalDate.of(2026, 10, 5)).getAllocationBase()).isEqualByComparingTo("8000000");
         assertThat(tier(OCT, LocalDate.of(2026, 10, 5)).getBonusIncome()).isEqualByComparingTo("0");
+        assertThat(tier(OCT, LocalDate.of(2026, 10, 5)).getAllocationBase()).isEqualByComparingTo("7000000");
     }
 
     // ── Writing it ────────────────────────────────────────────────────────────

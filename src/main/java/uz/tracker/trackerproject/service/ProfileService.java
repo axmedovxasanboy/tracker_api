@@ -84,8 +84,8 @@ public class ProfileService {
         boolean aboveCeiling = level == null;
         BigDecimal stable = nz(tier.getIncome());
         BigDecimal salaryReceived = nz(tier.getSalaryReceived());
-        // A month without a bonus: the base is the salary, never less than Settings.
-        BigDecimal salaryBase = stable.max(salaryReceived);
+        // A month without a bonus: the base is the stable income alone.
+        BigDecimal salaryBase = stable;
         BigDecimal savingsBase = nz(tier.getAllocationBase());
 
         // What earlier months left unpaid, per bucket — the advisor's figure (an overpayment never carries).
@@ -123,9 +123,9 @@ public class ProfileService {
                 .baseParts(BaseParts.builder()
                         .salaryReceived(salaryReceived)
                         .stableIncome(stable)
-                        .usesStableIncome(stable.compareTo(salaryReceived) > 0)
+                        .usesStableIncome(true)
                         .bonus(nz(tier.getBonusIncome()))
-                        .lines(baseLines(month, date, salaryTree))
+                        .lines(baseLines(month))
                         .build())
                 .rule(rule)
                 .buckets(buckets)
@@ -166,17 +166,22 @@ public class ProfileService {
         }
     }
 
-    /** Whether income in {@code category} is in the savings base: salary (its category tree) or bonus. */
-    private static boolean inBase(Category category, Set<Long> salaryTree) {
+    /**
+     * Whether income in {@code category} is the salary tree's or the bonus's: it counts in its
+     * accounting month (Transaction.salaryMonth) rather than by its date, and its income line is
+     * flagged {@code inBase} — a flag the web lists the lines by; since 2026-09-30 only the bonus is
+     * really in the savings base (see baseParts).
+     */
+    private static boolean byAccountingMonth(Category category, Set<Long> salaryTree) {
         return OverviewService.isBonusCategory(category) || OverviewService.isSalaryCategory(category, salaryTree);
     }
 
     /**
-     * The income behind the savings base, by category, largest first: the salary rows the engine
-     * counts (salary tree, arrived up to today) and the bonus rows it adds — each in its accounting
-     * month (Transaction.salaryMonth): September's salary paid on 3 October is September's.
+     * The income in the savings base beside the stable income: the bonus rows, by category, largest
+     * first — each in its accounting month (Transaction.salaryMonth). Salary and advance are not in
+     * the base (2026-09-30), so they have no line here; empty in a month without a bonus.
      */
-    private List<BaseLine> baseLines(YearMonth month, LocalDate date, Set<Long> salaryTree) {
+    private List<BaseLine> baseLines(YearMonth month) {
         Map<Long, IncomeGroup> groups = new LinkedHashMap<>();
         LocalDate start = month.atDay(1);
         List<Transaction> rows = withMarkedSalary(month,
@@ -186,10 +191,7 @@ public class ProfileService {
             if (t.getSubType() == TransactionSubType.INVESTMENT_WITHDRAWAL) continue;   // never income
             if (t.getSalaryMonth() != null && !t.getSalaryMonth().equals(start)) continue;   // another month's
             Category category = t.getCategory();
-            boolean bonus = OverviewService.isBonusCategory(category);
-            boolean salary = t.getSubType() == TransactionSubType.REGULAR_INCOME && !t.getTransactionDate().isAfter(date)
-                    && OverviewService.isSalaryCategory(category, salaryTree);
-            if (!bonus && !salary) continue;
+            if (!OverviewService.isBonusCategory(category)) continue;
             IncomeGroup group = groups.computeIfAbsent(category == null ? null : category.getId(),
                     id -> new IncomeGroup(category, true));
             group.amount = group.amount.add(t.getAmount());
@@ -219,7 +221,7 @@ public class ProfileService {
             // The salary tree's and the bonus's income counts in its accounting month: a row marked
             // as another month's salary is that month's; one marked as this month's (arrived in
             // another) was added by withMarkedSalary. Other income stays with its date.
-            boolean base = inBase(t.getCategory(), salaryTree);
+            boolean base = byAccountingMonth(t.getCategory(), salaryTree);
             boolean markedElsewhere = t.getSalaryMonth() != null && !t.getSalaryMonth().equals(start);
             if (base && markedElsewhere) continue;
             if (!base && !YearMonth.from(t.getTransactionDate()).equals(YearMonth.from(start))) continue;
@@ -239,7 +241,7 @@ public class ProfileService {
             if (st == TransactionSubType.EVERYDAY_SPENDING) continue;   // a check-in surplus: a correction
             Category category = t.getCategory();
             IncomeGroup group = groups.computeIfAbsent(category == null ? null : category.getId(),
-                    id -> new IncomeGroup(category, inBase(category, salaryTree)));
+                    id -> new IncomeGroup(category, byAccountingMonth(category, salaryTree)));
             group.amount = group.amount.add(t.getAmount());
         }
         List<IncomeLine> lines = groups.values().stream().map(IncomeGroup::line)
@@ -332,8 +334,8 @@ public class ProfileService {
     private NextMonth nextMonth(YearMonth next, LocalDate date, Rule thisRule, List<Bucket> thisBuckets) {
         OverviewTierResponse tier = overviewService.getTierForProfile(next, date);
         BigDecimal leftForSavings = clampZero(nz(tier.getLeftMoney()).subtract(nz(tier.getDebtPayments())));
-        // Before it begins nothing is received: the month's base without a bonus is the stable income.
-        BigDecimal salaryBase = nz(tier.getIncome()).max(nz(tier.getSalaryReceived()));
+        // The month's base without a bonus is the stable income.
+        BigDecimal salaryBase = nz(tier.getIncome());
         Rule rule = rule(tier.getAllocation());
         List<NextBucket> buckets = new ArrayList<>(BUCKETS.size());
         boolean same = rule.getReason().equals(thisRule.getReason());

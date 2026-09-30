@@ -220,12 +220,12 @@ class AdvisorOwnerSeptemberTest {
         assertThat(r.getSalaryComing()).isEqualByComparingTo("0");
         assertThat(r.getBonusReceived()).isEqualByComparingTo("16380000");
         assertThat(r.getBillsLeft()).isEqualByComparingTo("0");
-        // The targets are 5 / 2 / 8 % of what the owner earned (2026-09-23): the 7,889,000 salary
-        // (above the 7M in Settings) + the 16,380,000 bonus = 24,269,000. Still to set aside:
-        // 1,213,450 + (485,380 − 353,600) + (1,941,520 − 1,414,400).
-        assertThat(r.getSetAsideLeft()).isEqualByComparingTo("1872350");
-        // The month-only figure the bot shows: 9,687,000 − 1,872,350.
-        assertThat(r.getFree()).isEqualByComparingTo("7814650");
+        // The targets are 5 / 2 / 8 % of the 7M in Settings + the 16,380,000 bonus = 23,380,000
+        // (2026-09-30: the salary recorded, 7,889,000, moves nothing). Still to set aside:
+        // 1,169,000 + (467,600 − 353,600) + (1,870,400 − 1,414,400).
+        assertThat(r.getSetAsideLeft()).isEqualByComparingTo("1739000");
+        // The month-only figure the bot shows: 9,687,000 − 1,739,000.
+        assertThat(r.getFree()).isEqualByComparingTo("7948000");
     }
 
     @Test
@@ -250,18 +250,18 @@ class AdvisorOwnerSeptemberTest {
                         tuple(LocalDate.of(2026, 10, 10), "BILL", 1L, "Kvartira Arenda", "4200000", false));
 
         // By 6 November: + 7,000,000 salary − (1,800,000 bank and parents ×2 + 5,300,000 bills)
-        // − (1,872,350 still to set aside this month, now + 700,000 on 7 October: October's rule —
-        // bank AND debts, 5 / 0 / 5 % — of its projected 7M salary, set aside on payday out of it).
+        // − (1,739,000 still to set aside this month, now + 700,000 on 7 October: October's rule —
+        // bank AND debts, 5 / 0 / 5 % — of the 7M stable income, set aside on payday out of it).
         // November's belongs to 7 November's salary, and both are past the horizon.
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
         assertThat(d.getBreakdown().getHave()).isEqualByComparingTo("9687000");
         assertThat(d.getBreakdown().getComingIn()).isEqualByComparingTo("7000000");
         assertThat(d.getBreakdown().getGoingOut()).isEqualByComparingTo("7100000");
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2572350");
-        assertThat(d.getBreakdown().getNet()).isEqualByComparingTo("7014650");
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2439000");
+        assertThat(d.getBreakdown().getNet()).isEqualByComparingTo("7148000");
         assertThat(d.getBreakdown().getDays()).isEqualTo(45);
-        // 7,014,650 ÷ 45 = 155,881 → 155,000 a day (190,000 on the old, left-over base).
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("155000");
+        // 7,148,000 ÷ 45 = 158,844 → 158,000 a day.
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("158000");
         assertThat(d.getShortBy()).isNull();
 
         // 12,098,000 of everyday spending over 1–23 September.
@@ -299,7 +299,7 @@ class AdvisorOwnerSeptemberTest {
     /**
      * The goal the owner created on 23 September: 3,500,000 a month. With no start month it is asked
      * from September, the month it was created — 3.5M today and 3.5M more on 7 October — and the walk
-     * is 860,350 short on 10 October, the rent's day. From October it asks nothing this month (no
+     * is 727,000 short on 10 October, the rent's day. From October it asks nothing this month (no
      * row) and its first 3.5M on 7 October, out of October's salary: not short.
      */
     @Test
@@ -319,7 +319,7 @@ class AdvisorOwnerSeptemberTest {
         AdvisorResponse fromSeptember = advisor.advise(TODAY);
         assertThat(fromSeptember.getSavingsThisMonth()).extracting(SavingsRow::getBucket).contains("GOAL");
         assertThat(fromSeptember.getDaily().getShortBy().getDate()).isEqualTo(LocalDate.of(2026, 10, 10));
-        assertThat(fromSeptember.getDaily().getShortBy().getAmount()).isEqualByComparingTo("860350");
+        assertThat(fromSeptember.getDaily().getShortBy().getAmount()).isEqualByComparingTo("727000");
 
         car.setPaymentStartDate(LocalDate.of(2026, 10, 1));
         AdvisorResponse fromOctober = advisor.advise(TODAY);
@@ -327,10 +327,10 @@ class AdvisorOwnerSeptemberTest {
         Daily d = fromOctober.getDaily();
         assertThat(d.getShortBy()).isNull();
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        // 1,872,350 this month + October's 700,000 and the goal's 3,500,000 on 7 October.
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("6072350");
-        // 7,014,650 − 3,500,000 = 3,514,650 over 45 days.
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("78000");
+        // 1,739,000 this month + October's 700,000 and the goal's 3,500,000 on 7 October.
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("5939000");
+        // 7,148,000 − 3,500,000 = 3,648,000 over 45 days.
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("81000");
     }
 
     /**
@@ -408,7 +408,7 @@ class AdvisorOwnerSeptemberTest {
                 .containsExactly("0", "353600", "1414400");
         OverviewTierResponse tier = overview.getTierIgnoringSubscriptions(YearMonth.of(2026, 9), Currency.UZS, TODAY);
         assertThat(tier.getSalaryReceived()).isEqualByComparingTo("7889000");
-        assertThat(tier.getAllocationBase()).isEqualByComparingTo("24269000");
+        assertThat(tier.getAllocationBase()).isEqualByComparingTo("23380000");
 
         ProfileResponse profile = new ProfileService(overview, transactionRepository).profile(TODAY, "owner");
         assertThat(profile.getIncomeThisMonth().getTotal()).isEqualByComparingTo("24369000");
@@ -429,9 +429,9 @@ class AdvisorOwnerSeptemberTest {
                 .contains("advisor.s.setAside");
     }
 
-    /** 5 / 2 / 8 % of 24,269,000 against what went in: the emergency and investment money is short now. */
+    /** 5 / 2 / 8 % of 23,380,000 (Settings' 7M + the bonus) against what went in: the emergency and investment money is short now. */
     @Test
-    void savingsThisMonthAreThePercentagesOfWhatTheOwnerEarned() {
+    void savingsThisMonthAreThePercentagesOfTheStableIncomePlusTheBonus() {
         AdvisorResponse r = advisor.advise(TODAY);
 
         assertThat(r.getSetAside()).extracting(AdvisorResponse.SetAside::getBucket)
@@ -442,9 +442,9 @@ class AdvisorOwnerSeptemberTest {
                         s -> s.getPaid().stripTrailingZeros().toPlainString(),
                         s -> s.getRemaining().stripTrailingZeros().toPlainString())
                 .containsExactly(
-                        tuple("DONATION", "5", "1213450", "0", "1213450"),
-                        tuple("EMERGENCY", "2", "485380", "353600", "131780"),
-                        tuple("INVESTMENTS", "8", "1941520", "1414400", "527120"));
+                        tuple("DONATION", "5", "1169000", "0", "1169000"),
+                        tuple("EMERGENCY", "2", "467600", "353600", "114000"),
+                        tuple("INVESTMENTS", "8", "1870400", "1414400", "456000"));
         assertThat(YearMonth.from(r.getDate())).isEqualTo(YearMonth.of(2026, 9));
     }
 
@@ -453,14 +453,14 @@ class AdvisorOwnerSeptemberTest {
     /**
      * The Profile page's answer, exactly as the web receives it. Level 1 (not "1.2") from 7M − 5.3M
      * bills = 1.7M; with the bank's 400,000 the bank-loan-only rule is tight under the 5M cutoff, so
-     * 5 / 2 / 8 % — of what the owner earned: the salary tree's 7,889,000 (Salary + Avans, above
-     * the 7M in Settings) + the 16,380,000 bonus = 24,269,000; of 7,889,000 in a month without a
-     * bonus. "Other income" is outside the salary tree. From October the parents' 500,000 plan
-     * starts: bank AND debts, 5 / 0 / 5 % of the 7M stable income until the salary is in.
+     * 5 / 2 / 8 % — of the 7M in Settings + the 16,380,000 bonus = 23,380,000 (the 7,889,000 salary
+     * recorded is reported, and moves nothing); of the 7M alone in a month without a bonus. The
+     * base's lines are the bonus only. From October the parents' 500,000 plan starts: bank AND
+     * debts, 5 / 0 / 5 % of the 7M stable income.
      *
      * <p>Income so far is earned money only — 24,369,000. Borrowed money (the real September's two
      * Uzum loans) and a loan paid back are named beside it; a check-in's surplus and the cash
-     * withdrawal (a transfer) are left out. Set aside: 1,768,000 — 7.3% of it, and of the base.
+     * withdrawal (a transfer) are left out. Set aside: 1,768,000 — 7.3% of it, 7.6% of the base.
      */
     @Test
     void theProfileExplainsTheLevelAndWhereEachPercentComesFrom() throws Exception {
@@ -478,18 +478,16 @@ class AdvisorOwnerSeptemberTest {
                 {"username":"owner","month":"2026-09","missingStableIncome":false,
                  "level":1,"aboveCeiling":false,"levelFrom":0,"nextLevelAt":15000000,
                  "stableIncome":7000000,"monthlyBills":5300000,"leftAfterBills":1700000,
-                 "loanPayments":400000,"leftForSavings":1300000,"bonusThisMonth":16380000,"savingsBase":24269000,
-                 "baseParts":{"salaryReceived":7889000,"stableIncome":7000000,"usesStableIncome":false,
+                 "loanPayments":400000,"leftForSavings":1300000,"bonusThisMonth":16380000,"savingsBase":23380000,
+                 "baseParts":{"salaryReceived":7889000,"stableIncome":7000000,"usesStableIncome":true,
                    "bonus":16380000,"lines":[
-                     {"categoryId":14,"name":"Bonus","nameUz":null,"amount":16380000},
-                     {"categoryId":11,"name":"Salary","nameUz":null,"amount":5889000},
-                     {"categoryId":12,"name":"Avans","nameUz":null,"amount":2000000}]},
+                     {"categoryId":14,"name":"Bonus","nameUz":null,"amount":16380000}]},
                  "rule":{"reason":"BANK_LOAN_TIGHT","cutoff":5000000},
                  "buckets":[
-                   {"bucket":"DONATION","percent":5,"amount":1213450,"normalMonthAmount":394450,"carried":0},
-                   {"bucket":"EMERGENCY","percent":2,"amount":485380,"normalMonthAmount":157780,"carried":0},
-                   {"bucket":"INVESTMENTS","percent":8,"amount":1941520,"normalMonthAmount":631120,"carried":0}],
-                 "totalPercent":15,"totalAmount":3640350,"normalMonthTotal":1183350,
+                   {"bucket":"DONATION","percent":5,"amount":1169000,"normalMonthAmount":350000,"carried":0},
+                   {"bucket":"EMERGENCY","percent":2,"amount":467600,"normalMonthAmount":140000,"carried":0},
+                   {"bucket":"INVESTMENTS","percent":8,"amount":1870400,"normalMonthAmount":560000,"carried":0}],
+                 "totalPercent":15,"totalAmount":3507000,"normalMonthTotal":1050000,
                  "nextMonth":{"month":"2026-10","reason":"BANK_AND_DEBTS","loanPayments":900000,
                    "leftForSavings":800000,"buckets":[
                      {"bucket":"DONATION","percent":5,"normalMonthAmount":350000},
@@ -501,13 +499,13 @@ class AdvisorOwnerSeptemberTest {
                      {"categoryId":12,"name":"Avans","nameUz":null,"amount":2000000,"inBase":true},
                      {"categoryId":13,"name":"Other income","nameUz":null,"amount":100000,"inBase":false}],
                    "excludedBorrowed":1955000,"excludedReturned":300000,"excludedWithdrawn":0},
-                 "allocatedThisMonth":{"total":1768000,"percentOfIncome":7.3,"percentOfBase":7.3,"lines":[
+                 "allocatedThisMonth":{"total":1768000,"percentOfIncome":7.3,"percentOfBase":7.6,"lines":[
                      {"bucket":"DONATION","amount":0,"percentOfIncome":0.0,"percentOfBase":0.0,
-                      "target":1213450,"carried":0,"over":0},
+                      "target":1169000,"carried":0,"over":0},
                      {"bucket":"EMERGENCY","amount":353600,"percentOfIncome":1.5,"percentOfBase":1.5,
-                      "target":485380,"carried":0,"over":0},
-                     {"bucket":"INVESTMENTS","amount":1414400,"percentOfIncome":5.8,"percentOfBase":5.8,
-                      "target":1941520,"carried":0,"over":0}]}}
+                      "target":467600,"carried":0,"over":0},
+                     {"bucket":"INVESTMENTS","amount":1414400,"percentOfIncome":5.8,"percentOfBase":6.0,
+                      "target":1870400,"carried":0,"over":0}]}}
                 """, json, org.skyscreamer.jsonassert.JSONCompareMode.STRICT);
     }
 

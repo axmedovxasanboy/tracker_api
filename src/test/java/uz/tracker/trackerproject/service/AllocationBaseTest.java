@@ -22,10 +22,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * The allocation base the owner chose on 2026-09-23: the percentages apply to what they earn —
- * max(stable income, salary received) + bonus — where the salary is the income recorded in the
- * salary's category tree. Everything else about the tier (the level, the rule, the percentages)
- * still comes from the stable income and the debt.
+ * The allocation base the owner chose on 2026-09-30: the stable income from Settings + the bonus —
+ * "allocations should update only when bonus income is added". A recorded salary or advance never
+ * moves a target. The salary received — the income in the salary's category tree — is still
+ * measured, for the advisor and the daily walk.
  */
 class AllocationBaseTest {
 
@@ -90,9 +90,9 @@ class AllocationBaseTest {
 
         assertThat(t.getSalaryReceived()).isEqualByComparingTo("7889000");
         assertThat(t.getBonusIncome()).isEqualByComparingTo("1000000");
-        assertThat(t.getAllocationBase()).isEqualByComparingTo("8889000");   // 7,889,000 + 1,000,000
+        assertThat(t.getAllocationBase()).isEqualByComparingTo("8000000");   // 7,000,000 + the 1,000,000 bonus
         // The ledger's month is built on the same base.
-        assertThat(service.getAllocationLedger(SEP, Currency.UZS).getAllocationBase()).isEqualByComparingTo("8889000");
+        assertThat(service.getAllocationLedger(SEP, Currency.UZS).getAllocationBase()).isEqualByComparingTo("8000000");
     }
 
     /** No bonus under a root (the bonus is a root itself): the root income category named Salary is the tree. */
@@ -129,16 +129,15 @@ class AllocationBaseTest {
         OverviewTierResponse t = tier(SEP_23);
 
         assertThat(t.getSalaryReceived()).isEqualByComparingTo("8000000");
-        assertThat(t.getAllocationBase()).isEqualByComparingTo("8000000");
+        assertThat(t.getAllocationBase()).isEqualByComparingTo("7000000");   // no bonus: Settings alone
     }
 
     /**
-     * Before payday nothing is received, so the stable income stands in — the targets are the
-     * month's from its first day; once the salary is in, it counts when it is more. The month under
-     * way counts the salary up to today: an advance recorded for the 28th is not in yet on the 23rd.
+     * The salary received counts up to today — an advance recorded for the 28th is not in yet on the
+     * 23rd — and whatever it is, before payday or above Settings, the base stays the stable income.
      */
     @Test
-    void theStableIncomeStandsInUntilMoreIsReceivedCountingUpToToday() {
+    void theSalaryReceivedCountsUpToTodayAndNeverMovesTheBase() {
         Category salary = category(1, "Salary", false, null);
         Category avans = category(2, "Avans", false, salary);
         category(3, "Bonus", true, salary);
@@ -151,13 +150,43 @@ class AllocationBaseTest {
 
         OverviewTierResponse after = tier(SEP_23);
         assertThat(after.getSalaryReceived()).isEqualByComparingTo("5889000");
-        assertThat(after.getAllocationBase()).isEqualByComparingTo("7000000");     // still under Settings
+        assertThat(after.getAllocationBase()).isEqualByComparingTo("7000000");
 
         OverviewTierResponse monthOver = tier(LocalDate.of(2026, 10, 2));
         assertThat(monthOver.getSalaryReceived()).isEqualByComparingTo("7889000");
-        assertThat(monthOver.getAllocationBase()).isEqualByComparingTo("7889000");  // the salary, above Settings
+        assertThat(monthOver.getAllocationBase()).isEqualByComparingTo("7000000");  // above Settings, and no matter
         // The level and the rule stay on the stable income: 7M, no bills, no debt.
         assertThat(monthOver.getLevel()).isEqualTo(1);
         assertThat(monthOver.getSubLevel()).isEqualTo("1.1");
+    }
+
+    private static List<String> targets(OverviewTierResponse t) {
+        return t.getAllocation().getLines().stream()
+                .map(l -> l.getMinAmount().stripTrailingZeros().toPlainString()).toList();
+    }
+
+    /**
+     * The owner's complaint: they recorded a salary and the savings targets moved. Now a salary —
+     * even two in one month, 14M against the 7M in Settings — leaves every target where it was;
+     * only a bonus raises them, by its share.
+     */
+    @Test
+    void recordingSalariesChangesNoTargetOnlyABonusDoes() {
+        Category salary = category(1, "Salary", false, null);
+        Category bonus = category(2, "Bonus", true, salary);
+        List<String> before = targets(tier(SEP_23));
+        assertThat(before).containsExactly("700000", "350000", "1050000");      // 10 / 5 / 15 % of 7M
+
+        ledger.income(LocalDate.of(2026, 9, 7), "7000000", salary);
+        ledger.income(LocalDate.of(2026, 9, 20), "7000000", salary);           // a second salary
+        OverviewTierResponse paidTwice = tier(SEP_23);
+        assertThat(paidTwice.getSalaryReceived()).isEqualByComparingTo("14000000");
+        assertThat(paidTwice.getAllocationBase()).isEqualByComparingTo("7000000");
+        assertThat(targets(paidTwice)).isEqualTo(before);
+        assertThat(service.getAllocationLedger(SEP, Currency.UZS).getDueThisMonth()).isEqualByComparingTo("2100000");
+
+        ledger.income(LocalDate.of(2026, 9, 22), "1000000", bonus);
+        assertThat(tier(SEP_23).getAllocationBase()).isEqualByComparingTo("8000000");
+        assertThat(targets(tier(SEP_23))).containsExactly("800000", "400000", "1200000");
     }
 }

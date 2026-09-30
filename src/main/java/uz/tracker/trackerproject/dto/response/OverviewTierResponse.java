@@ -42,10 +42,11 @@ public class OverviewTierResponse {
     private BigDecimal leftMoney;
 
     /**
-     * What the bucket percentages are applied to: max({@link #income}, {@link #salaryReceived}) +
-     * {@link #bonusIncome} — what the owner earns (owner's decision, 2026-09-23). Other income (not in
-     * the salary's category tree) never moves it. It used to be max(0, leftMoney − debtPayments) +
-     * bonus; the level and the percentages are still chosen from {@link #leftMoney} and the debt.
+     * What the bucket percentages are applied to: {@link #income} + {@link #bonusIncome} (owner's
+     * decision, 2026-09-30) — a recorded salary or advance never moves it, only a bonus does. It used
+     * to be max(income, salaryReceived) + bonus (2026-09-23), and before that max(0, leftMoney −
+     * debtPayments) + bonus; the level and the percentages are still chosen from {@link #leftMoney}
+     * and the debt.
      */
     private BigDecimal allocationBase;
 
@@ -53,8 +54,8 @@ public class OverviewTierResponse {
      * The salary received for this month: regular income in the salary's category tree (the root
      * above the bonus categories — for the owner Salary, with Avans), bonus categories left out,
      * counted in its accounting month (Transaction.salaryMonth ?? its date's month — September's
-     * salary paid on 3 October is September's), arrived up to today. Zero before payday, when the
-     * stable income stands in.
+     * salary paid on 3 October is September's), arrived up to today. Reported for the advisor and
+     * the daily walk; it is not part of {@link #allocationBase}.
      */
     private BigDecimal salaryReceived;
 

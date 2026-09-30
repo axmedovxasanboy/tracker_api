@@ -210,14 +210,14 @@ public class OverviewService {
         String subLevel = computeSubLevel(level, debtPaymentsUzs, debtRatio);
         String levelLabel = computeLevelLabel(level, subLevel, missingIncome);
 
-        // Allocation base = what the owner earns: max(stable income, the salary actually received this
-        // month) + the bonus received (owner's decision, 2026-09-23 — see allocationBaseUzs). It used to
-        // be the "left balance", stable − subscriptions − debt charge + bonus. Only the amount the
-        // percentages multiply changed: the level, the sub-level, the tight-vs-comfortable split and
-        // the percentages themselves stay on the stable-income anchor.
+        // Allocation base = the stable income + the bonus received for the month (owner's decision,
+        // 2026-09-30 — see allocationBaseUzs): recording a salary or an advance never moves a target,
+        // only a bonus does. The salary received is still reported — the advisor and the daily walk
+        // read it — but it plays no part in the base. The level, the sub-level, the
+        // tight-vs-comfortable split and the percentages stay on the stable-income anchor too.
         BigDecimal bonusUzs = sumBonusIncomeUzs(month);
         BigDecimal salaryUzs = salaryReceivedUzs(month, asOf, salaryTree());
-        BigDecimal allocBaseUzs = allocationBaseUzs(incomeUzs, salaryUzs, bonusUzs);
+        BigDecimal allocBaseUzs = allocationBaseUzs(incomeUzs, bonusUzs);
 
         // Paid-this-month per bucket (display currency), including "already paid" bucket marks.
         // The marks are also carried on their own so each line can say how much of its "paid"
@@ -349,8 +349,8 @@ public class OverviewService {
     /**
      * Running allocation ledger from the configured start month to {@code selected}. For each
      * month we recompute the tier scenario (so the % can vary as bank loans, loans and debts start
-     * or end), apply it to that month's base — max(stable income, that month's salary received) plus
-     * that month's bonus income, the same base the tier card uses — to get the recommended amount, and
+     * or end), apply it to that month's base — the stable income plus that month's
+     * bonus income, the same base the tier card uses — to get the recommended amount, and
      * carry what is left unpaid by the owner's rule ({@link #carriedInto}, 2026-09-27): a month's due is
      * its target plus what earlier months carried, and an overpayment never carries forward — it
      * clears what was carried in, but never lowers a later month's target. The level stays anchored
@@ -557,7 +557,7 @@ public class OverviewService {
                         debt34Uzs, debtRatio, minLeftoverUzs(1)).pct()
                 : bucketPercents(level, subLevel);
         BigDecimal bonusUzs = sumBonusIncomeUzs(m);
-        BigDecimal base = allocationBaseUzs(stableUzs, salaryReceivedUzs(m, today, salaryTree), bonusUzs);
+        BigDecimal base = allocationBaseUzs(stableUzs, bonusUzs);
         // Marks read once per month and folded in here, so the loop never queries them twice.
         BucketPaid marks = computeBucketMarks(m);
         BucketPaid paid = withBucketMarks(computePaidThisMonth(m, Currency.UZS, false), marks);
@@ -629,17 +629,18 @@ public class OverviewService {
     // ── The allocation base: what the percentages multiply ─────────────────────
 
     /**
-     * The allocation base, decided by the owner on 2026-09-23: the savings percentages apply to what
-     * they earn — salary, advance and bonus — rather than to what is left after bills and debt.
+     * The allocation base, decided by the owner on 2026-09-30 ("allocations should update only when
+     * bonus income is added"):
      *
-     * <pre>allocationBase = max(stable income, salary received) + bonus received</pre>
+     * <pre>allocationBase = stable income (Settings) + bonus received for the month</pre>
      *
-     * The stable income is the floor, so before payday the targets are already the month's, and a
-     * salary above Settings raises them. (Until then: max(0, stable − subscriptions − debt charge)
-     * + bonus.)
+     * The targets are known from the month's first day and never move when a salary or an advance
+     * is recorded — however many, however large. Only a bonus (counted in its accounting month,
+     * Transaction.salaryMonth) raises them. History: 2026-09-23 to 2026-09-30 it was max(stable income,
+     * salary received) + bonus; before that max(0, stable − subscriptions − debt charge) + bonus.
      */
-    static BigDecimal allocationBaseUzs(BigDecimal stableUzs, BigDecimal salaryReceivedUzs, BigDecimal bonusUzs) {
-        return nullToZero(stableUzs).max(nullToZero(salaryReceivedUzs)).add(nullToZero(bonusUzs));
+    static BigDecimal allocationBaseUzs(BigDecimal stableUzs, BigDecimal bonusUzs) {
+        return nullToZero(stableUzs).add(nullToZero(bonusUzs));
     }
 
     /**
@@ -1469,9 +1470,8 @@ public class OverviewService {
         // Level-1 engine: the SCENARIO (case A/B/C, tight-vs-comfortable split, bucket %s) is
         // selected from stable income per the owner's spec (decisions D1–D4); the plan's calc base
         // (stable − subscriptions − the debt charge) still decides tight vs comfortable. The base
-        // the percentages multiply is allocBaseUzs — max(stable income, the salary received this
-        // month) + this month's bonus (the owner's 2026-09-23 decision; before it, the calc base +
-        // bonus) — and neither the salary nor the bonus takes part in choosing the scenario.
+        // the percentages multiply is allocBaseUzs — the stable income + this month's bonus (the
+        // owner's 2026-09-30 decision) — and the bonus takes no part in choosing the scenario.
         // loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is personal debt.
         Level1Plan plan = computeLevel1Plan(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
                 debt34Uzs, debtRatio, minLeftoverUzs(1));

@@ -9,7 +9,7 @@ import java.util.Map;
 
 /**
  * Per-tier allocation recommendation. The bucket-level lines describe minimum percentages of
- * the allocation base — max(stable income, the salary received this month) plus this month's
+ * the allocation base — the stable income plus this month's
  * bonus income — to set aside;
  * {@code actions} carries the debt asks and scenario notes (e.g. "pay back your debts as fast
  * as you can this month").
