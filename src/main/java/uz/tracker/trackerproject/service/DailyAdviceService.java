@@ -864,12 +864,12 @@ public class DailyAdviceService {
         return ChronoUnit.DAYS.between(from, to) + 1;
     }
 
-    private static int installmentDay(BankLoan b) {
+    static int installmentDay(BankLoan b) {
         return b.getTakenDate() == null ? 1 : b.getTakenDate().getDayOfMonth();
     }
 
     /** The installment's day in {@code ym}, never after the loan's end date. */
-    private static LocalDate installmentDate(BankLoan b, YearMonth ym) {
+    static LocalDate installmentDate(BankLoan b, YearMonth ym) {
         LocalDate date = dayIn(ym, installmentDay(b));
         return b.getEndDate() != null && date.isAfter(b.getEndDate()) ? b.getEndDate() : date;
     }
@@ -878,7 +878,7 @@ public class DailyAdviceService {
         return paymentStartDate == null ? 1 : paymentStartDate.getDayOfMonth();
     }
 
-    private static String bankName(BankLoan b) {
+    static String bankName(BankLoan b) {
         String bank = b.getBankName() == null ? "" : b.getBankName().trim();
         String loan = b.getLoanName() == null ? "" : b.getLoanName().trim();
         if (bank.isEmpty()) return loan;

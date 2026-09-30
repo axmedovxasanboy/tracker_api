@@ -693,7 +693,7 @@ public class OverviewService {
     }
 
     /** The top of a category's tree (a guard against a parent cycle in bad data). */
-    private static Category rootOf(Category c) {
+    static Category rootOf(Category c) {
         Category at = c;
         for (int depth = 0; at.getParent() != null && depth < 32; depth++) at = at.getParent();
         return at;
@@ -1195,6 +1195,20 @@ public class OverviewService {
             target = investmentRepository.findByOriginatingTransactionId(t.getId()).orElse(null);
         }
         return target != null && Boolean.TRUE.equals(target.getSavingsGoal());
+    }
+
+    /**
+     * The allocation bucket a bucket-funding row credits: the one recorded on it when it was written
+     * ({@code Transaction.allocationBucket}), else — a row from before that column — the read-time
+     * derivation ({@link AllocationBucket#forSubType} with {@link #isSavingsGoalTx}). Null for a row
+     * that funds no bucket. Package-private: Analytics splits "saved" by the same rule.
+     */
+    String bucketOf(Transaction t) {
+        if (t.getAllocationBucket() != null) return t.getAllocationBucket();
+        if (t.getSubType() != uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT) {
+            return AllocationBucket.forSubType(t.getSubType(), false);
+        }
+        return AllocationBucket.forSubType(t.getSubType(), isSavingsGoalTx(t));
     }
 
     // ── Allocation preview (what would this draft transaction do?) ────────────

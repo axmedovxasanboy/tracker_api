@@ -146,9 +146,7 @@ public class AdvisorService {
         List<Owed> owed = new ArrayList<>();
         BigDecimal owedTotal = BigDecimal.ZERO;
         for (LoanGiven l : loanGivenRepository.findAll()) {
-            if (l.getStatus() == RecordStatus.PAID) continue;
-            if (l.getCurrency() != null && l.getCurrency() != Currency.UZS) continue;
-            BigDecimal out = nz(l.getTotalAmount()).subtract(nz(l.getReceivedAmount()));
+            BigDecimal out = stillOwedToOwner(l);
             if (out.signum() <= 0) continue;
             owed.add(Owed.builder().id(l.getId()).name(l.getDebtorName())
                     .amount(out).expectedOn(l.getExpectedReturnDate()).build());
@@ -290,7 +288,7 @@ public class AdvisorService {
      * "still to do" filter, so a screen can show a bucket as done rather than as missing — then each
      * savings goal's monthly payment, once the goal's payment has started (its start month).
      */
-    private static List<SavingsRow> savingsRows(List<BucketDue> buckets, List<GoalMonth> goals, YearMonth month) {
+    static List<SavingsRow> savingsRows(List<BucketDue> buckets, List<GoalMonth> goals, YearMonth month) {
         List<SavingsRow> rows = new ArrayList<>();
         for (BucketDue d : buckets) {
             if (d.target().signum() <= 0 && d.carried().signum() <= 0) continue;
@@ -303,8 +301,35 @@ public class AdvisorService {
         return rows;
     }
 
-    /** One bucket this month: its rule's target, what earlier months carried into it, what went in, what is left. */
-    private record BucketDue(String bucket, BigDecimal percent, BigDecimal target, BigDecimal carried,
+    /**
+     * {@code savingsThisMonth} on its own, built from the same pieces {@link #advise} builds it from:
+     * the Plan's allocation for the owner's day, what earlier months carried into each bucket, and
+     * the savings goals' monthly payments. Empty without a stable income. Package-private: what
+     * Analytics calls a month's "asked" is each row's target + carried.
+     */
+    List<SavingsRow> savingsThisMonth(LocalDate date) {
+        YearMonth month = YearMonth.from(date);
+        OverviewTierResponse tier = overviewService.getTierIgnoringSubscriptions(month, Currency.UZS, date);
+        if (tier.isMissingStableIncome()) return List.of();
+        return savingsRows(bucketDues(tier.getAllocation(), overviewService.carriedInto(month)),
+                goalMonths(investmentRepository.findAll(), date), month);
+    }
+
+    /**
+     * What a borrower still owes the owner on one loan given: UZS, not settled — zero otherwise.
+     * Package-private: Analytics' "owed to you" is the same sum as {@code owedToYouTotal}.
+     */
+    static BigDecimal stillOwedToOwner(LoanGiven l) {
+        if (l.getStatus() == RecordStatus.PAID) return BigDecimal.ZERO;
+        if (l.getCurrency() != null && l.getCurrency() != Currency.UZS) return BigDecimal.ZERO;
+        return clampZero(nz(l.getTotalAmount()).subtract(nz(l.getReceivedAmount())));
+    }
+
+    /**
+     * One bucket this month: its rule's target, what earlier months carried into it, what went in, what is left.
+     * Package-private with {@link #bucketDues}: Analytics' "asked" is this month's target + carried.
+     */
+    record BucketDue(String bucket, BigDecimal percent, BigDecimal target, BigDecimal carried,
                              BigDecimal paid, BigDecimal remaining) {}
 
     /**
@@ -312,7 +337,7 @@ public class AdvisorService {
      * remaining = max(0, target + carried − paid). A bucket this month's rule does not ask for has a
      * target (and percent) of 0 — and still owes what it carries.
      */
-    private static List<BucketDue> bucketDues(TierAllocation allocation, Map<String, BigDecimal> carried) {
+    static List<BucketDue> bucketDues(TierAllocation allocation, Map<String, BigDecimal> carried) {
         List<BucketDue> out = new ArrayList<>();
         if (allocation == null || allocation.getLines() == null) return out;
         for (TierAllocation.AllocationLine line : allocation.getLines()) {
@@ -332,8 +357,8 @@ public class AdvisorService {
      * is still missing to reach its target (null when it has none), and the month its payment starts
      * (null: always started).
      */
-    private record GoalMonth(Investment goal, BigDecimal monthly, BigDecimal paid, BigDecimal toTarget,
-                             YearMonth startMonth) {
+    record GoalMonth(Investment goal, BigDecimal monthly, BigDecimal paid, BigDecimal toTarget,
+                     YearMonth startMonth) {
         boolean startedBy(YearMonth month) {
             return startMonth == null || !startMonth.isAfter(month);
         }
@@ -357,7 +382,7 @@ public class AdvisorService {
      * was put into the goal this month up to and including {@code date} — a contribution recorded
      * for a later day has not left the wallets yet.
      */
-    private List<GoalMonth> goalMonths(List<Investment> holdings, LocalDate date) {
+    List<GoalMonth> goalMonths(List<Investment> holdings, LocalDate date) {
         LocalDate start = YearMonth.from(date).atDay(1);
         List<GoalMonth> goals = new ArrayList<>();
         for (Investment g : holdings) {
@@ -510,7 +535,7 @@ public class AdvisorService {
     }
 
     /** What a holding is worth: its current value, else what was put in. */
-    private static BigDecimal value(Investment holding) {
+    static BigDecimal value(Investment holding) {
         return holding.getCurrentValue() != null ? holding.getCurrentValue() : nz(holding.getInvestedAmount());
     }
 
