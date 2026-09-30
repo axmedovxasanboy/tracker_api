@@ -892,6 +892,112 @@ public class OverviewService {
         return asks;
     }
 
+    // ── Every loan still open: the Loans header (advisor `owe`) and Analytics' position ──
+
+    /** A plan that would run longer than this has no payoff month worth naming. */
+    private static final long MAX_PAYOFF_MONTHS = 1200;
+
+    /**
+     * One loan not yet paid off, as of a day.
+     *
+     * @param kind      BANK | LOAN | DEBT — the words the advisor's {@code upcoming.kind} uses
+     * @param asap      repaid as fast as possible: every debt and borrowed money without a plan;
+     *                  never a bank loan
+     * @param original  what was borrowed
+     * @param left      what is still to repay; null when it cannot be known — a bank loan keeps no
+     *                  paid total, so one without an end date has no knowable remainder
+     * @param monthly   the plan / the bank's monthly payment; null for ASAP money
+     * @param paidOffBy the month the last payment falls in; null when it cannot be known
+     */
+    record OpenLoan(String kind, Long refId, String name, boolean asap, BigDecimal original,
+                    BigDecimal left, BigDecimal monthly, YearMonth paidOffBy) {}
+
+    /**
+     * Every loan not yet paid off as of {@code asOf} (UZS), largest {@code left} first, unknown last:
+     * the borrowed money and debts the Plan still counts ({@link #debtAsks} — a cleared one is on
+     * nobody's list) and the bank loans not yet ended. One list for the advisor's {@code owe} and
+     * Analytics' {@code position.loans}, so the two pages can never disagree.
+     *
+     * <p>A bank loan's {@code left} is known only with an end date: this month's installment as far
+     * as the Plan does not count it paid (installments recorded plus "already paid" marks, applied to
+     * the loans in due order — the daily walk's rule), plus one installment for every later month it
+     * runs in. Once that reaches zero the loan is paid off and leaves the list.
+     */
+    List<OpenLoan> openLoans(LocalDate asOf) {
+        YearMonth current = YearMonth.from(asOf);
+        List<OpenLoan> loans = new ArrayList<>();
+
+        Map<Long, BigDecimal> borrowed = new java.util.HashMap<>();
+        for (LoanTaken l : loanTakenRepository.findAll()) borrowed.put(l.getId(), l.getTotalAmount());
+        Map<Long, BigDecimal> owed = new java.util.HashMap<>();
+        for (Debt d : debtRepository.findAll()) owed.put(d.getId(), d.getTotalAmount());
+        for (DebtAsk a : debtAsks(current, asOf)) {
+            boolean loan = LOAN_ASK.equals(a.kind());
+            loans.add(new OpenLoan(a.kind(), a.id(), a.name(), a.asap(),
+                    (loan ? borrowed : owed).get(a.id()), a.left(), a.asap() ? null : a.plan(),
+                    paidOffBy(a, current)));
+        }
+
+        List<BankLoan> banks = new ArrayList<>();
+        for (BankLoan b : bankLoanRepository.findAll()) if (isUzs(b.getCurrency())) banks.add(b);
+        banks.sort(Comparator.comparing(DailyAdviceService::installmentDay)
+                .thenComparing(BankLoan::getId, Comparator.nullsLast(Comparator.naturalOrder())));
+        MonthPaid monthPaid = computeMonthPaid(current, Currency.UZS, asOf);
+        BigDecimal paid = monthPaid == null ? BigDecimal.ZERO : nullToZero(monthPaid.bankInstallments());
+        for (BankLoan b : banks) {
+            boolean hasPayment = b.getMonthlyPayment() != null && b.getMonthlyPayment().signum() > 0;
+            BigDecimal monthly = hasPayment ? b.getMonthlyPayment() : null;
+            BigDecimal thisMonth = BigDecimal.ZERO;
+            if (hasPayment && bankLoanRunsIn(b, current)) {
+                BigDecimal covered = paid.min(monthly);
+                paid = paid.subtract(covered);
+                thisMonth = monthly.subtract(covered);
+            }
+            if (b.getEndDate() != null && b.getEndDate().isBefore(current.atDay(1))) continue; // ended
+            BigDecimal left = null;
+            if (hasPayment && b.getEndDate() != null) {
+                left = thisMonth;
+                YearMonth end = YearMonth.from(b.getEndDate());
+                for (YearMonth m = current.plusMonths(1); !m.isAfter(end); m = m.plusMonths(1)) {
+                    if (bankLoanRunsIn(b, m)) left = left.add(monthly);
+                }
+                if (left.signum() <= 0) continue; // its last installment is paid
+            }
+            loans.add(new OpenLoan(DailyAdviceService.BANK, b.getId(), DailyAdviceService.bankName(b), false,
+                    b.getTotalAmount(), left, monthly, b.getEndDate() == null ? null : YearMonth.from(b.getEndDate())));
+        }
+        loans.sort(Comparator.comparing(OpenLoan::left, Comparator.nullsLast(Comparator.reverseOrder())));
+        return loans;
+    }
+
+    /**
+     * The month a MONTHLY loan's last payment falls in, counting what is left down by the plan from
+     * its next payment month: this month while it still asks something, the month after once it is
+     * paid, or the plan's start month when that is still ahead. Null for ASAP money — there is no
+     * schedule to count along.
+     */
+    static YearMonth paidOffBy(DebtAsk a, YearMonth current) {
+        if (a.asap() || a.plan() == null || a.plan().signum() <= 0 || a.left() == null || a.left().signum() <= 0) {
+            return null;
+        }
+        YearMonth first;
+        BigDecimal firstPays;
+        if (!hasStartedBy(a.paymentStartDate(), current)) {
+            first = YearMonth.from(a.paymentStartDate());
+            firstPays = a.plan().min(a.left());
+        } else if (a.due().signum() > 0) {
+            first = current;
+            firstPays = a.due().min(a.left());
+        } else {
+            first = current.plusMonths(1);
+            firstPays = a.plan().min(a.left());
+        }
+        BigDecimal after = a.left().subtract(firstPays);
+        BigDecimal more = after.signum() <= 0 ? BigDecimal.ZERO : after.divide(a.plan(), 0, RoundingMode.CEILING);
+        if (more.compareTo(BigDecimal.valueOf(MAX_PAYOFF_MONTHS)) > 0) return null;
+        return first.plusMonths(more.longValue());
+    }
+
     /**
      * Loan repayments in {@code month} up to {@code asOf} that name no loan or debt (UZS): the Plan
      * counts them toward the ASAP asks, so the daily walk and the advisor take them off those asks

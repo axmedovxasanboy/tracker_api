@@ -6,6 +6,10 @@ import org.springframework.transaction.annotation.Transactional;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Bill;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Daily;
+import uz.tracker.trackerproject.dto.response.AdvisorResponse.Goal;
+import uz.tracker.trackerproject.dto.response.AdvisorResponse.Means;
+import uz.tracker.trackerproject.dto.response.AdvisorResponse.NotCounted;
+import uz.tracker.trackerproject.dto.response.AdvisorResponse.Owe;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.Owed;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.SavingsRow;
 import uz.tracker.trackerproject.dto.response.AdvisorResponse.SetAside;
@@ -255,6 +259,9 @@ public class AdvisorService {
             if (extra != null) suggestions.add(extra);
         }
 
+        // ── A normal month, the goals against it, and what is owed ──
+        Means means = missingIncome ? null : means(date, expected, goalMonths, daily);
+
         return AdvisorResponse.builder()
                 .date(date)
                 .month(month.toString())
@@ -280,7 +287,138 @@ public class AdvisorService {
                 .suggestions(suggestions)
                 .daily(daily)
                 .savingsThisMonth(missingIncome ? List.of() : savingsRows(bucketDues(allocation, carried), goalMonths, month))
+                .means(means)
+                .goals(goals(holdings, month, means))
+                .owe(owe(date, owedTotal))
                 .build();
+    }
+
+    // ── Means: does a normal month have room for what is asked of it? ─────────
+
+    static final String FITS = "FITS";
+    static final String TIGHT = "TIGHT";
+    static final String DOES_NOT_FIT = "DOES_NOT_FIT";
+    /** A month, for turning the daily pace into a monthly one. */
+    private static final BigDecimal PACE_MONTH_DAYS = BigDecimal.valueOf(30);
+
+    /**
+     * A month without a bonus, next month's asks against the stable income: the bills, the loan
+     * payments as the Plan counts them for next month, the rule's percentages of the income (the
+     * figure the daily walk reserves for a later month — no bonus, no carry-over), and the plans'
+     * monthly payments asked for next month, each capped at what finishes it. Wishes ask nothing:
+     * {@code plans} is {@link #goalMonths}, which leaves them out.
+     */
+    private Means means(LocalDate date, BigDecimal income, List<GoalMonth> plans, Daily daily) {
+        YearMonth next = YearMonth.from(date).plusMonths(1);
+        OverviewTierResponse tier = overviewService.getTierIgnoringSubscriptions(next, Currency.UZS, date);
+        BigDecimal bills = tier == null ? BigDecimal.ZERO : nz(tier.getMandatorySubscriptions());
+        BigDecimal loanPayments = tier == null ? BigDecimal.ZERO : nz(tier.getDebtPayments());
+        BigDecimal setAside = nz(dailyAdviceService.ruleSetAside(next, date, income));
+        BigDecimal goals = BigDecimal.ZERO;
+        for (GoalMonth g : plans) {
+            if (g.startedBy(next)) goals = goals.add(g.toTarget() == null ? g.monthly() : g.monthly().min(g.toTarget()));
+        }
+        BigDecimal room = income.subtract(bills).subtract(loanPayments).subtract(setAside);
+        BigDecimal left = room.subtract(goals);
+        BigDecimal paceMonthly = daily == null || daily.getPaceDaily() == null ? null
+                : daily.getPaceDaily().multiply(PACE_MONTH_DAYS);
+        return Means.builder().income(income).bills(bills).loanPayments(loanPayments).setAside(setAside)
+                .goals(goals).leftToLive(left).roomForGoals(room).paceMonthly(paceMonthly)
+                .verdict(meansVerdict(left, paceMonthly)).build();
+    }
+
+    /** DOES_NOT_FIT below zero; TIGHT when it is below a known monthly pace; FITS otherwise. */
+    static String meansVerdict(BigDecimal leftToLive, BigDecimal paceMonthly) {
+        if (leftToLive.signum() < 0) return DOES_NOT_FIT;
+        return paceMonthly != null && leftToLive.compareTo(paceMonthly) < 0 ? TIGHT : FITS;
+    }
+
+    // ── Goals: plans and wishes ───────────────────────────────────────────────
+
+    static final String DONE = "DONE";
+    static final String BEHIND = "BEHIND";
+    static final String ON_TRACK = "ON_TRACK";
+    /** A needed monthly payment is suggested in this step, rounded up — as the goal form suggests it. */
+    private static final BigDecimal NEEDED_STEP = new BigDecimal("10000");
+
+    /** Every savings goal (UZS), plans first, then wishes, each group in the order they are kept. */
+    private static List<Goal> goals(List<Investment> holdings, YearMonth month, Means means) {
+        List<Goal> plans = new ArrayList<>();
+        List<Goal> wishes = new ArrayList<>();
+        for (Investment g : holdings) {
+            if (!Boolean.TRUE.equals(g.getSavingsGoal())) continue;
+            if (g.getCurrency() != null && g.getCurrency() != Currency.UZS) continue;
+            boolean plan = Investment.PLAN.equals(g.goalKind());
+            BigDecimal target = g.getTargetAmount() == null || g.getTargetAmount().signum() <= 0 ? null : g.getTargetAmount();
+            Goal.GoalBuilder row = Goal.builder().id(g.getId()).name(g.getName()).kind(g.goalKind())
+                    .target(target).value(value(g)).monthly(g.getMonthlyContribution())
+                    .startMonth(g.getPaymentStartDate() == null ? null : YearMonth.from(g.getPaymentStartDate()).toString())
+                    .deadline(g.getTargetDate() == null ? null : YearMonth.from(g.getTargetDate()).toString());
+            if (plan) {
+                BigDecimal needed = neededMonthly(g, month);
+                String status = goalStatus(g, means, needed != null);
+                row.status(status).neededMonthly(BEHIND.equals(status) ? needed : null);
+            }
+            (plan ? plans : wishes).add(row.build());
+        }
+        plans.addAll(wishes);
+        return plans;
+    }
+
+    /** A plan's status, the first that applies: DONE, DOES_NOT_FIT, BEHIND, ON_TRACK. */
+    static String goalStatus(Investment plan, Means means, boolean late) {
+        if (!belowTarget(plan)) return DONE;
+        if (means != null && DOES_NOT_FIT.equals(means.getVerdict())) return DOES_NOT_FIT;
+        return late ? BEHIND : ON_TRACK;
+    }
+
+    /**
+     * What a plan would have to pay each month to meet its deadline — only when its monthly payment
+     * will not: null when it has no target or no deadline, is done, or reaches the target in time.
+     * Counted the way the goal form counts it: the first month to pay is this one, or the month
+     * payments start when that is later; every month from it to the deadline's month pays; a
+     * deadline already behind leaves one month; the needed payment is rounded up to 10,000.
+     */
+    static BigDecimal neededMonthly(Investment plan, YearMonth month) {
+        if (plan.getTargetDate() == null || plan.getTargetAmount() == null || plan.getTargetAmount().signum() <= 0) return null;
+        BigDecimal remaining = plan.getTargetAmount().subtract(value(plan));
+        BigDecimal monthly = nz(plan.getMonthlyContribution());
+        if (remaining.signum() <= 0 || monthly.signum() <= 0) return null;
+        YearMonth starts = plan.paymentStartMonth();
+        YearMonth from = starts != null && starts.isAfter(month) ? starts : month;
+        YearMonth deadline = YearMonth.from(plan.getTargetDate());
+        long monthsLeft = Math.max(1, java.time.temporal.ChronoUnit.MONTHS.between(from, deadline) + 1);
+        BigDecimal monthsToReach = remaining.divide(monthly, 0, RoundingMode.CEILING);
+        if (monthsToReach.compareTo(BigDecimal.valueOf(1200)) <= 0
+                && !from.plusMonths(monthsToReach.longValue() - 1).isAfter(deadline)) {
+            return null;   // reached by the deadline's month
+        }
+        return remaining.divide(BigDecimal.valueOf(monthsLeft), 0, RoundingMode.CEILING)
+                .divide(NEEDED_STEP, 0, RoundingMode.CEILING).multiply(NEEDED_STEP);
+    }
+
+    // ── Owe: the Loans header ─────────────────────────────────────────────────
+
+    /**
+     * What is still to repay on every loan whose amount is known, the loans it could not count —
+     * a total must never silently leave one out — and the part to repay as fast as possible. The
+     * loans, and what is left on each, are {@code OverviewService.openLoans}: the list Analytics'
+     * position shows.
+     */
+    private Owe owe(LocalDate date, BigDecimal owedToYou) {
+        BigDecimal left = BigDecimal.ZERO;
+        BigDecimal fast = BigDecimal.ZERO;
+        List<NotCounted> notCounted = new ArrayList<>();
+        List<OverviewService.OpenLoan> loans = overviewService.openLoans(date);
+        for (OverviewService.OpenLoan l : loans == null ? List.<OverviewService.OpenLoan>of() : loans) {
+            if (l.left() == null) {
+                notCounted.add(NotCounted.builder().kind(l.kind()).refId(l.refId()).name(l.name()).build());
+                continue;
+            }
+            left = left.add(l.left());
+            if (l.asap()) fast = fast.add(l.left());
+        }
+        return Owe.builder().leftToRepay(left).notCounted(notCounted).toRepayFast(fast).owedToYou(owedToYou).build();
     }
 
     /**
@@ -376,8 +514,8 @@ public class AdvisorService {
     }
 
     /**
-     * The savings goals with a monthly payment that have not reached their target (or have none) —
-     * those whose payment starts in a later month too: the daily figure sets their payment aside
+     * The PLANS — savings goals with a monthly payment that are not wishes — that have not reached
+     * their target (or have none) — those whose payment starts in a later month too: the daily figure sets their payment aside
      * from that month's payday, while this month's rows list only the started ones. "Paid" is what
      * was put into the goal this month up to and including {@code date} — a contribution recorded
      * for a later day has not left the wallets yet.
@@ -386,10 +524,11 @@ public class AdvisorService {
         LocalDate start = YearMonth.from(date).atDay(1);
         List<GoalMonth> goals = new ArrayList<>();
         for (Investment g : holdings) {
-            if (!Boolean.TRUE.equals(g.getSavingsGoal())) continue;
+            // A plan only: a wish — flagged as one, or with no monthly payment — asks for nothing.
+            if (!Investment.PLAN.equals(g.goalKind())) continue;
             if (g.getCurrency() != null && g.getCurrency() != Currency.UZS) continue;
             BigDecimal monthly = nz(g.getMonthlyContribution());
-            if (monthly.signum() <= 0 || !belowTarget(g)) continue;
+            if (!belowTarget(g)) continue;
             BigDecimal paid = BigDecimal.ZERO;
             for (Transaction t : transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(g.getId())) {
                 if (t.getType() != TransactionType.EXPENSE || t.getAmount() == null) continue;
@@ -509,7 +648,9 @@ public class AdvisorService {
         if (amount.signum() <= 0) return null;
         String horizon = "until " + DAY.format(perDay.daily().getUntil()) + " at your usual pace";
 
-        Investment goal = goals.stream().filter(AdvisorService::belowTarget).findFirst().orElse(null);
+        // Spare money goes to a plan first — it is what the owner is paying toward — then to a wish.
+        Investment goal = goals.stream().filter(AdvisorService::belowTarget)
+                .min(Comparator.comparing(g -> Investment.PLAN.equals(g.goalKind()) ? 0 : 1)).orElse(null);
         if (goal != null) {
             return Suggestion.builder()
                     .code("advisor.s.extraToGoal").params(Map.of("name", goal.getName() == null ? "" : goal.getName()))

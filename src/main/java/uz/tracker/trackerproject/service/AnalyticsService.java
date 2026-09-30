@@ -36,8 +36,8 @@ import uz.tracker.trackerproject.entity.Settings;
 import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.RepaymentType;
+import uz.tracker.trackerproject.enums.TransactionFlow;
 import uz.tracker.trackerproject.enums.TransactionSubType;
-import uz.tracker.trackerproject.enums.TransactionType;
 import uz.tracker.trackerproject.repository.BankLoanRepository;
 import uz.tracker.trackerproject.repository.DebtRepository;
 import uz.tracker.trackerproject.repository.EmergencyRepository;
@@ -87,11 +87,12 @@ import java.util.TreeSet;
  *   <li>EXPENSE, EVERYDAY_SPENDING (a wallet check found less than expected) → everyday, not itemised</li>
  *   <li>any other EXPENSE → everyday, itemised</li>
  * </ol>
- * The predicates are the ones Home's pace and the Plan already use — {@link DailyAdviceService#isEverydaySpend},
- * {@link DailyAdviceService#isSurplusFound}, {@link DailyAdviceService#isSaving},
- * {@link OverviewService#isBonusCategory}, {@link OverviewService#isSalaryCategory} over
- * {@link OverviewService#salaryTree()}, {@link OverviewService#bucketOf} — so this page and those
- * cannot drift apart.
+ * The decision itself is {@link TransactionFlows#of} — the {@code flow} every
+ * {@code TransactionResponse} carries — so History, the bot and this page read one classification;
+ * its predicates are the ones Home's pace already uses ({@link DailyAdviceService#isEverydaySpend},
+ * {@link DailyAdviceService#isSurplusFound}, {@link DailyAdviceService#isSaving}). Earned income is
+ * split by {@link OverviewService#isBonusCategory} and {@link OverviewService#isSalaryCategory} over
+ * {@link OverviewService#salaryTree()}, saved money by {@link OverviewService#bucketOf}.
  */
 @Slf4j
 @Service
@@ -104,8 +105,6 @@ public class AnalyticsService {
     private static final LocalDate BEGINNING = LocalDate.of(1970, 1, 1);
     static final String UNCATEGORIZED = "Uncategorized";
     static final String BANK_LOAN = "Bank loan";
-    /** A plan that would run longer than this has no payoff month worth naming. */
-    private static final long MAX_PAYOFF_MONTHS = 1200;
 
     static final String PAY = "PAY";
     static final String BONUS = "BONUS";
@@ -140,38 +139,38 @@ public class AnalyticsService {
 
     // ── Which rows count, and as what ─────────────────────────────────────────
 
-    /** A half of a move between the owner's own wallets. */
-    static boolean isTransfer(Transaction t) {
-        return t.getTransferPairId() != null || t.getSubType() == TransactionSubType.TRANSFER_IN
-                || t.getSubType() == TransactionSubType.TRANSFER_OUT;
-    }
-
     /** A row Analytics looks at at all: UZS money, dated, and not a transfer. */
     static boolean counts(Transaction t) {
         return t.getAmount() != null && t.getTransactionDate() != null && t.getType() != null
-                && (t.getCurrency() == null || t.getCurrency() == Currency.UZS) && !isTransfer(t);
+                && (t.getCurrency() == null || t.getCurrency() == Currency.UZS)
+                && TransactionFlows.of(t) != TransactionFlow.TRANSFER;
     }
 
-    /** The class of a row that {@link #counts}: first match wins, in the order of the class comment. */
+    /**
+     * The class of a row that {@link #counts}: its {@link TransactionFlow} — the one every
+     * {@code TransactionResponse} carries — with the two things only this page tells apart: a
+     * donation (GIVEN) is a saving here too, split off by its bucket, and everyday spending found by
+     * a wallet check (sub-type EVERYDAY_SPENDING) is the part nobody itemised.
+     */
     static FlowClass classify(Transaction t) {
-        TransactionSubType st = t.getSubType();
-        if (t.getType() == TransactionType.INCOME) {
-            if (st == TransactionSubType.LOAN_RECEIVED) return FlowClass.BORROWED;
-            if (st == TransactionSubType.LOAN_RETURNED_TO_ME) return FlowClass.RETURNED;
-            if (st == TransactionSubType.INVESTMENT_WITHDRAWAL) return FlowClass.FROM_SAVINGS;
-            if (DailyAdviceService.isSurplusFound(t)) return FlowClass.CORRECTION;
-            return FlowClass.EARNED;
-        }
-        if (st == TransactionSubType.LOAN_GIVEN) return FlowClass.LENT;
-        if (DailyAdviceService.isSaving(t)) return FlowClass.SAVED;
-        if (st == TransactionSubType.BANK_LOAN_PAYMENT || st == TransactionSubType.LOAN_REPAYMENT) {
-            return FlowClass.LOAN_PAYMENT;
-        }
-        if (DailyAdviceService.isEverydaySpend(t)) {
-            return st == TransactionSubType.EVERYDAY_SPENDING ? FlowClass.EVERYDAY_UNITEMISED : FlowClass.EVERYDAY;
-        }
-        if (t.getMonthlyPaymentId() != null) return FlowClass.BILL;
-        return FlowClass.EVERYDAY;
+        return classOf(TransactionFlows.of(t), t);
+    }
+
+    private static FlowClass classOf(TransactionFlow flow, Transaction t) {
+        return switch (flow) {
+            case BORROWED -> FlowClass.BORROWED;
+            case RETURNED -> FlowClass.RETURNED;
+            case FROM_SAVINGS -> FlowClass.FROM_SAVINGS;
+            case CORRECTION -> FlowClass.CORRECTION;
+            case EARNED -> FlowClass.EARNED;
+            case LENT -> FlowClass.LENT;
+            case SAVED, GIVEN -> FlowClass.SAVED;
+            case LOAN_PAYMENT -> FlowClass.LOAN_PAYMENT;
+            case BILL -> FlowClass.BILL;
+            case EVERYDAY -> t.getSubType() == TransactionSubType.EVERYDAY_SPENDING
+                    ? FlowClass.EVERYDAY_UNITEMISED : FlowClass.EVERYDAY;
+            case TRANSFER -> throw new IllegalArgumentException("A transfer between own wallets is not counted.");
+        };
     }
 
     /** PAY | BONUS | OTHER for a row of earned income, by its own category. */
@@ -180,10 +179,13 @@ public class AnalyticsService {
         return OverviewService.isSalaryCategory(c, salaryTree) ? PAY : OTHER;
     }
 
-    /** DONATION | EMERGENCY | INVESTMENTS | GOAL for a row of saved money, by its allocation bucket. */
+    /**
+     * DONATION | EMERGENCY | INVESTMENTS | GOAL for a row of saved money, by its allocation bucket.
+     * A donation is whatever the row's flow calls GIVEN — never decided a second time here.
+     */
     private String savedKind(Transaction t) {
+        if (TransactionFlows.of(t) == TransactionFlow.GIVEN) return DONATION;
         String bucket = overviewService.bucketOf(t);
-        if (AllocationBucket.DONATION.equals(bucket)) return DONATION;
         if (AllocationBucket.EMERGENCY.equals(bucket)) return EMERGENCY;
         if (AllocationBucket.SAVINGS.equals(bucket)) return GOAL;
         return INVESTMENTS; // INVESTMENTS, and the legacy STOCKS bucket
@@ -699,7 +701,7 @@ public class AnalyticsService {
             // A goal keeps no history of its plan: a past month asked its monthly payment, from the
             // month that payment started.
             for (Investment g : holdings) {
-                if (!Boolean.TRUE.equals(g.getSavingsGoal())) continue;
+                if (!Investment.PLAN.equals(g.goalKind())) continue;   // a wish asks for nothing
                 YearMonth starts = g.paymentStartMonth();
                 if (starts != null && starts.isAfter(month)) continue;
                 goalAsked.put(g.getId(), nz(g.getMonthlyContribution()));
@@ -745,8 +747,6 @@ public class AnalyticsService {
     }
 
     private Position position(LocalDate date, List<Investment> holdings) {
-        YearMonth current = YearMonth.from(date);
-
         // The advisor's `have`: every UZS wallet's computed balance at the end of the day.
         BigDecimal wallets = BigDecimal.ZERO;
         for (MonthCloseService.ComputedWallet w : monthCloseService.computedWallets(date, Set.of())) {
@@ -772,22 +772,13 @@ public class AnalyticsService {
         }
         BigDecimal own = wallets.add(emergencyFund).add(investments).add(goals);
 
+        // The same list, and the same `left`, the advisor's `owe` adds up.
         List<PositionLoan> loans = new ArrayList<>();
-        Map<Long, LoanTaken> loansTaken = byId(loanTakenRepository.findAll(), LoanTaken::getId);
-        Map<Long, Debt> debts = byId(debtRepository.findAll(), Debt::getId);
-        // The Plan's own list of what is still owed (a cleared loan is on nobody's list).
-        for (OverviewService.DebtAsk a : overviewService.debtAsks(current, date)) {
-            boolean loan = OverviewService.LOAN_ASK.equals(a.kind());
-            BigDecimal original = loan
-                    ? (loansTaken.get(a.id()) == null ? null : loansTaken.get(a.id()).getTotalAmount())
-                    : (debts.get(a.id()) == null ? null : debts.get(a.id()).getTotalAmount());
-            YearMonth paidOff = paidOffBy(a, current);
-            loans.add(PositionLoan.builder().kind(loan ? LOAN : DEBT).refId(a.id()).name(a.name()).asap(a.asap())
-                    .original(original).left(a.left()).monthly(a.asap() ? null : a.plan())
-                    .paidOffBy(paidOff == null ? null : paidOff.toString()).build());
+        for (OverviewService.OpenLoan l : overviewService.openLoans(date)) {
+            loans.add(PositionLoan.builder().kind(l.kind()).refId(l.refId()).name(l.name()).asap(l.asap())
+                    .original(l.original()).left(l.left()).monthly(l.monthly())
+                    .paidOffBy(l.paidOffBy() == null ? null : l.paidOffBy().toString()).build());
         }
-        loans.addAll(bankLoans(current, date));
-        loans.sort(Comparator.comparing(PositionLoan::getLeft, Comparator.nullsLast(Comparator.reverseOrder())));
         BigDecimal loansLeft = BigDecimal.ZERO;
         for (PositionLoan l : loans) if (l.getLeft() != null) loansLeft = loansLeft.add(l.getLeft());
 
@@ -798,73 +789,6 @@ public class AnalyticsService {
         return Position.builder().asOf(date).wallets(wallets).emergencyFund(emergencyFund)
                 .investments(investments).goals(goals).own(own).loans(loans).loansLeft(loansLeft)
                 .owedToYou(owed).net(own.subtract(loansLeft)).build();
-    }
-
-    /**
-     * The month a MONTHLY loan's last payment falls in, counting what is left down by the plan from
-     * its next payment month: this month while it still asks something, the month after once it is
-     * paid, or the plan's start month when that is still ahead. Null for ASAP money — there is no
-     * schedule to count along.
-     */
-    static YearMonth paidOffBy(OverviewService.DebtAsk a, YearMonth current) {
-        if (a.asap() || a.plan() == null || a.plan().signum() <= 0 || a.left() == null || a.left().signum() <= 0) {
-            return null;
-        }
-        YearMonth first;
-        BigDecimal firstPays;
-        if (!OverviewService.hasStartedBy(a.paymentStartDate(), current)) {
-            first = YearMonth.from(a.paymentStartDate());
-            firstPays = a.plan().min(a.left());
-        } else if (a.due().signum() > 0) {
-            first = current;
-            firstPays = a.due().min(a.left());
-        } else {
-            first = current.plusMonths(1);
-            firstPays = a.plan().min(a.left());
-        }
-        BigDecimal after = a.left().subtract(firstPays);
-        BigDecimal more = after.signum() <= 0 ? BigDecimal.ZERO : after.divide(a.plan(), 0, RoundingMode.CEILING);
-        if (more.compareTo(BigDecimal.valueOf(MAX_PAYOFF_MONTHS)) > 0) return null;
-        return first.plusMonths(more.longValue());
-    }
-
-    /**
-     * The bank loans still running. A bank loan keeps no paid total, so what is left is only known
-     * when it has an end date: this month's installment as far as the Plan does not count it paid
-     * (installments recorded plus marks, applied to the loans in due order — the daily walk's rule),
-     * plus one installment for every later month it runs in.
-     */
-    private List<PositionLoan> bankLoans(YearMonth current, LocalDate date) {
-        List<BankLoan> loans = new ArrayList<>(uzs(bankLoanRepository.findAll()));
-        loans.sort(Comparator.comparing(DailyAdviceService::installmentDay)
-                .thenComparing(BankLoan::getId, Comparator.nullsLast(Comparator.naturalOrder())));
-        OverviewService.MonthPaid monthPaid = overviewService.computeMonthPaid(current, Currency.UZS, date);
-        BigDecimal paid = monthPaid == null ? BigDecimal.ZERO : nz(monthPaid.bankInstallments());
-        List<PositionLoan> out = new ArrayList<>();
-        for (BankLoan b : loans) {
-            boolean hasPayment = b.getMonthlyPayment() != null && b.getMonthlyPayment().signum() > 0;
-            BigDecimal monthly = hasPayment ? b.getMonthlyPayment() : null;
-            BigDecimal thisMonth = BigDecimal.ZERO;
-            if (hasPayment && OverviewService.bankLoanRunsIn(b, current)) {
-                BigDecimal covered = paid.min(monthly);
-                paid = paid.subtract(covered);
-                thisMonth = monthly.subtract(covered);
-            }
-            if (b.getEndDate() != null && b.getEndDate().isBefore(current.atDay(1))) continue; // ended
-            BigDecimal left = null;
-            if (hasPayment && b.getEndDate() != null) {
-                left = thisMonth;
-                YearMonth end = YearMonth.from(b.getEndDate());
-                for (YearMonth m = current.plusMonths(1); !m.isAfter(end); m = m.plusMonths(1)) {
-                    if (OverviewService.bankLoanRunsIn(b, m)) left = left.add(monthly);
-                }
-                if (left.signum() <= 0) continue; // its last installment is paid
-            }
-            out.add(PositionLoan.builder().kind(BANK).refId(b.getId()).name(DailyAdviceService.bankName(b))
-                    .asap(false).original(b.getTotalAmount()).left(left).monthly(monthly)
-                    .paidOffBy(b.getEndDate() == null ? null : YearMonth.from(b.getEndDate()).toString()).build());
-        }
-        return out;
     }
 
     /**

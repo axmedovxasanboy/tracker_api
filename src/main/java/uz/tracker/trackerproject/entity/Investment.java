@@ -73,6 +73,28 @@ public class Investment {
     private BigDecimal monthlyContribution;
 
     /**
+     * A savings goal the owner keeps on the list but sets nothing aside for — a WISH rather than a
+     * PLAN. It asks for nothing anywhere (no reservation in the daily figure, no row in the month's
+     * savings, no suggestion), though money can still be put into it. The flag alone decides it:
+     * the monthly payment, its start month and the deadline stay stored, so flipping it back
+     * restores the plan as it was. Nullable: null = false, so rows from before it existed are plans.
+     */
+    @Column(name = "wish")
+    private Boolean wish;
+
+    /** PLAN — a savings goal with a monthly payment that is not a wish; the app sets money aside for it. */
+    public static final String PLAN = "PLAN";
+    /** WISH — a savings goal flagged as one, or with no monthly payment; it asks for nothing. */
+    public static final String WISH = "WISH";
+
+    /** PLAN or WISH for a savings goal; null for any other holding. */
+    public String goalKind() {
+        if (!Boolean.TRUE.equals(savingsGoal)) return null;
+        boolean pays = monthlyContribution != null && monthlyContribution.signum() > 0;
+        return pays && !Boolean.TRUE.equals(wish) ? PLAN : WISH;
+    }
+
+    /**
      * The first month a savings goal's monthly payment is asked for — always stored as the 1st of
      * that month (the setter moves any day there). Before it the advisor lists no row for the goal
      * and the daily figure sets nothing aside for it. Null = the month of {@link #purchaseDate}, so

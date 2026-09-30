@@ -68,7 +68,14 @@ public class InvestmentRequest {
      */
     private LocalDate paymentStartDate;
 
-    // Whether each of the three was SENT. The bot edits a holding by sending back every field of the
+    /**
+     * A savings goal kept as a wish: nothing is set aside for it. See {@link #wishGiven()}: leaving
+     * it out keeps the stored value. Ignored unless the holding is a savings goal. It never touches
+     * the monthly payment, its start month or the deadline — they stay for the day it is a plan again.
+     */
+    private Boolean wish;
+
+    // Whether each of these was SENT. The bot edits a holding by sending back every field of the
     // response as it knew it — a shape without these three — so an update must not read "left out" as
     // "cleared", or every bot edit would wipe a goal's deadline, monthly payment and start month.
     // Jackson calls a setter only for a property present in the JSON (an explicit null included).
@@ -79,6 +86,18 @@ public class InvestmentRequest {
     private boolean monthlyContributionSent;
     @Getter(AccessLevel.NONE) @Setter(AccessLevel.NONE)
     private boolean paymentStartDateSent;
+    @Getter(AccessLevel.NONE) @Setter(AccessLevel.NONE)
+    private boolean wishSent;
+
+    public void setWish(Boolean wish) {
+        this.wish = wish;
+        this.wishSent = true;
+    }
+
+    /** True when the request carried {@code wish} at all — null included (null = not a wish). */
+    public boolean wishGiven() {
+        return wishSent;
+    }
 
     public void setTargetDate(LocalDate targetDate) {
         this.targetDate = targetDate;

@@ -528,4 +528,49 @@ class AdvisorOwnerSeptemberTest {
             assertThat(a.getTarget()).as(a.getBucket()).isEqualByComparingTo(row.getTarget());
         }
     }
+
+    /**
+     * The usability fixes' new fields on the same day (UX-FIXES-SPEC §3): Home's state and its reason,
+     * whether a normal month has room, and the Loans header.
+     *
+     * <p>The pace (526,000 a day) runs out on 6 October, and would even with nothing set aside
+     * (213,000 a day) — so it is the pace itself. A month without a bonus does not fit before any
+     * goal: 7,000,000 − bills 5,300,000 − October's loan payments 900,000 − the rule's 1,050,000 is
+     * 250,000 short. And the 50,000,000 to the parents is all that can be counted: the bank loan has
+     * no end date, so it is named instead of being left out in silence.
+     */
+    @Test
+    void theStateTheMeansAndWhatIsOwed() {
+        AdvisorResponse r = advisor.advise(TODAY);
+        Daily d = r.getDaily();
+
+        assertThat(d.getVerdict()).isEqualTo("OVER_PACE");
+        assertThat(d.getCause()).isEqualTo("PACE");
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("151000");
+        assertThat(d.getSafePerDayNoGoals()).isEqualByComparingTo("151000");       // there are no goals
+        assertThat(d.getSafePerDayNoSavings()).isEqualByComparingTo("213000");     // still under the pace
+        assertThat(d.getBreakdown().getSetAside()).isEqualByComparingTo("2789000");
+        assertThat(d.getBreakdown().getGoals()).isEqualByComparingTo("0");
+        assertThat(d.getBreakdown().getSetAside().add(d.getBreakdown().getGoals()))
+                .isEqualByComparingTo(d.getBreakdown().getSavings());
+
+        AdvisorResponse.Means m = r.getMeans();
+        assertThat(m.getIncome()).isEqualByComparingTo("7000000");
+        assertThat(m.getBills()).isEqualByComparingTo("5300000");
+        assertThat(m.getLoanPayments()).isEqualByComparingTo("900000");            // the bank's 400,000 + the parents' 500,000
+        assertThat(m.getSetAside()).isEqualByComparingTo("1050000");               // 5 / 2 / 8 % of 7,000,000
+        assertThat(m.getGoals()).isEqualByComparingTo("0");
+        assertThat(m.getRoomForGoals()).isEqualByComparingTo("-250000");
+        assertThat(m.getLeftToLive()).isEqualByComparingTo("-250000");
+        assertThat(m.getPaceMonthly()).isEqualByComparingTo(d.getPaceDaily().multiply(new BigDecimal("30")));
+        assertThat(m.getVerdict()).isEqualTo("DOES_NOT_FIT");
+        assertThat(r.getGoals()).isEmpty();
+
+        AdvisorResponse.Owe owe = r.getOwe();
+        assertThat(owe.getLeftToRepay()).isEqualByComparingTo("50000000");
+        assertThat(owe.getNotCounted()).extracting("kind", "refId", "name")
+                .containsExactly(tuple("BANK", 5L, "Kapitalbank · Talim kredit"));
+        assertThat(owe.getToRepayFast()).isEqualByComparingTo("0");                // the Uzum loans are paid off
+        assertThat(owe.getOwedToYou()).isEqualByComparingTo("0");
+    }
 }

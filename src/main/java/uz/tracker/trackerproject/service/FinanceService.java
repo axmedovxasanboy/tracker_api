@@ -850,6 +850,10 @@ public class FinanceService {
         if (req.targetDateGiven()) i.setTargetDate(req.getTargetDate());
         if (req.monthlyContributionGiven()) i.setMonthlyContribution(req.getMonthlyContribution());
         if (req.paymentStartDateGiven()) i.setPaymentStartDate(req.getPaymentStartDate());
+        // Wish or plan: the same key-presence rule, and only a savings goal can be a wish. The flag
+        // is all that changes — the monthly payment, start month and deadline above are untouched by
+        // it, so a wish made a plan again is the plan it was.
+        if (req.wishGiven() && Boolean.TRUE.equals(i.getSavingsGoal())) i.setWish(Boolean.TRUE.equals(req.getWish()));
         // currentValue is optional: null = "tracks investedAmount" (the response mapper falls back).
         i.setCurrentValue(req.getCurrentValue());
         i.setOpeningBalance(Boolean.TRUE.equals(req.getOpeningBalance()));

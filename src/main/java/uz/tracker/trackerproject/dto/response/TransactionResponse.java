@@ -37,6 +37,13 @@ public class TransactionResponse {
     private Long repaidDebtId;
     /** Which month's salary this is ('YYYY-MM'), when not the month it arrived in; null otherwise. */
     private java.time.YearMonth salaryMonth;
+    /**
+     * What the row is in the owner's money — EARNED, BORROWED, RETURNED, FROM_SAVINGS, CORRECTION,
+     * LENT, SAVED, GIVEN, LOAN_PAYMENT, BILL, EVERYDAY or TRANSFER. Never null. The classification
+     * {@code GET /analytics} sums by ({@code TransactionFlows.of}); clients sum and label by it and
+     * re-derive nothing.
+     */
+    private uz.tracker.trackerproject.enums.TransactionFlow flow;
 
     public static TransactionResponse from(Transaction t) {
         CardSummaryResponse card = null;
@@ -75,6 +82,7 @@ public class TransactionResponse {
                 .repaidLoanGivenId(t.getRepaidLoanGivenId())
                 .repaidDebtId(t.getRepaidDebtId())
                 .salaryMonth(t.getSalaryMonth() == null ? null : java.time.YearMonth.from(t.getSalaryMonth()))
+                .flow(uz.tracker.trackerproject.service.TransactionFlows.of(t))
                 .build();
     }
 }

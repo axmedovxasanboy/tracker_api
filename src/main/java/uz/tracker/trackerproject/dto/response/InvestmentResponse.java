@@ -34,6 +34,13 @@ public class InvestmentResponse {
      * set — the payment then starts in the month of {@link #purchaseDate}.
      */
     private LocalDate paymentStartDate;
+    /** A savings goal kept as a wish: nothing is set aside for it. False for any other holding. */
+    private boolean wish;
+    /**
+     * PLAN | WISH for a savings goal; null otherwise. WISH when {@link #wish} is true or there is no
+     * monthly payment; PLAN otherwise — the app sets its monthly payment aside.
+     */
+    private String goalKind;
     /** Current/market value. Falls back to investedAmount when not explicitly set. */
     private BigDecimal currentValue;
     /** currentValue / targetAmount as a percentage; null when there is no target. */
@@ -73,6 +80,8 @@ public class InvestmentResponse {
                 .targetDate(i.getTargetDate())
                 .monthlyContribution(i.getMonthlyContribution())
                 .paymentStartDate(i.getPaymentStartDate())
+                .wish(Boolean.TRUE.equals(i.getSavingsGoal()) && Boolean.TRUE.equals(i.getWish()))
+                .goalKind(i.goalKind())
                 .currentValue(value)
                 .progressPercent(progress)
                 .putIn(i.getInvestedAmount())

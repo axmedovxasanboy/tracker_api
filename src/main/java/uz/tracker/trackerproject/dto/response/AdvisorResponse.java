@@ -106,6 +106,97 @@ public class AdvisorResponse {
      */
     private List<SavingsRow> savingsThisMonth;
 
+    // ── A normal month, the goals, and what is owed (added for the usability fixes) ─────────
+
+    /**
+     * Does a month WITHOUT a bonus have room for what is asked of it? The server decides; clients
+     * only print. Null while the monthly income is unset.
+     */
+    private Means means;
+    /** Every savings goal, plans first, then wishes; empty when there is none. */
+    private List<Goal> goals;
+    /** What is still to repay, what could not be counted, and what is owed to the owner. Never null. */
+    private Owe owe;
+
+    /**
+     * A normal month's arithmetic. "Next month" is the calendar month after {@link AdvisorResponse#date}'s,
+     * so a plan starting next month is counted and this month's part-paid state is not.
+     */
+    @Getter @Builder
+    public static class Means {
+        /** Settings' monthly income. */
+        private BigDecimal income;
+        /** Active monthly bills. */
+        private BigDecimal bills;
+        /** Next month's loan payments, as the Plan counts them: bank installments, plans and ASAP asks. */
+        private BigDecimal loanPayments;
+        /** Next month's rule percentages × income (no bonus, no carry-over). */
+        private BigDecimal setAside;
+        /** Σ monthly payments of the PLANS asked for next month, each capped at what finishes it. */
+        private BigDecimal goals;
+        /** income − bills − loanPayments − setAside − goals; may be negative. */
+        private BigDecimal leftToLive;
+        /** income − bills − loanPayments − setAside; may be negative. */
+        private BigDecimal roomForGoals;
+        /** {@code daily.paceDaily} × 30; null when there is no pace yet. */
+        private BigDecimal paceMonthly;
+        /**
+         * DOES_NOT_FIT: leftToLive &lt; 0. TIGHT: leftToLive ≥ 0 but below paceMonthly (pace known).
+         * FITS: otherwise.
+         */
+        private String verdict;
+    }
+
+    /** One savings goal as the Savings page lists it. */
+    @Getter @Builder
+    public static class Goal {
+        private Long id;
+        private String name;
+        /** PLAN | WISH (= InvestmentResponse.goalKind). */
+        private String kind;
+        /** Null when the goal has none. */
+        private BigDecimal target;
+        /** What is in it now. */
+        private BigDecimal value;
+        /** The stored monthly payment — kept even for a wish; null when never set. */
+        private BigDecimal monthly;
+        /** YYYY-MM the payments start; null when not set. */
+        private String startMonth;
+        /** YYYY-MM of the deadline; null when not set. */
+        private String deadline;
+        /**
+         * Null for a wish. For a plan, the first that applies: DONE (value ≥ target) · DOES_NOT_FIT
+         * (means.verdict is DOES_NOT_FIT) · BEHIND (it has a deadline the monthly payment will not
+         * meet) · ON_TRACK.
+         */
+        private String status;
+        /** BEHIND only: the monthly payment that would meet the deadline. */
+        private BigDecimal neededMonthly;
+    }
+
+    @Getter @Builder
+    public static class Owe {
+        /**
+         * Σ still to repay on every loan whose amount is known: borrowed money, debts, and bank
+         * loans that have an end date.
+         */
+        private BigDecimal leftToRepay;
+        /** Loans left out of {@link #leftToRepay} because the amount cannot be known; empty when none. */
+        private List<NotCounted> notCounted;
+        /** The part of {@link #leftToRepay} on loans repaid as fast as possible. */
+        private BigDecimal toRepayFast;
+        /** = owedToYouTotal. */
+        private BigDecimal owedToYou;
+    }
+
+    @Getter @Builder
+    public static class NotCounted {
+        /** BANK | LOAN | DEBT — the words {@code upcoming.kind} uses. */
+        private String kind;
+        private Long refId;
+        private String name;
+    }
+
     @Getter @Builder
     public static class Wallet {
         /** CARD | CASH */
@@ -209,6 +300,21 @@ public class AdvisorResponse {
         private List<Upcoming> upcoming;
         /** Projected income in [today, {@link #until}]; date ascending. */
         private List<IncomePart> incomes;
+        /**
+         * Which state it is, so no client re-derives it: SHORT when {@link #shortBy} is set; else
+         * OVER_PACE when {@link #runsOutOn} is set; else OK.
+         */
+        private String verdict;
+        /**
+         * Why, for OVER_PACE only (else null). GOALS: {@link #safePerDayNoGoals} ≥ {@link #paceDaily}
+         * — without the plans' reservations the pace would hold. SAVINGS: not GOALS, and
+         * {@link #safePerDayNoSavings} ≥ paceDaily. PACE: neither — too high even with nothing set aside.
+         */
+        private String cause;
+        /** {@link #safePerDay} by the same walk with every goal reservation removed. Same rounding. */
+        private BigDecimal safePerDayNoGoals;
+        /** The same with every savings reservation removed: the rule's buckets, what they carry, and goals. */
+        private BigDecimal safePerDayNoSavings;
     }
 
     /** net = have + comingIn − goingOut − savings, over {@code days} days. */
@@ -218,6 +324,10 @@ public class AdvisorResponse {
         private BigDecimal comingIn;
         private BigDecimal goingOut;
         private BigDecimal savings;
+        /** The part of {@link #savings} that is the rule's buckets and their carry-over. */
+        private BigDecimal setAside;
+        /** The part of {@link #savings} that is goals. setAside + goals = savings. */
+        private BigDecimal goals;
         private BigDecimal net;
         private int days;
     }
