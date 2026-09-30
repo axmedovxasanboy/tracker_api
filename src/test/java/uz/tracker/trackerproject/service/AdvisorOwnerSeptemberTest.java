@@ -250,18 +250,19 @@ class AdvisorOwnerSeptemberTest {
                         tuple(LocalDate.of(2026, 10, 10), "BILL", 1L, "Kvartira Arenda", "4200000", false));
 
         // By 6 November: + 7,000,000 salary − (1,800,000 bank and parents ×2 + 5,300,000 bills)
-        // − (1,739,000 still to set aside this month, now + 700,000 on 7 October: October's rule —
-        // bank AND debts, 5 / 0 / 5 % — of the 7M stable income, set aside on payday out of it).
+        // − (1,739,000 still to set aside this month, now + 1,050,000 on 7 October: October's rule —
+        // still bank-loan-only, 5 / 2 / 8 %, the parents' 500,000 being under 10% of the 7M — of the
+        // 7M stable income, set aside on payday out of it).
         // November's belongs to 7 November's salary, and both are past the horizon.
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
         assertThat(d.getBreakdown().getHave()).isEqualByComparingTo("9687000");
         assertThat(d.getBreakdown().getComingIn()).isEqualByComparingTo("7000000");
         assertThat(d.getBreakdown().getGoingOut()).isEqualByComparingTo("7100000");
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2439000");
-        assertThat(d.getBreakdown().getNet()).isEqualByComparingTo("7148000");
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2789000");
+        assertThat(d.getBreakdown().getNet()).isEqualByComparingTo("6798000");
         assertThat(d.getBreakdown().getDays()).isEqualTo(45);
-        // 7,148,000 ÷ 45 = 158,844 → 158,000 a day.
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("158000");
+        // 6,798,000 ÷ 45 = 151,066 → 151,000 a day.
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("151000");
         assertThat(d.getShortBy()).isNull();
 
         // 12,098,000 of everyday spending over 1–23 September.
@@ -299,7 +300,7 @@ class AdvisorOwnerSeptemberTest {
     /**
      * The goal the owner created on 23 September: 3,500,000 a month. With no start month it is asked
      * from September, the month it was created — 3.5M today and 3.5M more on 7 October — and the walk
-     * is 727,000 short on 10 October, the rent's day. From October it asks nothing this month (no
+     * is 1,077,000 short on 10 October, the rent's day. From October it asks nothing this month (no
      * row) and its first 3.5M on 7 October, out of October's salary: not short.
      */
     @Test
@@ -319,7 +320,7 @@ class AdvisorOwnerSeptemberTest {
         AdvisorResponse fromSeptember = advisor.advise(TODAY);
         assertThat(fromSeptember.getSavingsThisMonth()).extracting(SavingsRow::getBucket).contains("GOAL");
         assertThat(fromSeptember.getDaily().getShortBy().getDate()).isEqualTo(LocalDate.of(2026, 10, 10));
-        assertThat(fromSeptember.getDaily().getShortBy().getAmount()).isEqualByComparingTo("727000");
+        assertThat(fromSeptember.getDaily().getShortBy().getAmount()).isEqualByComparingTo("1077000");
 
         car.setPaymentStartDate(LocalDate.of(2026, 10, 1));
         AdvisorResponse fromOctober = advisor.advise(TODAY);
@@ -327,17 +328,18 @@ class AdvisorOwnerSeptemberTest {
         Daily d = fromOctober.getDaily();
         assertThat(d.getShortBy()).isNull();
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        // 1,739,000 this month + October's 700,000 and the goal's 3,500,000 on 7 October.
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("5939000");
-        // 7,148,000 − 3,500,000 = 3,648,000 over 45 days.
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("81000");
+        // 1,739,000 this month + October's 1,050,000 and the goal's 3,500,000 on 7 October.
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("6289000");
+        // 6,798,000 − 3,500,000 = 3,298,000 over 45 days.
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("73000");
     }
 
     /**
      * The two kinds of borrowed money on the owner's own loans: the parents' is MONTHLY (it has a
      * plan), the Uzum ones ASAP — but repaid, so nothing moves: September's debt charge is the bank's
      * 400,000 alone (bank loan only, tight: 5 / 2 / 8 %), October's the bank and the parents' 500,000
-     * (bank AND debts: 5 / 0 / 5 %), and nothing is to pay back.
+     * — a MONTHLY plan under 10% of the 7M, so the rule stays bank loan only, 5 / 2 / 8 % — and
+     * nothing is to pay back.
      */
     @Test
     void theParentsLoanIsMonthlyAndThePaidUzumLoansAskNothing() {
@@ -346,7 +348,9 @@ class AdvisorOwnerSeptemberTest {
         assertThat(sep.getDebtPayments()).isEqualByComparingTo("400000");
         assertThat(sep.getAllocation().getScenarioKey()).isEqualTo("1.2.1.tight");
         assertThat(oct.getDebtPayments()).isEqualByComparingTo("900000");
-        assertThat(oct.getAllocation().getScenarioKey()).isEqualTo("1.2.3");
+        assertThat(oct.getAllocation().getScenarioKey()).isEqualTo("1.2.1.tight");
+        assertThat(oct.getDebtBreakdown().getMonthlyPlans()).isEqualByComparingTo("500000");
+        assertThat(oct.getDebtBreakdown().getCountedForRule()).isEqualByComparingTo("0");
         assertThat(overview.debtAsks(YearMonth.of(2026, 10), YearMonth.of(2026, 10).atEndOfMonth()))
                 .extracting(OverviewService.DebtAsk::name, OverviewService.DebtAsk::type)
                 .containsExactly(tuple("Ota-onam", uz.tracker.trackerproject.enums.RepaymentType.MONTHLY));
@@ -455,8 +459,8 @@ class AdvisorOwnerSeptemberTest {
      * bills = 1.7M; with the bank's 400,000 the bank-loan-only rule is tight under the 5M cutoff, so
      * 5 / 2 / 8 % — of the 7M in Settings + the 16,380,000 bonus = 23,380,000 (the 7,889,000 salary
      * recorded is reported, and moves nothing); of the 7M alone in a month without a bonus. The
-     * base's lines are the bonus only. From October the parents' 500,000 plan starts: bank AND
-     * debts, 5 / 0 / 5 % of the 7M stable income.
+     * base's lines are the bonus only. From October the parents' 500,000 plan starts — under 10% of
+     * the 7M (700,000), so October's rule is the same, and there is no "next month" to announce.
      *
      * <p>Income so far is earned money only — 24,369,000. Borrowed money (the real September's two
      * Uzum loans) and a loan paid back are named beside it; a check-in's surplus and the cash
@@ -482,17 +486,13 @@ class AdvisorOwnerSeptemberTest {
                  "baseParts":{"salaryReceived":7889000,"stableIncome":7000000,"usesStableIncome":true,
                    "bonus":16380000,"lines":[
                      {"categoryId":14,"name":"Bonus","nameUz":null,"amount":16380000}]},
-                 "rule":{"reason":"BANK_LOAN_TIGHT","cutoff":5000000},
+                 "rule":{"reason":"BANK_LOAN_TIGHT","cutoff":5000000,"smallMonthlyLoans":false,"monthlyLoanLimit":700000},
                  "buckets":[
                    {"bucket":"DONATION","percent":5,"amount":1169000,"normalMonthAmount":350000,"carried":0},
                    {"bucket":"EMERGENCY","percent":2,"amount":467600,"normalMonthAmount":140000,"carried":0},
                    {"bucket":"INVESTMENTS","percent":8,"amount":1870400,"normalMonthAmount":560000,"carried":0}],
                  "totalPercent":15,"totalAmount":3507000,"normalMonthTotal":1050000,
-                 "nextMonth":{"month":"2026-10","reason":"BANK_AND_DEBTS","loanPayments":900000,
-                   "leftForSavings":800000,"buckets":[
-                     {"bucket":"DONATION","percent":5,"normalMonthAmount":350000},
-                     {"bucket":"EMERGENCY","percent":0,"normalMonthAmount":0},
-                     {"bucket":"INVESTMENTS","percent":5,"normalMonthAmount":350000}]},
+                 "nextMonth":null,
                  "incomeThisMonth":{"total":24369000,"lines":[
                      {"categoryId":14,"name":"Bonus","nameUz":null,"amount":16380000,"inBase":true},
                      {"categoryId":11,"name":"Salary","nameUz":null,"amount":5889000,"inBase":true},

@@ -206,8 +206,12 @@ public class OverviewService {
                 ? debtPaymentsUzs.divide(incomeUzs, MC)
                 : null;
 
+        // Which borrowed money makes the savings rule lighter (the owner's rule, 2026-09-30): ASAP
+        // money always; MONTHLY plans only when together they are more than 10% of the stable income.
+        BigDecimal ruleDebtUzs = ruleDebtUzs(debt34Uzs, plannedSetAsideUzs, incomeUzs);
+
         Integer level = missingIncome ? null : computeLevel(leftMoneyUzs);
-        String subLevel = computeSubLevel(level, debtPaymentsUzs, debtRatio);
+        String subLevel = computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
         String levelLabel = computeLevelLabel(level, subLevel, missingIncome);
 
         // Allocation base = the stable income + the bonus received for the month (owner's decision,
@@ -276,6 +280,8 @@ public class OverviewService {
                         .bankLoans(bankUzs)
                         .loansTaken(loanTaken34Uzs)
                         .debts(debtRows34Uzs)
+                        .monthlyPlans(plannedSetAsideUzs)
+                        .countedForRule(ruleDebtUzs)
                         .build())
                 .debtRatio(debtRatio)
                 .level(level)
@@ -548,13 +554,17 @@ public class OverviewService {
         // July for a loan taken in September, and dropped a paid-off loan from the months it was
         // still being paid in.
         BigDecimal bankUzs = sumBankLoanMonthlyPaymentsUzs(m);
-        BigDecimal debt34Uzs = debtChargeUzs(m);
+        List<DebtAsk> asks = debtAsks(m, m.atEndOfMonth());
+        BigDecimal debt34Uzs = asks.stream().map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal monthlyUzs = asks.stream().filter(a -> !a.asap())
+                .map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal ruleDebtUzs = ruleDebtUzs(debt34Uzs, monthlyUzs, stableUzs);
         BigDecimal debtPaymentsUzs = bankUzs.add(debt34Uzs);
         BigDecimal debtRatio = stableUzs.signum() > 0 ? debtPaymentsUzs.divide(stableUzs, MC) : null;
-        String subLevel = computeSubLevel(level, debtPaymentsUzs, debtRatio);
+        String subLevel = computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
         String[] pct = level != null && level == 1
                 ? computeLevel1Plan(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
-                        debt34Uzs, debtRatio, minLeftoverUzs(1)).pct()
+                        debt34Uzs, ruleDebtUzs, debtRatio, minLeftoverUzs(1)).pct()
                 : bucketPercents(level, subLevel);
         BigDecimal bonusUzs = sumBonusIncomeUzs(m);
         BigDecimal base = allocationBaseUzs(stableUzs, bonusUzs);
@@ -930,11 +940,6 @@ public class OverviewService {
         return repaid.stream()
                 .filter(r -> r.mark() ? r.on().equals(start) : !r.on().isBefore(start) && !r.on().isAfter(end))
                 .map(Repaid::amount).reduce(BigDecimal.ZERO, BigDecimal::add);
-    }
-
-    /** Σ of {@code month}'s asks: the debt charge that sets the sub-level (bank installments aside). */
-    private BigDecimal debtChargeUzs(YearMonth month) {
-        return debtAsks(month, month.atEndOfMonth()).stream().map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 
     /**
@@ -1474,7 +1479,7 @@ public class OverviewService {
         // owner's 2026-09-30 decision) — and the bonus takes no part in choosing the scenario.
         // loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is personal debt.
         Level1Plan plan = computeLevel1Plan(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
-                debt34Uzs, debtRatio, minLeftoverUzs(1));
+                debt34Uzs, ruleDebtUzs(debt34Uzs, plannedSetAsideUzs, incomeUzs), debtRatio, minLeftoverUzs(1));
         String[] p = plan.pct();
         List<AllocationLine> lines = percentLines(allocBaseUzs, displayCurrency, paid, marks,
                 p[0], p[1], p[2]);
@@ -1502,17 +1507,33 @@ public class OverviewService {
      *   A  (no debt)         → base leftBalance,          10/5/15/5
      *   C  (ratio &gt; 70%)     → base left−loan−debt34,    2/0/0/0
      *   B3 (loan AND debt)   → base left−loan−debt34,     5/0/5/0  (no 5M split)
-     *   B1 (loan only)       → base left−loan,            &lt;5M 5/2/8/0 · ≥5M 7/3/10/3
+     *   B1 (loan only)       → base left−loan−debt34,     &lt;5M 5/2/8/0 · ≥5M 7/3/10/3
+     *                          (debt34 here is only small MONTHLY plans the rule ignores, else 0)
      *   B2 (debt only)       → base left−debt34,          &lt;5M 5/2/8/0 · ≥5M 7/3/10/3
      */
     static Level1Plan computeLevel1Plan(BigDecimal incomeUzs, BigDecimal mandatoryUzs,
             BigDecimal bankMonthlyUzs, BigDecimal loanTakenUzs, BigDecimal debt34Uzs,
             BigDecimal debtRatio, BigDecimal cutoffUzs) {
+        return computeLevel1Plan(incomeUzs, mandatoryUzs, bankMonthlyUzs, loanTakenUzs, debt34Uzs, debt34Uzs,
+                debtRatio, cutoffUzs);
+    }
+
+    /**
+     * The same, telling apart the debt that is PAID ({@code debt34Uzs}: every ask of the month — what
+     * the tight/comfortable calc base subtracts, and what the heavy-debt ratio is built from) from the
+     * debt that COUNTS for the choice of the rule ({@code ruleDebtUzs}, see {@link #ruleDebtUzs}:
+     * MONTHLY plans of at most 10% of the stable income do not). With only such small plans the
+     * scenario is the one without personal debt — 1.1, or bank-loan-only beside a bank loan, whose
+     * calc base still subtracts the plans.
+     */
+    static Level1Plan computeLevel1Plan(BigDecimal incomeUzs, BigDecimal mandatoryUzs,
+            BigDecimal bankMonthlyUzs, BigDecimal loanTakenUzs, BigDecimal debt34Uzs, BigDecimal ruleDebtUzs,
+            BigDecimal debtRatio, BigDecimal cutoffUzs) {
         BigDecimal leftBalance = nullToZero(incomeUzs).subtract(nullToZero(mandatoryUzs));
         BigDecimal loanInstallments = nullToZero(bankMonthlyUzs).add(nullToZero(loanTakenUzs));
         BigDecimal debt34 = nullToZero(debt34Uzs);
         boolean hasLoan = loanInstallments.signum() > 0;
-        boolean hasDebt = debt34.signum() > 0;
+        boolean hasDebt = nullToZero(ruleDebtUzs).signum() > 0;
 
         if (!hasLoan && !hasDebt) {
             return new Level1Plan("1.1", new String[]{"10", "5", "15", "5"},
@@ -1528,7 +1549,8 @@ public class OverviewService {
             return new Level1Plan("1.2.3", new String[]{"5", null, "5", null}, base, true, true);
         }
         if (hasLoan) {
-            BigDecimal base = clampZero(leftBalance.subtract(loanInstallments));
+            // Every actual payment comes off: the installments, and any small MONTHLY plan beside them.
+            BigDecimal base = clampZero(leftBalance.subtract(loanInstallments).subtract(debt34));
             boolean tight = base.compareTo(nullToZero(cutoffUzs)) < 0;
             return new Level1Plan(tight ? "1.2.1.tight" : "1.2.1.comfortable",
                     tight ? new String[]{"5", "2", "8", null} : new String[]{"7", "3", "10", "3"},
@@ -1539,6 +1561,29 @@ public class OverviewService {
         return new Level1Plan(tight ? "1.2.2.tight" : "1.2.2.comfortable",
                 tight ? new String[]{"5", "2", "8", null} : new String[]{"7", "3", "10", "3"},
                 base, false, true);
+    }
+
+    /** A MONTHLY loan's plans count for the savings rule only above this share of the stable income. */
+    private static final BigDecimal SMALL_MONTHLY_SHARE = new BigDecimal("0.10");
+
+    /** 10% of the stable income: MONTHLY plans up to it (inclusive) leave the savings rule alone. */
+    static BigDecimal monthlyLoanLimitUzs(BigDecimal stableUzs) {
+        return nullToZero(stableUzs).multiply(SMALL_MONTHLY_SHARE);
+    }
+
+    /**
+     * The personal debt that counts when the savings rule is chosen (the owner's rule, 2026-09-30):
+     * every ASAP ask, plus the MONTHLY plans only when together they are MORE than 10% of the stable
+     * income (exactly 10% does not count). The payments themselves — the asks, the debt ratio behind
+     * "heavy", the calc base behind tight/comfortable — still use every ask.
+     *
+     * @param allAsksUzs     the month's asks on borrowed money and debts, MONTHLY and ASAP
+     * @param monthlyAsksUzs the MONTHLY plans among them
+     */
+    static BigDecimal ruleDebtUzs(BigDecimal allAsksUzs, BigDecimal monthlyAsksUzs, BigDecimal stableUzs) {
+        BigDecimal monthly = nullToZero(monthlyAsksUzs);
+        BigDecimal asap = clampZero(nullToZero(allAsksUzs).subtract(monthly));
+        return monthly.compareTo(monthlyLoanLimitUzs(stableUzs)) > 0 ? asap.add(monthly) : asap;
     }
 
     /** Result of the Level-1 engine: scenario key, bucket percentages, and the calc base (UZS). */
@@ -1554,9 +1599,15 @@ public class OverviewService {
             BigDecimal bankMonthlyUzs, BigDecimal debt34Uzs,
             BigDecimal plannedSetAsideUzs, Currency cur, List<ActionItem> upcoming) {
         String key = plan.scenarioKey();
-        // 1.1 is the debt-free scenario, so it asks for nothing — but a repayment that merely
-        // has not STARTED yet is still worth showing, or the money looks as if it vanished.
-        if ("1.1".equals(key)) return List.copyOf(upcoming);
+        // 1.1 is the scenario without debt that counts for the rule — but a small MONTHLY plan is
+        // still to be paid (its set-aside), and a repayment that merely has not STARTED yet is still
+        // worth showing, or the money looks as if it vanished.
+        if ("1.1".equals(key)) {
+            List<ActionItem> only = new ArrayList<>();
+            addDebtActions(only, debt34Uzs, plannedSetAsideUzs, cur, monthPaid);
+            only.addAll(upcoming);
+            return only;
+        }
         List<ActionItem> actions = new ArrayList<>();
         if (bankMonthlyUzs.signum() > 0) {
             actions.add(payBank(monthPaid, bankMonthlyUzs));
@@ -1729,9 +1780,14 @@ public class OverviewService {
         if (curLevel != null && !missingIncome) {
             BigDecimal stableUzs = s.getMonthlyStableIncome();
             YearMonth now = YearMonth.now();
-            BigDecimal debtTotal = sumBankLoanMonthlyPaymentsUzs(now).add(debtChargeUzs(now));
+            BigDecimal bankNow = sumBankLoanMonthlyPaymentsUzs(now);
+            List<DebtAsk> asksNow = debtAsks(now, now.atEndOfMonth());
+            BigDecimal allAsks = asksNow.stream().map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal monthlyAsks = asksNow.stream().filter(a -> !a.asap())
+                    .map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal debtTotal = bankNow.add(allAsks);
             BigDecimal ratio = stableUzs.signum() > 0 ? debtTotal.divide(stableUzs, MC) : null;
-            curSubLevel = computeSubLevel(curLevel, debtTotal, ratio);
+            curSubLevel = computeSubLevel(curLevel, bankNow.add(ruleDebtUzs(allAsks, monthlyAsks, stableUzs)), ratio);
         }
 
         YearMonth thisMonth = YearMonth.now();

@@ -103,7 +103,7 @@ public class ProfileService {
                     .carried(nz(carried == null ? null : carried.get(name)))
                     .build());
         }
-        Rule rule = rule(tier.getAllocation());
+        Rule rule = rule(tier);
 
         return ProfileResponse.builder()
                 .username(username)
@@ -336,7 +336,7 @@ public class ProfileService {
         BigDecimal leftForSavings = clampZero(nz(tier.getLeftMoney()).subtract(nz(tier.getDebtPayments())));
         // The month's base without a bonus is the stable income.
         BigDecimal salaryBase = nz(tier.getIncome());
-        Rule rule = rule(tier.getAllocation());
+        Rule rule = rule(tier);
         List<NextBucket> buckets = new ArrayList<>(BUCKETS.size());
         boolean same = rule.getReason().equals(thisRule.getReason());
         for (int i = 0; i < BUCKETS.size(); i++) {
@@ -369,7 +369,8 @@ public class ProfileService {
      * a Level 2–6 sub-level carries the owner's own rule (its key is the sub-level, "2.1"), or none —
      * the engine then defines no allocation, as it does above the ceiling.
      */
-    private Rule rule(TierAllocation allocation) {
+    private Rule rule(OverviewTierResponse tier) {
+        TierAllocation allocation = tier.getAllocation();
         String key = allocation == null ? null : allocation.getScenarioKey();
         String reason = key == null ? "NO_RULE" : switch (key) {
             case "1.1" -> "NO_DEBT";
@@ -383,7 +384,12 @@ public class ProfileService {
         };
         // Only the bank-loan-only and debts-only rules split tight / comfortable (Level 1's cutoff).
         boolean split = key != null && (key.startsWith("1.2.1.") || key.startsWith("1.2.2."));
-        return Rule.builder().reason(reason).cutoff(split ? overviewService.minLeftoverUzs(1) : null).build();
+        // MONTHLY loans of at most 10% of the stable income are paid, but leave the rule alone.
+        BigDecimal limit = OverviewService.monthlyLoanLimitUzs(tier.getIncome());
+        BigDecimal monthly = tier.getDebtBreakdown() == null ? BigDecimal.ZERO : nz(tier.getDebtBreakdown().getMonthlyPlans());
+        return Rule.builder().reason(reason).cutoff(split ? overviewService.minLeftoverUzs(1) : null)
+                .smallMonthlyLoans(monthly.signum() > 0 && monthly.compareTo(limit) <= 0)
+                .monthlyLoanLimit(limit).build();
     }
 
     /** {@code percent} % of {@code base}, the way the engine computes a bucket. */

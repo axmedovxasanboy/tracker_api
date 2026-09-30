@@ -136,5 +136,13 @@ public class OverviewTierResponse {
         private BigDecimal loansTaken;
         /** Σ this month's ASAP asks on debts (Debt). */
         private BigDecimal debts;
+        /** Σ this month's MONTHLY plans (part of {@link #loansTaken}). */
+        private BigDecimal monthlyPlans;
+        /**
+         * The personal debt that counts when the savings rule is chosen: every ASAP ask, plus the
+         * MONTHLY plans only when they are more than 10% of the stable income. Zero with a bank loan
+         * means the bank-loan-only rule; zero without one, the no-debt rule.
+         */
+        private BigDecimal countedForRule;
     }
 }

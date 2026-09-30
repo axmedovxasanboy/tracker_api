@@ -173,6 +173,14 @@ public class ProfileResponse {
         private String reason;
         /** The tight/comfortable threshold, when the rule depends on it; else null. */
         private BigDecimal cutoff;
+        /**
+         * True when there are MONTHLY loan payments this month that the rule ignored: together they
+         * are at most {@link #monthlyLoanLimit}, so the rule is the one without them (they are still
+         * paid, and still in loanPayments).
+         */
+        private boolean smallMonthlyLoans;
+        /** 10% of the stable income: MONTHLY loan payments above it make the rule lighter. */
+        private BigDecimal monthlyLoanLimit;
     }
 
     @Getter @Builder
