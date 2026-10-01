@@ -4,7 +4,6 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import uz.tracker.trackerproject.dto.request.LevelConfigRequest;
 import uz.tracker.trackerproject.dto.response.AllocationLedgerResponse;
 import uz.tracker.trackerproject.dto.response.AllocationRulesViewResponse;
 import uz.tracker.trackerproject.dto.response.BucketPayment;
@@ -25,6 +24,8 @@ import java.util.List;
 public class OverviewController {
 
     private final OverviewService service;
+    /** A start or an end of Level 5 due today is recorded before the tier is read (LevelService). */
+    private final uz.tracker.trackerproject.service.LevelService levelService;
 
     @GetMapping("/income")
     public ResponseEntity<OverviewIncomeResponse> getIncome(
@@ -37,6 +38,7 @@ public class OverviewController {
     public ResponseEntity<OverviewTierResponse> getTier(
             @RequestParam(required = false) String month,
             @RequestParam(defaultValue = "UZS") Currency currency) {
+        levelService.refreshQuietly(java.time.LocalDate.now());   // no day comes with a month: the server's
         return ResponseEntity.ok(service.getTier(parseMonth(month), currency));
     }
 
@@ -52,11 +54,8 @@ public class OverviewController {
         return ResponseEntity.ok(service.getAllocationRules());
     }
 
-    @PutMapping("/level-config")
-    public ResponseEntity<AllocationRulesViewResponse> saveLevelConfig(
-            @RequestBody LevelConfigRequest req) {
-        return ResponseEntity.ok(service.saveLevelConfig(req));
-    }
+    // PUT /level-config was removed on 2026-10-01: a level's rules are versions changed from a month on,
+    // through PUT /api/v1/levels/{level}/rules (LEVELS-ALLOCATION-SPEC §3.5). Neither client called it.
 
     @GetMapping("/bucket/{bucket}/payments")
     public ResponseEntity<List<BucketPayment>> getBucketPayments(

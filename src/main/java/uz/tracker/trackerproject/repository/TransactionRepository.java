@@ -215,4 +215,8 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
 
     /** Whether anything at all was recorded on or before {@code date} — i.e. a month has data to close. */
     boolean existsByTransactionDateLessThanEqual(java.time.LocalDate date);
+
+    /** The day of the earliest transaction; null when there is none. */
+    @Query("SELECT MIN(t.transactionDate) FROM Transaction t")
+    java.time.LocalDate findEarliestTransactionDate();
 }

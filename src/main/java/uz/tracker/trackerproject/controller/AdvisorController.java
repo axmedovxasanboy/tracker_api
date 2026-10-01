@@ -18,6 +18,8 @@ import java.time.format.DateTimeParseException;
 public class AdvisorController {
 
     private final AdvisorService service;
+    /** A start or an end of Level 5 due today is recorded before the advice is read (LevelService). */
+    private final uz.tracker.trackerproject.service.LevelService levelService;
 
     /**
      * The advisor for {@code date} (the owner's local day, YYYY-MM-DD; today when omitted): what
@@ -25,7 +27,9 @@ public class AdvisorController {
      */
     @GetMapping
     public ResponseEntity<AdvisorResponse> advise(@RequestParam(required = false) String date) {
-        return ResponseEntity.ok(service.advise(parseDate(date)));
+        LocalDate day = parseDate(date);
+        levelService.refreshQuietly(day);
+        return ResponseEntity.ok(service.advise(day));
     }
 
     private static LocalDate parseDate(String date) {

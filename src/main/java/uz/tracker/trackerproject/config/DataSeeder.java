@@ -40,6 +40,14 @@ public class DataSeeder implements CommandLineRunner {
     private final DebtRepository debtRepository;
     private final CounterpartyService counterpartyService;
 
+    /** For the monthly income's history back-fill. Field-injected, so the constructor stays as it is. */
+    @org.springframework.beans.factory.annotation.Autowired
+    private uz.tracker.trackerproject.service.SettingsService settingsService;
+
+    /** For the levels' first rules versions. Field-injected, so the constructor stays as it is. */
+    @org.springframework.beans.factory.annotation.Autowired
+    private uz.tracker.trackerproject.service.LevelService levelService;
+
     @PersistenceContext
     private EntityManager entityManager;
 
@@ -110,6 +118,22 @@ public class DataSeeder implements CommandLineRunner {
         // Idempotent — linked records are left alone.
         counterpartyService.backfillLinks();
 
+        // The monthly income is kept per month now (STABLE-INCOME-HISTORY.md). With no history yet,
+        // ONE entry with today's amount from the first tracked month — so every month reads exactly
+        // what it read before. Idempotent: once there is any entry it writes nothing. Then
+        // Settings' single value is brought to the current month's (a raise recorded ahead for this
+        // month takes effect there), so every client that reads it keeps working.
+        if (settingsService != null) {
+            settingsService.backfillStableIncomeHistory();
+            settingsService.syncCurrentIncome(java.time.YearMonth.now());
+        }
+
+        // Each level's savings rules are versions now (LEVELS-ALLOCATION-SPEC §1.4). A level with
+        // none gets its first, holding the numbers the engine has always read — Level 1's built-in
+        // table and its 5M line; Levels 2–5 the old rules or Level 1's numbers — so no past month
+        // moves. Idempotent: a level with any version is left alone.
+        if (levelService != null) levelService.seedVersions();
+
         if (categoryRepository.count() == 0) {
             categoryRepository.saveAll(defaultCategories());
         }
@@ -141,6 +165,7 @@ public class DataSeeder implements CommandLineRunner {
         // The factory reset re-seeds through here, so the Uzbek names must be applied on this
         // path too — otherwise categories come back English-only until the next boot.
         backfillUzbekCategoryNames();
+        if (levelService != null) levelService.seedVersions();
     }
 
     /**

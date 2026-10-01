@@ -20,14 +20,38 @@ public class SettingsController {
     private final SettingsService service;
     private final ResetService resetService;
 
+    /**
+     * {@code date} (optional, YYYY-MM-DD): the owner's local day, as {@code /advisor} takes it — the
+     * server's clock is UTC; its month is "the current month". Default: the server's today.
+     */
     @GetMapping
-    public ResponseEntity<SettingsResponse> get() {
-        return ResponseEntity.ok(service.get());
+    public ResponseEntity<SettingsResponse> get(@RequestParam(required = false) String date) {
+        return ResponseEntity.ok(service.get(parseDate(date)));
     }
 
     @PutMapping
-    public ResponseEntity<SettingsResponse> update(@Valid @RequestBody SettingsRequest req) {
-        return ResponseEntity.ok(service.update(req));
+    public ResponseEntity<SettingsResponse> update(@Valid @RequestBody SettingsRequest req,
+                                                   @RequestParam(required = false) String date) {
+        return ResponseEntity.ok(service.update(req, parseDate(date)));
+    }
+
+    /**
+     * Remove the monthly income recorded from {@code month} (YYYY-MM): that month falls back to the
+     * entry before it. 400 for the only remaining entry or a bad month, 404 when none is recorded from it.
+     */
+    @DeleteMapping("/stable-income/{month}")
+    public ResponseEntity<SettingsResponse> deleteStableIncome(@PathVariable String month,
+                                                               @RequestParam(required = false) String date) {
+        return ResponseEntity.ok(service.deleteStableIncome(month, parseDate(date)));
+    }
+
+    private static java.time.LocalDate parseDate(String date) {
+        if (date == null || date.isBlank()) return java.time.LocalDate.now();
+        try {
+            return java.time.LocalDate.parse(date.trim());
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new IllegalArgumentException("date must be YYYY-MM-DD, got: " + date);
+        }
     }
 
     /**

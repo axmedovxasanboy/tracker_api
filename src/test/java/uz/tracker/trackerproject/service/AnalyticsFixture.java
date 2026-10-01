@@ -61,6 +61,8 @@ final class AnalyticsFixture {
     final List<MonthCloseService.ComputedWallet> wallets = new ArrayList<>();
 
     final MarkPaidRepository markPaidRepository = mock(MarkPaidRepository.class);
+    /** Mocked: answers {@code getOrCreate()} with {@link #settings}; a test may stub the income's history on it. */
+    final SettingsService settingsService = mock(SettingsService.class);
     final PositionSnapshotService snapshots = mock(PositionSnapshotService.class);
     final OverviewService overview;
     final AdvisorService advisor;
@@ -76,7 +78,6 @@ final class AnalyticsFixture {
         InvestmentRepository investmentRepository = mock(InvestmentRepository.class);
         EmergencyRepository emergencyRepository = mock(EmergencyRepository.class);
         CategoryRepository categoryRepository = mock(CategoryRepository.class);
-        SettingsService settingsService = mock(SettingsService.class);
         MonthCloseService monthCloseService = mock(MonthCloseService.class);
 
         settings.setMonthlyStableIncomeCurrency(Currency.UZS);

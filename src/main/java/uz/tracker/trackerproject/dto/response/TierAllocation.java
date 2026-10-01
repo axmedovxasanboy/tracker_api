@@ -14,9 +14,10 @@ import java.util.Map;
  * {@code actions} carries the debt asks and scenario notes (e.g. "pay back your debts as fast
  * as you can this month").
  *
- * For Level 1, the rules are hard-coded server-side per the owner's spec. For Levels 2–6, the
- * user configures their own percentages — until then the service returns scenarioKey = null +
- * a note explaining that.
+ * At every level the situation is picked as Level 1's always was and the percentages come from
+ * that level's rules version in force (LEVELS-ALLOCATION-SPEC). {@code scenarioKey} keeps Level 1's
+ * shape at every level ("3.2.1.tight"); it is null only when no allocation is defined (no income,
+ * before tracking starts, bills unpaid on the Plan).
  */
 @Getter @Builder
 public class TierAllocation {

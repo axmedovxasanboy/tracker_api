@@ -125,10 +125,10 @@ public class FinanceService {
     public void deleteDebt(Long id) {
         Debt d = debtRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Debt", id));
-        if (d.getPaidAmount() != null && d.getPaidAmount().signum() > 0) {
-            throw new IllegalArgumentException(
-                    "Cannot delete a debt with payments recorded. Clear the paid amount first.");
-        }
+        // Only payments that are really there block it: a paid amount typed when the debt was
+        // recorded ("repaid before tracking"), or one left behind, has nothing in History to keep.
+        int linked = sizeOf(transactionRepository.findByRepaidDebtIdOrderByTransactionDateDesc(id));
+        if (linked > 0) throw new IllegalArgumentException(paymentsBlockDelete("debt", linked, "payment"));
         debtRepository.delete(d);
     }
 
@@ -195,6 +195,9 @@ public class FinanceService {
         BigDecimal current = l.getTotalAmount() != null ? l.getTotalAmount() : BigDecimal.ZERO;
         BigDecimal next = current.subtract(amount);
         l.setTotalAmount(next.signum() < 0 ? BigDecimal.ZERO : next);
+        // What came back may now be all of what is still lent: then it is paid back.
+        BigDecimal received = l.getReceivedAmount() == null ? BigDecimal.ZERO : l.getReceivedAmount();
+        if (received.signum() > 0 && received.compareTo(l.getTotalAmount()) >= 0) l.setStatus(RecordStatus.PAID);
         loanGivenRepository.save(l);
     }
 
@@ -221,10 +224,9 @@ public class FinanceService {
     public void deleteLoanGiven(Long id) {
         LoanGiven l = loanGivenRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("LoanGiven", id));
-        if (l.getReceivedAmount() != null && l.getReceivedAmount().signum() > 0) {
-            throw new IllegalArgumentException(
-                    "Cannot delete a lent loan with payments received. Clear received amount first.");
-        }
+        // Only money back that is really in History blocks it — not a received amount typed by hand.
+        int linked = sizeOf(transactionRepository.findByRepaidLoanGivenIdOrderByTransactionDateDesc(id));
+        if (linked > 0) throw new IllegalArgumentException(paymentsBlockDelete("loan", linked, "payment back to you"));
         deleteMirror(l.getOriginatingTransactionId());
         loanGivenRepository.delete(l);
     }
@@ -306,10 +308,11 @@ public class FinanceService {
     public void deleteLoanTaken(Long id) {
         LoanTaken l = loanTakenRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("LoanTaken", id));
-        if (l.getPaidAmount() != null && l.getPaidAmount().signum() > 0) {
-            throw new IllegalArgumentException(
-                    "Cannot delete a borrowed loan with payments recorded. Clear the paid amount first.");
-        }
+        // Only payments that are really in History block it. A paid amount with no transaction
+        // behind it — typed at creation for repayments made before tracking, or left behind by a
+        // payment deleted before deletes moved the loan — must not: there is nothing to clear.
+        int linked = sizeOf(transactionRepository.findByRepaidLoanTakenIdOrderByTransactionDateDesc(id));
+        if (linked > 0) throw new IllegalArgumentException(paymentsBlockDelete("loan", linked, "payment"));
         deleteMirror(l.getOriginatingTransactionId());
         loanTakenRepository.delete(l);
     }
@@ -757,6 +760,10 @@ public class FinanceService {
         Investment i = investmentRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Investment", id));
         i.setInvestedAmount(i.getInvestedAmount().add(additionalAmount));
+        // A tracked value grows by it too, exactly as contributeToInvestment does — so a top-up
+        // recorded on the Transactions page, and one deleted again, leave the value where Put in
+        // and its delete leave it. (A null value tracks what was put in by itself.)
+        if (i.getCurrentValue() != null) i.setCurrentValue(i.getCurrentValue().add(additionalAmount));
         investmentRepository.save(i);
     }
 
@@ -827,6 +834,12 @@ public class FinanceService {
         BigDecimal next = i.getInvestedAmount().subtract(amount);
         if (next.signum() < 0) next = BigDecimal.ZERO;
         i.setInvestedAmount(next);
+        // The money leaves a tracked value too: deleting a Put in that raised it used to leave the
+        // holding worth the deleted money more than before.
+        if (i.getCurrentValue() != null) {
+            BigDecimal value = i.getCurrentValue().subtract(amount);
+            i.setCurrentValue(value.signum() < 0 ? BigDecimal.ZERO : value);
+        }
         investmentRepository.save(i);
     }
 
@@ -1007,6 +1020,153 @@ public class FinanceService {
         return LoanGivenResponse.from(loan);
     }
 
+    // ---- Keeping loans in step with the transactions that pay them ----
+
+    /**
+     * What one transaction does to a loan's paid figure: a LOAN_REPAYMENT out of a wallet that names a
+     * borrowed loan ({@code repaidLoanTakenId}) or a debt ({@code repaidDebtId}) adds its amount to that
+     * one's paid amount; a LOAN_RETURNED_TO_ME into a wallet that names a loan given
+     * ({@code repaidLoanGivenId}) adds it to the received amount. Anything else does nothing.
+     * Paying through /repay and /mark-returned books it; TransactionService moves it whenever the
+     * transaction is created, edited or deleted ({@link #moveLoanEffect}).
+     */
+    public record LoanEffect(Long loanTakenId, Long debtId, Long loanGivenId, BigDecimal amount) {
+        public static final LoanEffect NONE = new LoanEffect(null, null, null, BigDecimal.ZERO);
+
+        public static LoanEffect of(Transaction t) {
+            if (t == null || t.getAmount() == null) return NONE;
+            if (t.getType() == TransactionType.EXPENSE && t.getSubType() == TransactionSubType.LOAN_REPAYMENT) {
+                if (t.getRepaidLoanTakenId() != null) return new LoanEffect(t.getRepaidLoanTakenId(), null, null, t.getAmount());
+                if (t.getRepaidDebtId() != null) return new LoanEffect(null, t.getRepaidDebtId(), null, t.getAmount());
+            }
+            if (t.getType() == TransactionType.INCOME && t.getSubType() == TransactionSubType.LOAN_RETURNED_TO_ME
+                    && t.getRepaidLoanGivenId() != null) {
+                return new LoanEffect(null, null, t.getRepaidLoanGivenId(), t.getAmount());
+            }
+            return NONE;
+        }
+
+        boolean sameAs(LoanEffect o) {
+            return java.util.Objects.equals(loanTakenId, o.loanTakenId) && java.util.Objects.equals(debtId, o.debtId)
+                    && java.util.Objects.equals(loanGivenId, o.loanGivenId) && amount.compareTo(o.amount) == 0;
+        }
+    }
+
+    /**
+     * A transaction's effect on a loan changed from {@code before} to {@code after} — created
+     * (before = NONE), deleted (after = NONE), or edited: its amount, its type or sub-type, or the
+     * loan it names. The old effect is backed out (never below zero) and the new one booked, and the
+     * status follows the paid figure. Booking more than is left on a loan is refused, as /repay
+     * refuses it — the edit as a whole is then undone.
+     */
+    @Transactional
+    public void moveLoanEffect(LoanEffect before, LoanEffect after) {
+        if (before.sameAs(after)) return;
+        undoLoanEffect(before);
+        bookLoanEffect(after);
+    }
+
+    private void undoLoanEffect(LoanEffect e) {
+        if (e.loanTakenId() != null) loanTakenRepository.findById(e.loanTakenId()).ifPresent(l -> {
+            l.setPaidAmount(clampZero(nz(l.getPaidAmount()).subtract(e.amount())));
+            l.setStatus(repaymentStatus(l.getPaidAmount(), l.getTotalAmount()));
+            loanTakenRepository.save(l);
+        });
+        if (e.debtId() != null) debtRepository.findById(e.debtId()).ifPresent(d -> {
+            d.setPaidAmount(clampZero(nz(d.getPaidAmount()).subtract(e.amount())));
+            d.setStatus(repaymentStatus(d.getPaidAmount(), d.getTotalAmount()));
+            debtRepository.save(d);
+        });
+        if (e.loanGivenId() != null) loanGivenRepository.findById(e.loanGivenId()).ifPresent(l -> {
+            l.setReceivedAmount(clampZero(nz(l.getReceivedAmount()).subtract(e.amount())));
+            l.setStatus(repaymentStatus(l.getReceivedAmount(), l.getTotalAmount()));
+            loanGivenRepository.save(l);
+        });
+    }
+
+    private void bookLoanEffect(LoanEffect e) {
+        if (e.loanTakenId() != null) {
+            LoanTaken l = loanTakenRepository.findById(e.loanTakenId())
+                    .orElseThrow(() -> new ResourceNotFoundException("LoanTaken", e.loanTakenId()));
+            l.setPaidAmount(nz(l.getPaidAmount()).add(notMoreThanLeft(e.amount(), l.getTotalAmount(), l.getPaidAmount(),
+                    l.getCurrency())));
+            l.setStatus(repaymentStatus(l.getPaidAmount(), l.getTotalAmount()));
+            loanTakenRepository.save(l);
+        }
+        if (e.debtId() != null) {
+            Debt d = debtRepository.findById(e.debtId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Debt", e.debtId()));
+            d.setPaidAmount(nz(d.getPaidAmount()).add(notMoreThanLeft(e.amount(), d.getTotalAmount(), d.getPaidAmount(),
+                    d.getCurrency())));
+            d.setStatus(repaymentStatus(d.getPaidAmount(), d.getTotalAmount()));
+            debtRepository.save(d);
+        }
+        if (e.loanGivenId() != null) {
+            LoanGiven l = loanGivenRepository.findById(e.loanGivenId())
+                    .orElseThrow(() -> new ResourceNotFoundException("LoanGiven", e.loanGivenId()));
+            l.setReceivedAmount(nz(l.getReceivedAmount()).add(notMoreThanLeft(e.amount(), l.getTotalAmount(),
+                    l.getReceivedAmount(), l.getCurrency())));
+            l.setStatus(repaymentStatus(l.getReceivedAmount(), l.getTotalAmount()));
+            loanGivenRepository.save(l);
+        }
+    }
+
+    /** {@code amount}, when it is no more than what is left of {@code total}; else the /repay refusal. */
+    private static BigDecimal notMoreThanLeft(BigDecimal amount, BigDecimal total, BigDecimal done, Currency currency) {
+        BigDecimal left = nz(total).subtract(nz(done));
+        if (amount.compareTo(left) > 0) {
+            throw new IllegalArgumentException(String.format("Payment of %s %s exceeds remaining balance of %s %s",
+                    amount, currency, left, currency));
+        }
+        return amount;
+    }
+
+    /**
+     * Why a loan cannot be deleted: payments for it are in History. "This loan has 2 payments in
+     * History. Delete those first, or keep the loan."
+     */
+    static String paymentsBlockDelete(String what, int count, String payment) {
+        String many = payment.startsWith("payment back") ? "payments back to you" : payment + "s";
+        return "This " + what + " has " + count + " " + (count == 1 ? payment : many) + " in History. Delete "
+                + (count == 1 ? "it" : "those") + " first, or keep the " + what + ".";
+    }
+
+    private static int sizeOf(List<?> rows) {
+        return rows == null ? 0 : rows.size();
+    }
+
+    private static BigDecimal nz(BigDecimal v) {
+        return v == null ? BigDecimal.ZERO : v;
+    }
+
+    /**
+     * A bill payment deleted, or moved off {@code oldDate}: the bill's next due date follows the
+     * payments still there. Paying sets it to the due day of the month after the payment's month
+     * ({@link #nextDueAfterPayment}); taking that payment away used to leave it there, so a bill
+     * whose only payment was deleted still read "next due" a month later while it was unpaid.
+     * When a payment is left in {@code oldDate}'s month or later, the date follows the latest of
+     * them; otherwise that month is unpaid again and its due day is next.
+     *
+     * @param excludeTxId a payment about to be deleted (it still exists while this runs); null when none
+     */
+    @Transactional
+    public void refreshNextDue(Long monthlyPaymentId, LocalDate oldDate, Long excludeTxId) {
+        if (monthlyPaymentId == null || oldDate == null) return;
+        MonthlyPayment m = monthlyPaymentRepository.findById(monthlyPaymentId).orElse(null);
+        if (m == null) return;
+        LocalDate latest = null;
+        List<Transaction> payments = transactionRepository.findByMonthlyPaymentIdOrderByTransactionDateDesc(monthlyPaymentId);
+        for (Transaction t : payments == null ? List.<Transaction>of() : payments) {
+            if (java.util.Objects.equals(t.getId(), excludeTxId) || t.getTransactionDate() == null) continue;
+            if (latest == null || t.getTransactionDate().isAfter(latest)) latest = t.getTransactionDate();
+        }
+        YearMonth unpaid = YearMonth.from(oldDate);
+        m.setNextDueDate(latest != null && !YearMonth.from(latest).isBefore(unpaid)
+                ? nextDueAfterPayment(m.getDueDay(), latest)
+                : nextDueAfterPayment(m.getDueDay(), unpaid.minusMonths(1).atDay(1)));
+        monthlyPaymentRepository.save(m);
+    }
+
     // ---- "Already paid" marks (no transaction, no money movement) ----
 
     /**
@@ -1139,7 +1299,7 @@ public class FinanceService {
     }
 
     /** Where a repayment total leaves a loan / debt after money is added or backed out. */
-    private static RecordStatus repaymentStatus(BigDecimal paid, BigDecimal total) {
+    static RecordStatus repaymentStatus(BigDecimal paid, BigDecimal total) {
         if (paid.signum() <= 0) return RecordStatus.PENDING;
         return paid.compareTo(total) >= 0 ? RecordStatus.PAID : RecordStatus.PARTIALLY_PAID;
     }

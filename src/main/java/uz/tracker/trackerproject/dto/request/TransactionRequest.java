@@ -91,6 +91,62 @@ public class TransactionRequest {
         return salaryMonthSent;
     }
 
+    // ── The loan a payment pays (optional). A LOAN_REPAYMENT names a borrowed loan OR a debt; a
+    // LOAN_RETURNED_TO_ME a loan given. The loan's paid / received figure moves with the row when it
+    // is created, edited or deleted. On an update a key left out keeps the stored link (the bot never
+    // sends them); an explicit null removes it. A row that is not that kind of payment names none.
+    @lombok.Getter(lombok.AccessLevel.NONE) @lombok.Setter(lombok.AccessLevel.NONE)
+    private Long repaidLoanTakenId;
+    @lombok.Getter(lombok.AccessLevel.NONE) @lombok.Setter(lombok.AccessLevel.NONE)
+    private boolean repaidLoanTakenIdSent;
+    @lombok.Getter(lombok.AccessLevel.NONE) @lombok.Setter(lombok.AccessLevel.NONE)
+    private Long repaidDebtId;
+    @lombok.Getter(lombok.AccessLevel.NONE) @lombok.Setter(lombok.AccessLevel.NONE)
+    private boolean repaidDebtIdSent;
+    @lombok.Getter(lombok.AccessLevel.NONE) @lombok.Setter(lombok.AccessLevel.NONE)
+    private Long repaidLoanGivenId;
+    @lombok.Getter(lombok.AccessLevel.NONE) @lombok.Setter(lombok.AccessLevel.NONE)
+    private boolean repaidLoanGivenIdSent;
+
+    public Long getRepaidLoanTakenId() {
+        return repaidLoanTakenId;
+    }
+
+    public void setRepaidLoanTakenId(Long repaidLoanTakenId) {
+        this.repaidLoanTakenId = repaidLoanTakenId;
+        this.repaidLoanTakenIdSent = true;
+    }
+
+    public boolean repaidLoanTakenIdGiven() {
+        return repaidLoanTakenIdSent;
+    }
+
+    public Long getRepaidDebtId() {
+        return repaidDebtId;
+    }
+
+    public void setRepaidDebtId(Long repaidDebtId) {
+        this.repaidDebtId = repaidDebtId;
+        this.repaidDebtIdSent = true;
+    }
+
+    public boolean repaidDebtIdGiven() {
+        return repaidDebtIdSent;
+    }
+
+    public Long getRepaidLoanGivenId() {
+        return repaidLoanGivenId;
+    }
+
+    public void setRepaidLoanGivenId(Long repaidLoanGivenId) {
+        this.repaidLoanGivenId = repaidLoanGivenId;
+        this.repaidLoanGivenIdSent = true;
+    }
+
+    public boolean repaidLoanGivenIdGiven() {
+        return repaidLoanGivenIdSent;
+    }
+
     /** Portion of {@link #amount} paid in physical cash. Service enforces 0 <= cashAmount <= amount. */
     @DecimalMin(value = "0.0", message = "Cash amount cannot be negative")
     private BigDecimal cashAmount;

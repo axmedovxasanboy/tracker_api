@@ -313,6 +313,10 @@ public class AdvisorService {
         OverviewTierResponse tier = overviewService.getTierIgnoringSubscriptions(next, Currency.UZS, date);
         BigDecimal bills = tier == null ? BigDecimal.ZERO : nz(tier.getMandatorySubscriptions());
         BigDecimal loanPayments = tier == null ? BigDecimal.ZERO : nz(tier.getDebtPayments());
+        // Next month's own income: a change recorded from next month is what a normal month will have.
+        if (tier != null && !tier.isMissingStableIncome() && tier.getIncome() != null && tier.getIncome().signum() > 0) {
+            income = tier.getIncome();
+        }
         BigDecimal setAside = nz(dailyAdviceService.ruleSetAside(next, date, income));
         BigDecimal goals = BigDecimal.ZERO;
         for (GoalMonth g : plans) {
@@ -557,7 +561,10 @@ public class AdvisorService {
         if (date.getDayOfMonth() <= SALARY_MONTH_HINT_DAYS && stable.signum() > 0) {
             YearMonth prev = month.minusMonths(1);
             BigDecimal prevSalary = nz(overviewService.salaryReceivedUzs(prev, date));
-            if (prevSalary.compareTo(stable.multiply(new BigDecimal("0.5"))) < 0) return prev.toString();
+            // Half of LAST month's own income: its salary is measured against what it was then.
+            BigDecimal prevIncome = overviewService.stableIncomeFor(prev);
+            BigDecimal expectedThen = prevIncome != null && prevIncome.signum() > 0 ? prevIncome : stable;
+            if (prevSalary.compareTo(expectedThen.multiply(new BigDecimal("0.5"))) < 0) return prev.toString();
         }
         return month.toString();
     }

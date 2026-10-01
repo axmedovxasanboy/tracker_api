@@ -25,14 +25,25 @@ public class ProfileResponse {
     /** True until a monthly stable income is set: then there is no level, rule, buckets or next month. */
     private boolean missingStableIncome;
 
-    /** 1..6 — the 15M step alone, never the sub-level (1.2 reads as 1). Null above the top step. */
+    /**
+     * 1..5 — never the sub-level (1.2 reads as 1). Levels 1–4 are the 15M steps of leftAfterBills;
+     * Level 5 is earned by pay (LEVELS-ALLOCATION-SPEC §1.1).
+     */
     private Integer level;
-    /** True when leftAfterBills is at or above the top breakpoint (90M): no level, no guidance. */
+    /** Always false since 2026-10-01: 60M or more left after bills is Level 4 (or 5). */
     private boolean aboveCeiling;
-    /** The current band's lower bound (the top breakpoint when above the ceiling). */
+    /** The base level's lower bound. */
     private BigDecimal levelFrom;
-    /** Where the next band starts — at level 6 the ceiling itself; null above it. */
+    /** Where the next band starts; null on Levels 4 and 5. */
     private BigDecimal nextLevelAt;
+    /** 1..4 — the level income − bills alone gives. */
+    private Integer baseLevel;
+    /** 'YYYY-MM' the Level 5 period started, while on Level 5; null otherwise. */
+    private String level5Since;
+    /** The road to Level 5 (on Level 4) or back from it (on Level 5); null on Levels 1–3. */
+    private LevelRoad road;
+    /** 'YYYY-MM': the {@code from} of the level's rules version in force this month. */
+    private String ruleFrom;
 
     private BigDecimal stableIncome;
     /** The active monthly bills the level is measured after. */

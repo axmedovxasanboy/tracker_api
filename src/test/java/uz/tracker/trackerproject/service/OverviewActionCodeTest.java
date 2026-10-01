@@ -261,9 +261,9 @@ class OverviewActionCodeTest {
     }
 
     /**
-     * The one item that must NOT be given a key: the note the user typed into the rules editor.
-     * It is their sentence, in whichever language they wrote it — a key would print somebody
-     * else's words in its place.
+     * The note the user typed into the old Levels 2–6 rules editor is retired with that editor
+     * (2026-10-01: a level's rules are versions; the note was never carried over). A Level 2 month
+     * with a bank loan now lists only what the service words itself — every item carries a key.
      */
     @Test
     void theUsersOwnRuleNoteIsLeftUntranslated() {
@@ -280,14 +280,7 @@ class OverviewActionCodeTest {
 
         List<ActionItem> actions = actions();
 
-        ActionItem own = actions.stream()
-                .filter(a -> a.getText().equals("Oyning oxirida qayta ko'rib chiqaman"))
-                .findFirst().orElseThrow(() -> new AssertionError("the user's note is missing: "
-                        + actions.stream().map(ActionItem::getText).toList()));
-        assertThat(own.getCode()).isNull();
-        // …while everything the service worded itself in the same list still carries one.
-        assertThat(actions).filteredOn(a -> a != own)
-                .isNotEmpty()
-                .allSatisfy(a -> assertThat(a.getCode()).isNotNull());
+        assertThat(actions).noneMatch(a -> "Oyning oxirida qayta ko'rib chiqaman".equals(a.getText()));
+        assertThat(actions).isNotEmpty().allSatisfy(a -> assertThat(a.getCode()).isNotNull());
     }
 }

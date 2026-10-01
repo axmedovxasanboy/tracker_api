@@ -80,8 +80,10 @@ public class ProfileService {
         BigDecimal loanPayments = nz(tier.getDebtPayments());
         BigDecimal leftForSavings = clampZero(leftAfterBills.subtract(loanPayments));
         Integer level = tier.getLevel();
-        // The income is set, so the engine leaves the level out only above its top breakpoint.
-        boolean aboveCeiling = level == null;
+        // Levels 1–4 from income − bills, Level 5 by pay: there is no ceiling any more.
+        int baseLevel = OverviewService.baseLevelOf(leftAfterBills);
+        java.util.List<uz.tracker.trackerproject.entity.LevelChange> changes = overviewService.levelChanges();
+        YearMonth since = OverviewService.level5Since(month, changes);
         BigDecimal stable = nz(tier.getIncome());
         BigDecimal salaryReceived = nz(tier.getSalaryReceived());
         // A month without a bonus: the base is the stable income alone.
@@ -103,16 +105,20 @@ public class ProfileService {
                     .carried(nz(carried == null ? null : carried.get(name)))
                     .build());
         }
-        Rule rule = rule(tier);
+        Rule rule = rule(tier, month);
 
         return ProfileResponse.builder()
                 .username(username)
                 .month(month.toString())
                 .missingStableIncome(false)
                 .level(level)
-                .aboveCeiling(aboveCeiling)
-                .levelFrom(aboveCeiling ? OverviewService.tierCeiling() : OverviewService.levelIncomeLow(level))
-                .nextLevelAt(aboveCeiling ? null : OverviewService.levelIncomeHigh(level))
+                .aboveCeiling(false)
+                .levelFrom(OverviewService.levelIncomeLow(baseLevel))
+                .nextLevelAt(level == null || level >= OverviewService.TOP_BASE_LEVEL ? null : OverviewService.levelIncomeHigh(level))
+                .baseLevel(baseLevel)
+                .level5Since(since == null ? null : since.toString())
+                .road(overviewService.road(month, date, level, baseLevel))
+                .ruleFrom(level == null ? null : overviewService.ruleBook().version(level, month).from().toString())
                 .stableIncome(stable)
                 .monthlyBills(nz(tier.getMandatorySubscriptions()))
                 .leftAfterBills(leftAfterBills)
@@ -336,7 +342,7 @@ public class ProfileService {
         BigDecimal leftForSavings = clampZero(nz(tier.getLeftMoney()).subtract(nz(tier.getDebtPayments())));
         // The month's base without a bonus is the stable income.
         BigDecimal salaryBase = nz(tier.getIncome());
-        Rule rule = rule(tier);
+        Rule rule = rule(tier, next);
         List<NextBucket> buckets = new ArrayList<>(BUCKETS.size());
         boolean same = rule.getReason().equals(thisRule.getReason());
         for (int i = 0; i < BUCKETS.size(); i++) {
@@ -365,29 +371,23 @@ public class ProfileService {
     }
 
     /**
-     * Which rule chose the percentages, from the scenario the engine picked. Level 1's are built in;
-     * a Level 2–6 sub-level carries the owner's own rule (its key is the sub-level, "2.1"), or none —
-     * the engine then defines no allocation, as it does above the ceiling.
+     * Which situation chose the percentages, from the scenario the engine picked — one of the seven
+     * at every level (LEVELS-ALLOCATION-SPEC §1.2). "NO_RULE" only when the engine defined no
+     * allocation at all, which no longer happens with an income set.
      */
-    private Rule rule(OverviewTierResponse tier) {
+    private Rule rule(OverviewTierResponse tier, YearMonth month) {
         TierAllocation allocation = tier.getAllocation();
         String key = allocation == null ? null : allocation.getScenarioKey();
-        String reason = key == null ? "NO_RULE" : switch (key) {
-            case "1.1" -> "NO_DEBT";
-            case "1.2.1.comfortable" -> "BANK_LOAN_COMFORTABLE";
-            case "1.2.1.tight" -> "BANK_LOAN_TIGHT";
-            case "1.2.2.comfortable" -> "DEBTS_COMFORTABLE";
-            case "1.2.2.tight" -> "DEBTS_TIGHT";
-            case "1.2.3" -> "BANK_AND_DEBTS";
-            case "1.3" -> "HEAVY_DEBT";
-            default -> "CUSTOM";
-        };
-        // Only the bank-loan-only and debts-only rules split tight / comfortable (Level 1's cutoff).
-        boolean split = key != null && (key.startsWith("1.2.1.") || key.startsWith("1.2.2."));
+        String situation = SavingsRules.situationOf(key);
+        String reason = situation == null ? "NO_RULE" : situation;
+        // Only the bank-loan-only and debts-only rules split tight / comfortable, at the version's line.
+        boolean split = SavingsRules.isSplit(situation);
         // MONTHLY loans of at most 10% of the stable income are paid, but leave the rule alone.
         BigDecimal limit = OverviewService.monthlyLoanLimitUzs(tier.getIncome());
         BigDecimal monthly = tier.getDebtBreakdown() == null ? BigDecimal.ZERO : nz(tier.getDebtBreakdown().getMonthlyPlans());
-        return Rule.builder().reason(reason).cutoff(split ? overviewService.minLeftoverUzs(1) : null)
+        BigDecimal cutoff = split && tier.getLevel() != null
+                ? overviewService.ruleBook().version(tier.getLevel(), month).cutoff() : null;
+        return Rule.builder().reason(reason).cutoff(cutoff)
                 .smallMonthlyLoans(monthly.signum() > 0 && monthly.compareTo(limit) <= 0)
                 .monthlyLoanLimit(limit).build();
     }

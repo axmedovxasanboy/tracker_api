@@ -16,6 +16,14 @@ public class SettingsRequest {
 
     private Currency monthlyStableIncomeCurrency;
 
+    /**
+     * 'YYYY-MM': the month {@link #monthlyStableIncome} applies from, until the next change already
+     * recorded after it; months before it keep their income. Left out: the current month — never
+     * retroactive — and an amount equal to the current month's then changes nothing. Must be no
+     * earlier than {@code stableIncomeFirstMonth} and at most 12 months after the current month.
+     */
+    private String stableIncomeFrom;
+
     /** Month (any day; normalised to the 1st) the allocation ledger should start from. */
     private java.time.LocalDate allocationTrackingStartMonth;
 

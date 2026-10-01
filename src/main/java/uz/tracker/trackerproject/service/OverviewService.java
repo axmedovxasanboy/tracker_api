@@ -40,8 +40,6 @@ import uz.tracker.trackerproject.repository.LevelConfigRepository;
 import uz.tracker.trackerproject.repository.MarkPaidRepository;
 import uz.tracker.trackerproject.repository.MonthlyPaymentRepository;
 import uz.tracker.trackerproject.repository.TransactionRepository;
-import uz.tracker.trackerproject.dto.request.LevelAllocationRuleRequest;
-import uz.tracker.trackerproject.dto.request.LevelConfigRequest;
 import uz.tracker.trackerproject.dto.response.AllocationRulesViewResponse;
 import uz.tracker.trackerproject.dto.response.AllocationRulesViewResponse.LevelView;
 import uz.tracker.trackerproject.dto.response.AllocationRulesViewResponse.SubLevelView;
@@ -64,14 +62,21 @@ public class OverviewService {
 
     private static final MathContext MC = new MathContext(20, RoundingMode.HALF_EVEN);
     private static final BigDecimal DEBT_RATIO_THRESHOLD = new BigDecimal("0.70");
+    /**
+     * Levels 1–4 from what is left after bills, in 15M steps (LEVELS-ALLOCATION-SPEC §1.1, 2026-10-01):
+     * under 15M → 1, under 30M → 2, under 45M → 3, from 45M → 4 with no upper limit. Level 5 is not
+     * a band: it is earned by pay (see {@link #levelOf}). There is no "above the ceiling" any more.
+     */
     private static final BigDecimal[] LEVEL_BREAKPOINTS_UZS = {
             new BigDecimal("15000000"),  // < this → level 1
             new BigDecimal("30000000"),  // < this → level 2
             new BigDecimal("45000000"),  // < this → level 3
-            new BigDecimal("60000000"),  // < this → level 4
-            new BigDecimal("75000000"),  // < this → level 5
-            new BigDecimal("90000000"),  // < this → level 6
     };
+    /** The highest level income − bills can give; Level 5 is above it, by pay. */
+    static final int TOP_BASE_LEVEL = 4;
+    /** Level 5: pay of at least this, three ended months in a row on Level 4 (and under it, three, to leave). */
+    static final BigDecimal LEVEL5_PAY_THRESHOLD = new BigDecimal("60000000");
+    static final int LEVEL5_MONTHS_NEEDED = 3;
 
     /** Default "tight vs comfortable" cutoff within Level 1.2 (5M UZS); LevelConfig can override it. */
     private static final BigDecimal FIVE_MILLION_UZS = new BigDecimal("5000000");
@@ -96,6 +101,17 @@ public class OverviewService {
     private final SettingsService settingsService;
     private final CategoryRepository categoryRepository;
 
+    /**
+     * The levels' savings rules, version by version, and the recorded starts and ends of Level 5
+     * (LEVELS-ALLOCATION-SPEC). Field-injected, so the constructor every caller uses stays as it is;
+     * absent (null) where the service is built by hand, which then reads the seeded rules — Level 1's
+     * table at every level, exactly as the stored first versions hold it — and no Level 5.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private uz.tracker.trackerproject.repository.LevelRuleVersionRepository levelRuleVersionRepository;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private uz.tracker.trackerproject.repository.LevelChangeRepository levelChangeRepository;
+
     @Transactional(readOnly = true)
     public OverviewIncomeResponse getIncome(YearMonth month, Currency displayCurrency) {
         LocalDate start = month.atDay(1);
@@ -111,11 +127,8 @@ public class OverviewService {
             actual = actual.add(sum);
         }
 
-        Settings s = settingsService.getOrCreate();
-        BigDecimal stable = null;
-        if (s.getMonthlyStableIncome() != null) {
-            stable = s.getMonthlyStableIncome();
-        }
+        // That month's income: a change recorded from a later month does not reach back.
+        BigDecimal stable = stableIncomeFor(month);
 
         return OverviewIncomeResponse.builder()
                 .month(month.toString())
@@ -128,9 +141,10 @@ public class OverviewService {
     // ── Tier ──────────────────────────────────────────────────────────────────
 
     /**
-     * Compute the user's financial tier for a given month. Income and subscriptions are the
-     * CURRENT settings — no historical snapshots are stored — and so are the loan and debt
-     * balances; but which obligations count (a bank loan's dates, a loan or debt's payment-start
+     * Compute the user's financial tier for a given month. The income is that month's own
+     * ({@link #stableIncomeFor} — the value recorded from the latest month ≤ it); subscriptions and
+     * the loan and debt balances are the CURRENT ones — no snapshots of those are stored; but which
+     * obligations count (a bank loan's dates, a loan or debt's payment-start
      * month), the bonus income that raises the base, and every "paid this month" figure are
      * scoped to the requested month.
      */
@@ -177,11 +191,13 @@ public class OverviewService {
     private OverviewTierResponse tier(YearMonth month, Currency displayCurrency, boolean subscriptionsGate,
                                       boolean trackingGate, LocalDate asOf) {
         Settings s = settingsService.getOrCreate();
-        boolean missingIncome = s.getMonthlyStableIncome() == null
-                || s.getMonthlyStableIncome().signum() <= 0;
+        // The month's own income (STABLE-INCOME-HISTORY): the level, the rule, the cutoff and the
+        // base all follow the value recorded for THIS month, so a change from a later month never
+        // rewrites it.
+        BigDecimal monthIncome = stableIncomeFor(month);
+        boolean missingIncome = monthIncome == null || monthIncome.signum() <= 0;
 
-        BigDecimal incomeUzs = missingIncome ? BigDecimal.ZERO
-                : s.getMonthlyStableIncome();
+        BigDecimal incomeUzs = missingIncome ? BigDecimal.ZERO : monthIncome;
 
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
         BigDecimal leftMoneyUzs = incomeUzs.subtract(mandatoryUzs);
@@ -210,7 +226,8 @@ public class OverviewService {
         // money always; MONTHLY plans only when together they are more than 10% of the stable income.
         BigDecimal ruleDebtUzs = ruleDebtUzs(debt34Uzs, plannedSetAsideUzs, incomeUzs);
 
-        Integer level = missingIncome ? null : computeLevel(leftMoneyUzs);
+        // Levels 1–4 from the income − bills; Level 5 while a recorded Level 5 period covers the month.
+        Integer level = missingIncome ? null : levelOf(month, leftMoneyUzs, levelChanges());
         String subLevel = computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
         String levelLabel = computeLevelLabel(level, subLevel, missingIncome);
 
@@ -262,7 +279,7 @@ public class OverviewService {
                     "Pay your mandatory subscription(s) for " + monthLabel(month)
                             + " first — your level and allocation unlock once they're covered.");
         } else {
-            allocation = computeAllocation(level, subLevel, incomeUzs, allocBaseUzs, mandatoryUzs,
+            allocation = computeAllocation(month, ruleBook(), level, incomeUzs, allocBaseUzs, mandatoryUzs,
                     bankUzs, debt34Uzs, debtRatio, plannedSetAsideUzs,
                     displayCurrency, paid, marks, monthPaid, upcomingChargeActions(month, displayCurrency));
         }
@@ -345,8 +362,8 @@ public class OverviewService {
     private static final String[] LEDGER_LABELS = {"Donation", "Emergency", "Investments"};
     /**
      * Ledger width. The percentage arrays produced by {@link #computeLevel1Plan} and
-     * {@link #bucketPercents} are still 4 wide — index 3 is the retired Stocks slot, kept
-     * because AllocationRule still has the column — so every ledger loop must be bounded by
+     * {@code SavingsRules.Percents#strings} are 4 wide — index 3 is the retired Stocks slot — so
+     * every ledger loop must be bounded by
      * THIS, never by the length of a pct array. Hard-coding the bound is what broke the page
      * when Stocks was dropped from LEDGER_BUCKETS.
      */
@@ -365,8 +382,9 @@ public class OverviewService {
     @Transactional(readOnly = true)
     public AllocationLedgerResponse getAllocationLedger(YearMonth selected, Currency display) {
         Settings s = settingsService.getOrCreate();
-        boolean missingIncome = s.getMonthlyStableIncome() == null
-                || s.getMonthlyStableIncome().signum() <= 0;
+        // Each month on its own income (STABLE-INCOME-HISTORY): read once, asked month by month.
+        StableIncomeSchedule income = incomeSchedule();
+        boolean missingIncome = !income.isSet(selected);
 
         // Dormant before the configured start month: the ledger shows no dues at all, so a
         // future start date never surfaces a backlog or a pay-now for an un-started period.
@@ -414,9 +432,11 @@ public class OverviewService {
                     .build();
         }
 
-        BigDecimal stableUzs = s.getMonthlyStableIncome();
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
-        Integer level = computeLevel(stableUzs.subtract(mandatoryUzs));
+        BigDecimal stableUzs = nullToZero(income.amountFor(selected));
+        List<uz.tracker.trackerproject.entity.LevelChange> changes = levelChanges();
+        SavingsRules.Book book = ruleBook();
+        Integer level = levelOf(selected, stableUzs.subtract(mandatoryUzs), changes);
 
         // The owner's carry rule (see carriedInto): what a month leaves unpaid of target + carried is
         // carried into the next; an overpayment never carries.
@@ -429,7 +449,9 @@ public class OverviewService {
         LocalDate today = LocalDate.now();
         Set<Long> salaryTree = salaryTree();
         for (YearMonth m = start; !m.isAfter(selected); m = m.plusMonths(1)) {
-            BucketMonth bm = bucketMonth(m, stableUzs, mandatoryUzs, level, salaryTree, today);
+            BigDecimal stableM = nullToZero(income.amountFor(m));
+            Integer levelM = levelOf(m, stableM.subtract(mandatoryUzs), changes);
+            BucketMonth bm = bucketMonth(m, stableM, mandatoryUzs, levelM, book, salaryTree, today);
             boolean isSelected = m.equals(selected);
             boolean monthHasActivity = false;
             List<MonthBucketLine> lines = new ArrayList<>(LEDGER_WIDTH);
@@ -458,9 +480,9 @@ public class OverviewService {
             if (monthHasActivity) {
                 months.add(MonthBreakdown.builder()
                         .month(m.toString())
-                        .level(level)
+                        .level(levelM)
                         .subLevel(bm.subLevel())
-                        .stableIncome(stableUzs)
+                        .stableIncome(stableM)
                         .bonus(bm.bonus())
                         .allocationBase(bm.base())
                         .selected(isSelected)
@@ -534,6 +556,28 @@ public class OverviewService {
                 .build();
     }
 
+    // ── The monthly income, month by month ───────────────────────────────────
+
+    /**
+     * The monthly income month by month (STABLE-INCOME-HISTORY), read once. Without an answer from
+     * Settings — a service built by hand — one value for every month: Settings' single income, which
+     * is how the engine behaved before the history existed.
+     */
+    StableIncomeSchedule incomeSchedule() {
+        StableIncomeSchedule schedule = settingsService.stableIncomeSchedule();
+        if (schedule != null) return schedule;
+        Settings s = settingsService.getOrCreate();
+        return StableIncomeSchedule.single(s == null ? null : s.getMonthlyStableIncome());
+    }
+
+    /**
+     * {@code month}'s monthly income — the single source every month-scoped figure reads: the
+     * value recorded from the latest month ≤ {@code month}. Null when none is set.
+     */
+    BigDecimal stableIncomeFor(YearMonth month) {
+        return incomeSchedule().amountFor(month);
+    }
+
     // ── Carry-over of unpaid savings ──────────────────────────────────────────
 
     /**
@@ -545,11 +589,11 @@ public class OverviewService {
 
     /**
      * {@code m}'s figures as the ledger has always rebuilt them: that month's bank loans and debt
-     * asks pick its sub-level and percentages (Level 1 from the stable income; Levels 2–6 from the
-     * configured rules), its salary and bonus make its base.
+     * asks pick its sub-level and situation, and the month's level's rules version in force then
+     * gives the percentages; its income and bonus make its base.
      */
     private BucketMonth bucketMonth(YearMonth m, BigDecimal stableUzs, BigDecimal mandatoryUzs, Integer level,
-                                    Set<Long> salaryTree, LocalDate today) {
+                                    SavingsRules.Book book, Set<Long> salaryTree, LocalDate today) {
         // Each month is charged the bank loans that ran in IT. Asking about today instead charged
         // July for a loan taken in September, and dropped a paid-off loan from the months it was
         // still being paid in.
@@ -561,11 +605,17 @@ public class OverviewService {
         BigDecimal ruleDebtUzs = ruleDebtUzs(debt34Uzs, monthlyUzs, stableUzs);
         BigDecimal debtPaymentsUzs = bankUzs.add(debt34Uzs);
         BigDecimal debtRatio = stableUzs.signum() > 0 ? debtPaymentsUzs.divide(stableUzs, MC) : null;
-        String subLevel = computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
-        String[] pct = level != null && level == 1
-                ? computeLevel1Plan(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
-                        debt34Uzs, ruleDebtUzs, debtRatio, minLeftoverUzs(1)).pct()
-                : bucketPercents(level, subLevel);
+        String subLevel = stableUzs.signum() <= 0 ? null : computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
+        // The month's level's version in force that month — its cutoff splits, its numbers ask.
+        String[] pct;
+        if (stableUzs.signum() <= 0 || level == null) {
+            pct = new String[LEDGER_WIDTH];                                    // no income that month: nothing asked
+        } else {
+            SavingsRules.Version v = book.version(level, m);
+            SavingsRules.Pick pick = SavingsRules.pick(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
+                    debt34Uzs, ruleDebtUzs, debtRatio, v.cutoff());
+            pct = v.percents(pick.situation()).strings();
+        }
         BigDecimal bonusUzs = sumBonusIncomeUzs(m);
         BigDecimal base = allocationBaseUzs(stableUzs, bonusUzs);
         // Marks read once per month and folded in here, so the loop never queries them twice.
@@ -595,20 +645,24 @@ public class OverviewService {
         Map<String, BigDecimal> out = new java.util.LinkedHashMap<>();
         for (String b : LEDGER_BUCKETS) out.put(b, BigDecimal.ZERO);
         Settings s = settingsService.getOrCreate();
-        if (s == null || s.getMonthlyStableIncome() == null || s.getMonthlyStableIncome().signum() <= 0
-                || s.getAllocationTrackingStartMonth() == null) {
+        StableIncomeSchedule income = incomeSchedule();
+        if (s == null || !income.isSet(month) || s.getAllocationTrackingStartMonth() == null) {
             return out;
         }
         YearMonth start = YearMonth.from(s.getAllocationTrackingStartMonth());
         if (!month.isAfter(start)) return out;
-        BigDecimal stableUzs = s.getMonthlyStableIncome();
         BigDecimal mandatoryUzs = sumActiveSubscriptionsUzs();
-        Integer level = computeLevel(stableUzs.subtract(mandatoryUzs));
         Set<Long> salaryTree = salaryTree();
         LocalDate today = LocalDate.now();
+        List<uz.tracker.trackerproject.entity.LevelChange> changes = levelChanges();
+        SavingsRules.Book book = ruleBook();
         BigDecimal[] carried = zeros();
         for (YearMonth m = start; m.isBefore(month); m = m.plusMonths(1)) {
-            BucketMonth bm = bucketMonth(m, stableUzs, mandatoryUzs, level, salaryTree, today);
+            // Each month's own income: what it asked, and so what it left unpaid, never moves when
+            // the income changes from a later month.
+            BigDecimal stableM = nullToZero(income.amountFor(m));
+            BucketMonth bm = bucketMonth(m, stableM, mandatoryUzs, levelOf(m, stableM.subtract(mandatoryUzs), changes),
+                    book, salaryTree, today);
             for (int b = 0; b < LEDGER_WIDTH; b++) {
                 carried[b] = clampZero(bm.target()[b].add(carried[b]).subtract(bm.paid()[b]));
             }
@@ -858,8 +912,8 @@ public class OverviewService {
      * month, as before. Package-private: the daily walk and the advisor read the same asks.
      */
     List<DebtAsk> debtAsks(YearMonth month, LocalDate asOf) {
-        Settings s = settingsService.getOrCreate();
-        BigDecimal stable = s == null ? BigDecimal.ZERO : nullToZero(s.getMonthlyStableIncome());
+        // The 70% line of the ASAP rule is the month's own income.
+        BigDecimal stable = nullToZero(stableIncomeFor(month));
         LocalDate start = month.atDay(1);
         LocalDate end = asOf == null || asOf.isAfter(month.atEndOfMonth()) ? month.atEndOfMonth() : asOf;
         List<DebtAsk> asks = new ArrayList<>();
@@ -1093,17 +1147,15 @@ public class OverviewService {
         return !YearMonth.from(paymentStartDate).isAfter(month);
     }
 
+    /** The base level (1–4) for what is left after bills — never above it: Level 5 is earned by pay. */
     private Integer computeLevel(BigDecimal leftMoneyUzs) {
-        for (int i = 0; i < LEVEL_BREAKPOINTS_UZS.length; i++) {
-            if (leftMoneyUzs.compareTo(LEVEL_BREAKPOINTS_UZS[i]) < 0) return i + 1;
-        }
-        return null; // above tier ceiling
+        return baseLevelOf(leftMoneyUzs);
     }
 
     /**
      * Debt-based sub-level for ANY level: {level}.1 no debt, .2 manageable (ratio ≤ 70%),
-     * .3 heavy (&gt; 70%). Level 1 keeps its hard-coded scenario logic downstream; Levels 2–6
-     * use these sub-levels to look up the user-configured allocation rules.
+     * .3 heavy (&gt; 70%). Reported beside the situation (which splits .2 further); the
+     * percentages come from the situation and the level's rules version.
      */
     private String computeSubLevel(Integer level, BigDecimal debtTotalUzs, BigDecimal debtRatio) {
         if (level == null) return null;
@@ -1126,7 +1178,7 @@ public class OverviewService {
 
     private String computeLevelLabel(Integer level, String subLevel, boolean missingIncome) {
         if (missingIncome) return "Set monthly income to compute tier";
-        if (level == null) return "Above tier 6";
+        if (level == null) return "Set monthly income to compute tier";
         if (subLevel != null) return "Level " + subLevel;
         return "Level " + level;
     }
@@ -1569,12 +1621,15 @@ public class OverviewService {
     // ── Allocation guidance ───────────────────────────────────────────────────
 
     /**
-     * Compute the allocation recommendation for a tier. Level 1 has hard-coded rules per the
-     * owner's spec; Levels 2–6 use the percentages the user configured for their sub-level, and
-     * return a "not yet defined" stub until they have.
+     * The allocation for a month, at every level the same way (LEVELS-ALLOCATION-SPEC §1.2): the
+     * situation is picked as Level 1's scenario always was — from the stable income, the month's bank
+     * loans and debt asks (the 10% small-monthly-loan rule applied) and the split line of the level's
+     * version in force — and the version's numbers ask. The base the percentages multiply is
+     * {@code allocBaseUzs}, the stable income + this month's bonus; the bonus takes no part in
+     * picking the situation.
      */
     private TierAllocation computeAllocation(
-            Integer level, String subLevel,
+            YearMonth month, SavingsRules.Book book, Integer level,
             BigDecimal incomeUzs, BigDecimal allocBaseUzs, BigDecimal mandatoryUzs,
             BigDecimal bankMonthlyUzs,
             BigDecimal debt34Uzs, BigDecimal debtRatio,
@@ -1583,35 +1638,26 @@ public class OverviewService {
             List<ActionItem> upcoming) {
 
         if (level == null) {
-            return notDefinedAllocation("page.plan.note.aboveTierCeiling", Map.of(),
-                    "You're above the current tier ceiling — guidance not defined yet.");
+            return notDefinedAllocation("page.plan.note.setIncome", Map.of(),
+                    "Set monthly income to see allocation guidance.");
         }
-        if (level != 1) {
-            return computeConfiguredAllocation(level, subLevel, allocBaseUzs, displayCurrency,
-                    bankMonthlyUzs, debt34Uzs, plannedSetAsideUzs, paid, marks,
-                    monthPaid, upcoming);
-        }
-
-        // Level-1 engine: the SCENARIO (case A/B/C, tight-vs-comfortable split, bucket %s) is
-        // selected from stable income per the owner's spec (decisions D1–D4); the plan's calc base
-        // (stable − subscriptions − the debt charge) still decides tight vs comfortable. The base
-        // the percentages multiply is allocBaseUzs — the stable income + this month's bonus (the
-        // owner's 2026-09-30 decision) — and the bonus takes no part in choosing the scenario.
+        SavingsRules.Version version = book.version(level, month);
         // loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is personal debt.
-        Level1Plan plan = computeLevel1Plan(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
-                debt34Uzs, ruleDebtUzs(debt34Uzs, plannedSetAsideUzs, incomeUzs), debtRatio, minLeftoverUzs(1));
-        String[] p = plan.pct();
+        SavingsRules.Pick pick = SavingsRules.pick(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
+                debt34Uzs, ruleDebtUzs(debt34Uzs, plannedSetAsideUzs, incomeUzs), debtRatio, version.cutoff());
+        String[] p = version.percents(pick.situation()).strings();
         List<AllocationLine> lines = percentLines(allocBaseUzs, displayCurrency, paid, marks,
                 p[0], p[1], p[2]);
 
         // Bank installments pay via PayBankInstallmentModal; the set-aside and the ASAP pay-back
         // (borrowed money + debts) via PayPersonalLoanModal.
-        List<ActionItem> actions = level1Actions(plan, monthPaid, bankMonthlyUzs,
+        List<ActionItem> actions = situationActions(pick.situation(), monthPaid, bankMonthlyUzs,
                 nullToZero(debt34Uzs), plannedSetAsideUzs, displayCurrency, upcoming);
+        String key = SavingsRules.scenarioKey(level, pick.situation());
 
         return TierAllocation.builder()
-                .scenarioKey(plan.scenarioKey())
-                .scenarioLabel(scenarioLabel(plan.scenarioKey()))
+                .scenarioKey(key)
+                .scenarioLabel(scenarioLabel(level, pick.situation(), version.cutoff()))
                 .lines(lines)
                 .actions(actions)
                 .allocationLocked(isAllocationLocked(actions))
@@ -1619,17 +1665,10 @@ public class OverviewService {
     }
 
     /**
-     * Owner-spec Level-1 case selection, calc base, and bucket percentages. Pure (no repos / fields)
-     * so it can be unit-tested directly. All amounts in UZS.
-     *   leftBalance = income − mandatory; loanInstallments = bank loans (params 3+4, production
-     *   passes bank in 3 and 0 in 4); debt34 = the month's asks on borrowed money (LoanTaken) and
-     *   debts (Debt) — MONTHLY plans and ASAP asks (see debtAsks).
-     *   A  (no debt)         → base leftBalance,          10/5/15/5
-     *   C  (ratio &gt; 70%)     → base left−loan−debt34,    2/0/0/0
-     *   B3 (loan AND debt)   → base left−loan−debt34,     5/0/5/0  (no 5M split)
-     *   B1 (loan only)       → base left−loan−debt34,     &lt;5M 5/2/8/0 · ≥5M 7/3/10/3
-     *                          (debt34 here is only small MONTHLY plans the rule ignores, else 0)
-     *   B2 (debt only)       → base left−debt34,          &lt;5M 5/2/8/0 · ≥5M 7/3/10/3
+     * Level 1's scenario with Level 1's built-in numbers — the choice every level now makes
+     * ({@link SavingsRules#pick}), kept with its original shape: a "1.x" key, the four-wide
+     * percentage strings (the retired Stocks slot last) and the calc base. Pure, for the tests that
+     * pin the choice itself.
      */
     static Level1Plan computeLevel1Plan(BigDecimal incomeUzs, BigDecimal mandatoryUzs,
             BigDecimal bankMonthlyUzs, BigDecimal loanTakenUzs, BigDecimal debt34Uzs,
@@ -1641,46 +1680,22 @@ public class OverviewService {
     /**
      * The same, telling apart the debt that is PAID ({@code debt34Uzs}: every ask of the month — what
      * the tight/comfortable calc base subtracts, and what the heavy-debt ratio is built from) from the
-     * debt that COUNTS for the choice of the rule ({@code ruleDebtUzs}, see {@link #ruleDebtUzs}:
-     * MONTHLY plans of at most 10% of the stable income do not). With only such small plans the
-     * scenario is the one without personal debt — 1.1, or bank-loan-only beside a bank loan, whose
-     * calc base still subtracts the plans.
+     * debt that COUNTS for the choice of the rule ({@code ruleDebtUzs}, see {@link #ruleDebtUzs}).
      */
     static Level1Plan computeLevel1Plan(BigDecimal incomeUzs, BigDecimal mandatoryUzs,
             BigDecimal bankMonthlyUzs, BigDecimal loanTakenUzs, BigDecimal debt34Uzs, BigDecimal ruleDebtUzs,
             BigDecimal debtRatio, BigDecimal cutoffUzs) {
-        BigDecimal leftBalance = nullToZero(incomeUzs).subtract(nullToZero(mandatoryUzs));
-        BigDecimal loanInstallments = nullToZero(bankMonthlyUzs).add(nullToZero(loanTakenUzs));
-        BigDecimal debt34 = nullToZero(debt34Uzs);
-        boolean hasLoan = loanInstallments.signum() > 0;
-        boolean hasDebt = nullToZero(ruleDebtUzs).signum() > 0;
-
-        if (!hasLoan && !hasDebt) {
-            return new Level1Plan("1.1", new String[]{"10", "5", "15", "5"},
-                    clampZero(leftBalance), false, false);
-        }
-        boolean heavy = debtRatio != null && debtRatio.compareTo(DEBT_RATIO_THRESHOLD) > 0; // strict > 70%
-        if (heavy) {
-            BigDecimal base = clampZero(leftBalance.subtract(loanInstallments).subtract(debt34));
-            return new Level1Plan("1.3", new String[]{"2", null, null, null}, base, hasLoan, hasDebt);
-        }
-        if (hasLoan && hasDebt) {
-            BigDecimal base = clampZero(leftBalance.subtract(loanInstallments).subtract(debt34));
-            return new Level1Plan("1.2.3", new String[]{"5", null, "5", null}, base, true, true);
-        }
-        if (hasLoan) {
-            // Every actual payment comes off: the installments, and any small MONTHLY plan beside them.
-            BigDecimal base = clampZero(leftBalance.subtract(loanInstallments).subtract(debt34));
-            boolean tight = base.compareTo(nullToZero(cutoffUzs)) < 0;
-            return new Level1Plan(tight ? "1.2.1.tight" : "1.2.1.comfortable",
-                    tight ? new String[]{"5", "2", "8", null} : new String[]{"7", "3", "10", "3"},
-                    base, true, false);
-        }
-        BigDecimal base = clampZero(leftBalance.subtract(debt34));
-        boolean tight = base.compareTo(nullToZero(cutoffUzs)) < 0;
-        return new Level1Plan(tight ? "1.2.2.tight" : "1.2.2.comfortable",
-                tight ? new String[]{"5", "2", "8", null} : new String[]{"7", "3", "10", "3"},
-                base, false, true);
+        SavingsRules.Pick pick = SavingsRules.pick(incomeUzs, mandatoryUzs, bankMonthlyUzs, loanTakenUzs,
+                debt34Uzs, ruleDebtUzs, debtRatio, cutoffUzs);
+        String[] pct = switch (pick.situation()) {
+            case SavingsRules.NO_DEBT -> new String[]{"10", "5", "15", "5"};
+            case SavingsRules.HEAVY_DEBT -> new String[]{"2", null, null, null};
+            case SavingsRules.BANK_AND_DEBTS -> new String[]{"5", null, "5", null};
+            case SavingsRules.BANK_LOAN_TIGHT, SavingsRules.DEBTS_TIGHT -> new String[]{"5", "2", "8", null};
+            default -> new String[]{"7", "3", "10", "3"};
+        };
+        return new Level1Plan(SavingsRules.scenarioKey(1, pick.situation()), pct, pick.calcBase(),
+                pick.hasLoan(), pick.hasDebt());
     }
 
     /** A MONTHLY loan's plans count for the savings rule only above this share of the stable income. */
@@ -1714,15 +1729,14 @@ public class OverviewService {
         return v.signum() < 0 ? BigDecimal.ZERO : v;
     }
 
-    /** Level-1 action items per scenario (keeps PAY_BANK / PAY_PERSONAL_LOAN keys for the UI). */
-    private List<ActionItem> level1Actions(Level1Plan plan, MonthPaid monthPaid,
+    /** The action items of a situation, at any level (keeps PAY_BANK / PAY_PERSONAL_LOAN keys for the UI). */
+    private List<ActionItem> situationActions(String situation, MonthPaid monthPaid,
             BigDecimal bankMonthlyUzs, BigDecimal debt34Uzs,
             BigDecimal plannedSetAsideUzs, Currency cur, List<ActionItem> upcoming) {
-        String key = plan.scenarioKey();
-        // 1.1 is the scenario without debt that counts for the rule — but a small MONTHLY plan is
+        // NO_DEBT is the situation without debt that counts for the rule — but a small MONTHLY plan is
         // still to be paid (its set-aside), and a repayment that merely has not STARTED yet is still
         // worth showing, or the money looks as if it vanished.
-        if ("1.1".equals(key)) {
+        if (SavingsRules.NO_DEBT.equals(situation)) {
             List<ActionItem> only = new ArrayList<>();
             addDebtActions(only, debt34Uzs, plannedSetAsideUzs, cur, monthPaid);
             only.addAll(upcoming);
@@ -1733,17 +1747,17 @@ public class OverviewService {
             actions.add(payBank(monthPaid, bankMonthlyUzs));
         }
         addDebtActions(actions, debt34Uzs, plannedSetAsideUzs, cur, monthPaid);
-        switch (key) {
-            case "1.2.1.tight", "1.2.2.tight" ->
+        switch (situation) {
+            case SavingsRules.BANK_LOAN_TIGHT, SavingsRules.DEBTS_TIGHT ->
                     actions.add(info("page.plan.note.tight", Map.of(),
                             "Less than 5M UZS remains after debt — slim allocations until things ease up."));
-            case "1.2.1.comfortable", "1.2.2.comfortable" ->
+            case SavingsRules.BANK_LOAN_COMFORTABLE, SavingsRules.DEBTS_COMFORTABLE ->
                     actions.add(info("page.plan.note.comfortable", Map.of(),
                             "5M+ UZS remains after debt — higher allocations apply."));
-            case "1.2.3" ->
+            case SavingsRules.BANK_AND_DEBTS ->
                     actions.add(info("page.plan.note.loanAndDebt", Map.of(),
                             "Both loan and debt — emergency is skipped this tier; focus on debt."));
-            case "1.3" ->
+            case SavingsRules.HEAVY_DEBT ->
                     actions.add(info("page.plan.note.heavyDebt", Map.of(),
                             "Heavy debt (> 70% of income): only a 2% donation this month. "
                             + "You may withdraw from the emergency fund if the situation gets really bad."));
@@ -1753,101 +1767,249 @@ public class OverviewService {
         return actions;
     }
 
-    private String scenarioLabel(String key) {
-        if (key == null) return "Guidance not yet defined for this tier";
-        return switch (key) {
-            case "1.1" -> "Level 1.1 — no debts";
-            case "1.2.1.tight" -> "Level 1.2 — bank loan only, tight (< 5M UZS after debt)";
-            case "1.2.1.comfortable" -> "Level 1.2 — bank loan only, comfortable (≥ 5M UZS after debt)";
-            case "1.2.2.tight" -> "Level 1.2 — debts only, tight (< 5M UZS after debt)";
-            case "1.2.2.comfortable" -> "Level 1.2 — debts only, comfortable (≥ 5M UZS after debt)";
-            case "1.2.3" -> "Level 1.2 — bank loan + debts (fixed allocation)";
-            case "1.3" -> "Level 1.3 — heavy debt (> 70% of income)";
+    /** "Level 1.2 — bank loan only, tight (< 5M UZS after debt)", the same words at every level. */
+    private static String scenarioLabel(int level, String situation, BigDecimal cutoff) {
+        String split = cutoff == null || cutoff.compareTo(SavingsRules.DEFAULT_CUTOFF) == 0 ? "5M"
+                : cutoff.stripTrailingZeros().toPlainString();
+        return switch (situation) {
+            case SavingsRules.NO_DEBT -> "Level " + level + ".1 — no debts";
+            case SavingsRules.BANK_LOAN_TIGHT -> "Level " + level + ".2 — bank loan only, tight (< " + split + " UZS after debt)";
+            case SavingsRules.BANK_LOAN_COMFORTABLE -> "Level " + level + ".2 — bank loan only, comfortable (≥ " + split + " UZS after debt)";
+            case SavingsRules.DEBTS_TIGHT -> "Level " + level + ".2 — debts only, tight (< " + split + " UZS after debt)";
+            case SavingsRules.DEBTS_COMFORTABLE -> "Level " + level + ".2 — debts only, comfortable (≥ " + split + " UZS after debt)";
+            case SavingsRules.BANK_AND_DEBTS -> "Level " + level + ".2 — bank loan + debts (fixed allocation)";
+            case SavingsRules.HEAVY_DEBT -> "Level " + level + ".3 — heavy debt (> 70% of income)";
             default -> "Guidance not yet defined for this tier";
         };
     }
 
-    // ── Levels 2–6: user-configured allocation rules ────────────────────────────
+    // ── The levels' savings rules, version by version ─────────────────────────
 
     /**
-     * Build the allocation for a Level 2–6 sub-level from the user's configured rule.
-     * Unconfigured → a stub prompting them to set it (the frontend shows the editor button).
-     * Debt-pay actions are still surfaced when the sub-level carries debt.
+     * Every level's rules versions (LEVELS-ALLOCATION-SPEC §1.2–1.3), read once per call: the stored
+     * versions, and for a level with none — a service built by hand, or a database before the boot
+     * seeding — the first version the seeding writes ({@link #seedVersion}).
      */
-    private TierAllocation computeConfiguredAllocation(
-            Integer level, String subLevel, BigDecimal incomeBaseUzs, Currency displayCurrency,
-            BigDecimal bankMonthlyUzs, BigDecimal debt34Uzs,
-            BigDecimal plannedSetAsideUzs, BucketPaid paid, BucketPaid marks, MonthPaid monthPaid,
-            List<ActionItem> upcoming) {
-
-        if (level < 2 || level > 6 || subLevel == null) {
-            return notDefinedAllocation("page.plan.note.levelRulesUnset",
-                    Map.of("level", String.valueOf(level)),
-                    "Allocation rules for Level " + level + " will be configured by you once you reach this tier.");
+    SavingsRules.Book ruleBook() {
+        java.util.Map<Integer, java.util.NavigableMap<YearMonth, SavingsRules.Version>> levels = new java.util.HashMap<>();
+        if (levelRuleVersionRepository != null) {
+            List<uz.tracker.trackerproject.entity.LevelRuleVersion> stored =
+                    levelRuleVersionRepository.findAllByOrderByLevelAscFromMonthAsc();
+            for (uz.tracker.trackerproject.entity.LevelRuleVersion v : stored == null
+                    ? List.<uz.tracker.trackerproject.entity.LevelRuleVersion>of() : stored) {
+                SavingsRules.Version version = SavingsRules.Version.of(v);
+                levels.computeIfAbsent(version.level(), l -> new java.util.TreeMap<>()).put(version.from(), version);
+            }
         }
-        LevelAllocationRule rule = ruleRepository.findBySubLevel(subLevel).orElse(null);
-        if (rule == null) {
-            // The debt band is in `text` only: it is English prose the client cannot re-derive, and
-            // the tier card already names the band right above this note.
-            return notDefinedAllocation("page.plan.note.subLevelRulesUnset",
-                    Map.of("subLevel", subLevel),
-                    "Allocation for Level " + subLevel + " (" + subLevelDebtLabel(subLevel)
-                            + ") isn't set yet — open the rules editor from the tier card to define it.");
+        YearMonth first = null;
+        for (int level = 1; level <= SavingsRules.TOP_LEVEL; level++) {
+            if (levels.containsKey(level)) continue;
+            if (first == null) first = firstLevelMonth(YearMonth.now());
+            levels.put(level, SavingsRules.single(seedVersion(level, first)));
         }
-
-        String[] p = {
-                toPctStr(rule.getDonationPercent()), toPctStr(rule.getEmergencyPercent()),
-                toPctStr(rule.getInvestmentsPercent()), toPctStr(rule.getStocksPercent())
-        };
-        List<AllocationLine> lines = percentLines(incomeBaseUzs, displayCurrency, paid, marks,
-                p[0], p[1], p[2]);
-
-        List<ActionItem> actions = new ArrayList<>();
-        if (bankMonthlyUzs.signum() > 0) {
-            actions.add(payBank(monthPaid, bankMonthlyUzs));
-        }
-        // The same asks as Level 1, from the same debtAsks the sub-level above was built from — one
-        // monthly debt charge per page.
-        addDebtActions(actions, nullToZero(debt34Uzs), plannedSetAsideUzs, displayCurrency, monthPaid);
-        if (rule.getNote() != null && !rule.getNote().isBlank()) {
-            actions.add(userNote(rule.getNote()));
-        }
-        actions.addAll(upcoming);
-
-        return TierAllocation.builder()
-                .scenarioKey(subLevel)
-                .scenarioLabel("Level " + subLevel + " — " + subLevelDebtLabel(subLevel))
-                .lines(lines)
-                .actions(actions)
-                .allocationLocked(isAllocationLocked(actions))
-                .build();
+        return SavingsRules.book(levels);
     }
 
     /**
-     * Percentages for a Levels 2–6 (level, sub-level) from configured rules. Level 1 is handled
-     * by {@link #computeLevel1Plan} directly (it needs the per-case calc base, not just %), so
-     * this is only called for Levels 2–6.
+     * A level's first version, as the boot seeding stores it — so that nothing past moves: Level 1
+     * takes today's built-in table and its split line ({@code LevelConfig(1).minLeftover ?? 5M});
+     * Levels 2–5 take the rules already saved for them in the old store, situation by situation
+     * ({@code L.1} → no loans; {@code L.2} → the four split rows and bank loan + loans from people;
+     * {@code L.3} → heavy loans), and Level 1's numbers wherever none was saved. Every level starts at
+     * Level 1's split line (the owner's answer, §6.1).
      */
-    private String[] bucketPercents(Integer level, String subLevel) {
-        if (level != null && level >= 2 && level <= 6 && subLevel != null) {
-            return ruleRepository.findBySubLevel(subLevel)
-                    .map(r -> new String[]{
-                            toPctStr(r.getDonationPercent()), toPctStr(r.getEmergencyPercent()),
-                            toPctStr(r.getInvestmentsPercent()), toPctStr(r.getStocksPercent())})
-                    .orElse(new String[]{null, null, null, null});
+    SavingsRules.Version seedVersion(int level, YearMonth from) {
+        BigDecimal cutoff = minLeftoverUzs(1);
+        java.util.Map<String, SavingsRules.Percents> rules = new java.util.LinkedHashMap<>(SavingsRules.LEVEL1_DEFAULT);
+        if (level >= 2) {
+            seedFromOldRule(rules, level + ".1", List.of(SavingsRules.NO_DEBT));
+            seedFromOldRule(rules, level + ".2", List.of(SavingsRules.BANK_LOAN_COMFORTABLE, SavingsRules.BANK_LOAN_TIGHT,
+                    SavingsRules.DEBTS_COMFORTABLE, SavingsRules.DEBTS_TIGHT, SavingsRules.BANK_AND_DEBTS));
+            seedFromOldRule(rules, level + ".3", List.of(SavingsRules.HEAVY_DEBT));
         }
-        return new String[]{null, null, null, null};
+        return new SavingsRules.Version(level, from, cutoff, rules);
+    }
+
+    private void seedFromOldRule(java.util.Map<String, SavingsRules.Percents> rules, String subLevel, List<String> situations) {
+        LevelAllocationRule old = ruleRepository.findBySubLevel(subLevel).orElse(null);
+        if (old == null) return;
+        SavingsRules.Percents p = new SavingsRules.Percents(nullToZero(old.getDonationPercent()),
+                nullToZero(old.getEmergencyPercent()), nullToZero(old.getInvestmentsPercent()));
+        for (String s : situations) rules.put(s, p);
+    }
+
+    // ── Which level a month is on (LEVELS-ALLOCATION-SPEC §1.1) ───────────────
+
+    /** The recorded starts and ends of Level 5, oldest first (none where the service is built by hand). */
+    List<uz.tracker.trackerproject.entity.LevelChange> levelChanges() {
+        if (levelChangeRepository == null) return List.of();
+        List<uz.tracker.trackerproject.entity.LevelChange> rows = levelChangeRepository.findAllByOrderByMonthAscIdAsc();
+        return rows == null ? List.of() : rows;
+    }
+
+    /** Levels 1–4 from what is left after bills: 1 under 15M · 2 under 30M · 3 under 45M · 4 from 45M. */
+    static int baseLevelOf(BigDecimal leftAfterBillsUzs) {
+        BigDecimal left = nullToZero(leftAfterBillsUzs);
+        for (int i = 0; i < LEVEL_BREAKPOINTS_UZS.length; i++) {
+            if (left.compareTo(LEVEL_BREAKPOINTS_UZS[i]) < 0) return i + 1;
+        }
+        return TOP_BASE_LEVEL;
+    }
+
+    /** {@code month}'s level: 5 while a recorded Level 5 period covers it, else its base level. */
+    int levelOf(YearMonth month, BigDecimal leftAfterBillsUzs, List<uz.tracker.trackerproject.entity.LevelChange> changes) {
+        return level5Since(month, changes) != null ? SavingsRules.TOP_LEVEL : baseLevelOf(leftAfterBillsUzs);
+    }
+
+    /** The month the Level 5 period covering {@code month} started; null when none covers it. */
+    static YearMonth level5Since(YearMonth month, List<uz.tracker.trackerproject.entity.LevelChange> changes) {
+        uz.tracker.trackerproject.entity.LevelChange latest = null;
+        for (uz.tracker.trackerproject.entity.LevelChange c : changes) {
+            if (c.getMonth() == null || YearMonth.from(c.getMonth()).isAfter(month)) continue;
+            latest = c;
+        }
+        return latest != null && uz.tracker.trackerproject.entity.LevelChange.UP.equals(latest.getKind())
+                ? YearMonth.from(latest.getMonth()) : null;
+    }
+
+    /** {@code month}'s level as the engine evaluates it; null without an income that month. */
+    Integer levelFor(YearMonth month) {
+        BigDecimal income = stableIncomeFor(month);
+        if (income == null || income.signum() <= 0) return null;
+        return levelOf(month, income.subtract(sumActiveSubscriptionsUzs()), levelChanges());
+    }
+
+    /** Today's active monthly bills, UZS — what every month's level is measured after. */
+    BigDecimal activeBillsUzs() {
+        return sumActiveSubscriptionsUzs();
+    }
+
+    /** {@code month}'s base level (1–4) from its income − today's bills; null without an income. */
+    Integer baseLevelFor(YearMonth month) {
+        BigDecimal income = stableIncomeFor(month);
+        if (income == null || income.signum() <= 0) return null;
+        return baseLevelOf(income.subtract(sumActiveSubscriptionsUzs()));
+    }
+
+    /**
+     * Pay for {@code month} (Profile's "Pay for {month}"): the salary tree's income, bonus included,
+     * counted in its accounting month, UZS, rows dated up to {@code asOf}.
+     */
+    BigDecimal payFor(YearMonth month, LocalDate asOf) {
+        return nullToZero(salaryReceivedUzs(month, asOf)).add(nullToZero(sumBonusIncomeUzs(month)));
+    }
+
+    /**
+     * The first month the levels count from, and the earliest a rules version may start: the tracking
+     * start, else the month of the earliest transaction, else {@code current}.
+     */
+    YearMonth firstLevelMonth(YearMonth current) {
+        Settings s = settingsService.getOrCreate();
+        if (s != null && s.getAllocationTrackingStartMonth() != null) return YearMonth.from(s.getAllocationTrackingStartMonth());
+        LocalDate earliest = transactionRepository.findEarliestTransactionDate();
+        return earliest != null ? YearMonth.from(earliest) : current;
+    }
+
+    /** One month of a Level 5 run, with its pay. */
+    record MonthPay(YearMonth month, BigDecimal pay) {}
+
+    /**
+     * Where the Level 5 run stands at {@code current} (LEVELS-ALLOCATION-SPEC §1.1), read only.
+     *
+     * <p>Walks the ENDED months from the first month: the recorded changes before {@code current} are
+     * the truth (once a change's month has ended it stands); a month on Level 4 with pay ≥ 60M adds to
+     * the run toward Level 5, a month on Level 5 with pay under it to the run back; any other month
+     * resets it. A run of three makes a change from the month after its third — recorded only when
+     * that month is {@code current} ({@code pending}); one that would apply to a month already ended
+     * is not written in the past, and the run goes on (a late salary then starts Level 5 with the
+     * month it was recorded in).
+     *
+     * @param run     the run now counting, oldest first (empty right after a change)
+     * @param pending the change that should be recorded from {@code current}; null when none
+     * @param deciding for {@code pending}: the three months that decided it
+     */
+    record Standing(boolean onLevel5, List<MonthPay> run, String pending, List<MonthPay> deciding) {}
+
+    /**
+     * The road to Level 5 at {@code current} (on Level 4), or back from it (on Level 5); null on
+     * Levels 1–3 and without an income. {@code appliesFrom}: the month after the run would complete
+     * if every month from this one counts.
+     */
+    uz.tracker.trackerproject.dto.response.LevelRoad road(YearMonth current, LocalDate asOf, Integer level, Integer baseLevel) {
+        if (level == null || baseLevel == null) return null;
+        boolean onLevel5 = level == SavingsRules.TOP_LEVEL;
+        if (!onLevel5 && baseLevel != TOP_BASE_LEVEL) return null;
+        Standing st = standing(current, asOf);
+        List<uz.tracker.trackerproject.dto.response.LevelRoad.MonthPay> months = new ArrayList<>();
+        // The run toward where this month is headed: only meaningful in the state the month is in.
+        if (st.onLevel5() == onLevel5) {
+            for (MonthPay m : st.run()) {
+                months.add(uz.tracker.trackerproject.dto.response.LevelRoad.MonthPay.builder()
+                        .month(m.month().toString()).pay(m.pay()).build());
+            }
+        }
+        int still = Math.max(1, LEVEL5_MONTHS_NEEDED - months.size());
+        return uz.tracker.trackerproject.dto.response.LevelRoad.builder()
+                .toward(onLevel5 ? baseLevel : SavingsRules.TOP_LEVEL)
+                .payThreshold(LEVEL5_PAY_THRESHOLD)
+                .monthsNeeded(LEVEL5_MONTHS_NEEDED)
+                .months(months)
+                .thisMonthSoFar(payFor(current, asOf))
+                .appliesFrom(current.plusMonths(still).toString())
+                .build();
+    }
+
+    Standing standing(YearMonth current, LocalDate asOf) {
+        List<uz.tracker.trackerproject.entity.LevelChange> changes = levelChanges();
+        java.util.Map<YearMonth, String> frozen = new java.util.HashMap<>();
+        for (uz.tracker.trackerproject.entity.LevelChange c : changes) {
+            YearMonth m = YearMonth.from(c.getMonth());
+            if (m.isBefore(current)) frozen.put(m, c.getKind());
+        }
+        StableIncomeSchedule income = incomeSchedule();
+        BigDecimal bills = sumActiveSubscriptionsUzs();
+        boolean level5 = false;
+        List<MonthPay> run = new ArrayList<>();
+        String pending = null;
+        List<MonthPay> deciding = List.of();
+        for (YearMonth m = firstLevelMonth(current); m.isBefore(current); m = m.plusMonths(1)) {
+            String kind = frozen.get(m);
+            if (kind != null) {
+                level5 = uz.tracker.trackerproject.entity.LevelChange.UP.equals(kind);
+                run.clear();
+            }
+            BigDecimal stable = income.amountFor(m);
+            BigDecimal pay = payFor(m, asOf);
+            boolean counts;
+            if (!level5) {
+                counts = stable != null && stable.signum() > 0
+                        && baseLevelOf(stable.subtract(bills)) == TOP_BASE_LEVEL
+                        && pay.compareTo(LEVEL5_PAY_THRESHOLD) >= 0;
+            } else {
+                counts = pay.compareTo(LEVEL5_PAY_THRESHOLD) < 0;
+            }
+            if (counts) run.add(new MonthPay(m, pay)); else run.clear();
+            if (run.size() >= LEVEL5_MONTHS_NEEDED && m.plusMonths(1).equals(current)) {
+                pending = level5 ? uz.tracker.trackerproject.entity.LevelChange.DOWN : uz.tracker.trackerproject.entity.LevelChange.UP;
+                deciding = List.copyOf(run.subList(run.size() - LEVEL5_MONTHS_NEEDED, run.size()));
+            }
+        }
+        if (pending != null) {
+            level5 = uz.tracker.trackerproject.entity.LevelChange.UP.equals(pending);
+            run.clear();
+        }
+        return new Standing(level5, List.copyOf(run), pending, deciding);
     }
 
     private static String toPctStr(BigDecimal pct) {
         return pct == null ? null : pct.stripTrailingZeros().toPlainString();
     }
 
-    // ── Allocation-rule view + per-level config (Levels 2–6, Level 1 reference) ──
+    // ── The old per-level config ──────────────────────────────────────────────
 
     /**
-     * Configured minimum leftover for a level, in UZS. Level 1 defaults to 5M. For Level 1 it is the
-     * tight/comfortable cutoff; package-private so the profile can name it.
+     * The old store's minimum leftover for a level, in UZS (default 5M). Since the levels' rules are
+     * versions (2026-10-01) it is read only when Level 1's first version is seeded — its split line.
      */
     BigDecimal minLeftoverUzs(int level) {
         BigDecimal v = levelConfigRepository.findByLevel(level)
@@ -1856,50 +2018,36 @@ public class OverviewService {
         return FIVE_MILLION_UZS;
     }
 
-    /** The user's current level from stable income − subscriptions (null if income unset). */
-    private Integer currentLevel() {
-        Settings s = settingsService.getOrCreate();
-        if (s.getMonthlyStableIncome() == null
-                || s.getMonthlyStableIncome().signum() <= 0) return null;
-        BigDecimal stableUzs = s.getMonthlyStableIncome();
-        return computeLevel(stableUzs.subtract(sumActiveSubscriptionsUzs()));
-    }
-
-    /** Inclusive lower / exclusive upper left-money bound (UZS) for a level. */
+    /**
+     * The left-after-bills band of a level: Level 1 from 0, Level 2 from 15M, Level 3 from 30M,
+     * Level 4 from 45M; Level 5 has none (it is earned by pay) — null.
+     */
     static BigDecimal levelIncomeLow(int level) {
+        if (level >= SavingsRules.TOP_LEVEL) return null;
         return level <= 1 ? BigDecimal.ZERO : LEVEL_BREAKPOINTS_UZS[level - 2];
     }
-    static BigDecimal levelIncomeHigh(int level) {
-        return LEVEL_BREAKPOINTS_UZS[level - 1];
-    }
 
-    /** The top breakpoint: left money at or above it is "above tier 6", with no level and no guidance. */
-    static BigDecimal tierCeiling() {
-        return LEVEL_BREAKPOINTS_UZS[LEVEL_BREAKPOINTS_UZS.length - 1];
+    /** Where the next band starts: 15M · 30M · 45M; null on Levels 4 and 5 (no upper limit). */
+    static BigDecimal levelIncomeHigh(int level) {
+        return level >= TOP_BASE_LEVEL ? null : LEVEL_BREAKPOINTS_UZS[level - 1];
     }
 
     /**
-     * Reference percentages for Level 1's three sub-levels (read-only comparison). The ".2"
-     * row shows the comfortable Case-B allocation (7/3/10/3); the actual numbers vary by
-     * loan/debt composition and the 5M tight/comfortable split (see {@link #computeLevel1Plan}).
+     * The levels' rules as the old Rules view showed them — read-only, mapped from the store
+     * (LEVELS-ALLOCATION-SPEC §3.5): Levels 1–5, each with the version in force this month, its
+     * sub-levels .1 = no loans, .2 = bank loan with "or more left", .3 = heavy loans. Nothing is
+     * locked or editable here any more: rules are changed through {@code PUT /api/v1/levels/{level}/rules}.
      */
-    private String[] level1Reference(String subLevel) {
-        if (subLevel.endsWith(".1")) return new String[]{"10", "5", "15", "5"};
-        if (subLevel.endsWith(".2")) return new String[]{"7", "3", "10", "3"};
-        return new String[]{"2", null, null, null}; // .3
-    }
-
     @Transactional(readOnly = true)
     public AllocationRulesViewResponse getAllocationRules() {
-        Settings s = settingsService.getOrCreate();
-        boolean missingIncome = s.getMonthlyStableIncome() == null
-                || s.getMonthlyStableIncome().signum() <= 0;
+        YearMonth now = YearMonth.now();
+        BigDecimal currentIncome = stableIncomeFor(now);
+        boolean missingIncome = currentIncome == null || currentIncome.signum() <= 0;
 
-        Integer curLevel = currentLevel();
+        Integer curLevel = missingIncome ? null : levelFor(now);
         String curSubLevel = null;
-        if (curLevel != null && !missingIncome) {
-            BigDecimal stableUzs = s.getMonthlyStableIncome();
-            YearMonth now = YearMonth.now();
+        if (curLevel != null) {
+            BigDecimal stableUzs = currentIncome;
             BigDecimal bankNow = sumBankLoanMonthlyPaymentsUzs(now);
             List<DebtAsk> asksNow = debtAsks(now, now.atEndOfMonth());
             BigDecimal allAsks = asksNow.stream().map(DebtAsk::ask).reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -1910,46 +2058,33 @@ public class OverviewService {
             curSubLevel = computeSubLevel(curLevel, bankNow.add(ruleDebtUzs(allAsks, monthlyAsks, stableUzs)), ratio);
         }
 
-        YearMonth thisMonth = YearMonth.now();
+        SavingsRules.Book book = ruleBook();
         List<LevelView> levels = new ArrayList<>();
-        for (int level = 1; level <= 6; level++) {
-            LevelConfig cfg = levelConfigRepository.findByLevel(level).orElse(null);
-            LocalDate exp = cfg != null ? cfg.getExpirationMonth() : null;
-            boolean locked = exp != null && thisMonth.isBefore(YearMonth.from(exp));
-            boolean builtIn = level == 1;
-            boolean editable = curLevel != null && curLevel == level && !locked;
-
-            BigDecimal minLeftover = cfg != null && cfg.getMinLeftover() != null
-                    ? cfg.getMinLeftover()
-                    : (level == 1 ? FIVE_MILLION_UZS : null);
-
+        for (int level = 1; level <= SavingsRules.TOP_LEVEL; level++) {
+            SavingsRules.Version v = book.version(level, now);
             List<SubLevelView> subs = new ArrayList<>(3);
+            String[] situations = {SavingsRules.NO_DEBT, SavingsRules.BANK_LOAN_COMFORTABLE, SavingsRules.HEAVY_DEBT};
             for (int sub = 1; sub <= 3; sub++) {
                 String subLevel = level + "." + sub;
-                String[] p = builtIn ? level1Reference(subLevel)
-                        : ruleRepository.findBySubLevel(subLevel)
-                            .map(r -> new String[]{toPctStr(r.getDonationPercent()), toPctStr(r.getEmergencyPercent()),
-                                    toPctStr(r.getInvestmentsPercent()), toPctStr(r.getStocksPercent())})
-                            .orElse(new String[]{null, null, null, null});
+                SavingsRules.Percents p = v.percents(situations[sub - 1]);
                 subs.add(SubLevelView.builder()
                         .subLevel(subLevel)
                         .debtLabel(subLevelDebtLabel(subLevel))
-                        .donationPercent(parsePct(p[0]))
-                        .emergencyPercent(parsePct(p[1]))
-                        .investmentsPercent(parsePct(p[2]))
-                        .stocksPercent(parsePct(p[3]))
+                        .donationPercent(notAskedNull(p.donation()))
+                        .emergencyPercent(notAskedNull(p.emergency()))
+                        .investmentsPercent(notAskedNull(p.investments()))
+                        .stocksPercent(null)
                         .build());
             }
-
             levels.add(LevelView.builder()
                     .level(level)
                     .incomeLow(levelIncomeLow(level))
                     .incomeHigh(levelIncomeHigh(level))
-                    .minLeftover(minLeftover)
-                    .expirationMonth(exp == null ? null : YearMonth.from(exp).toString())
-                    .locked(locked)
-                    .editable(editable)
-                    .builtIn(builtIn)
+                    .minLeftover(v.cutoff())
+                    .expirationMonth(null)
+                    .locked(false)
+                    .editable(false)
+                    .builtIn(level == 1)
                     .subLevels(subs)
                     .build());
         }
@@ -1962,87 +2097,9 @@ public class OverviewService {
                 .build();
     }
 
-    /**
-     * Save one level's config. Only the user's CURRENT level may be saved, and only when it
-     * isn't locked by an unreached expiration month. Level 1's percentages are built-in, so
-     * only its minimum leftover / expiration are stored; Levels 2–6 also upsert sub-level
-     * percentages (a sub-level with all-null percents is removed).
-     */
-    @Transactional
-    public AllocationRulesViewResponse saveLevelConfig(LevelConfigRequest req) {
-        Integer level = req.getLevel();
-        if (level == null || level < 1 || level > 6) {
-            throw new IllegalArgumentException("Level must be between 1 and 6.");
-        }
-        Integer cur = currentLevel();
-        if (cur == null || !cur.equals(level)) {
-            throw new IllegalArgumentException(
-                    "You can only edit your current level" + (cur == null ? "." : " (Level " + cur + ")."));
-        }
-        // Reject when the level is currently locked (existing expiration not yet reached).
-        LevelConfig cfg = levelConfigRepository.findByLevel(level).orElse(null);
-        LocalDate existingExp = cfg != null ? cfg.getExpirationMonth() : null;
-        if (existingExp != null && YearMonth.now().isBefore(YearMonth.from(existingExp))) {
-            throw new IllegalArgumentException(
-                    "Level " + level + " is locked until " + YearMonth.from(existingExp) + ".");
-        }
-
-        if (cfg == null) {
-            cfg = new LevelConfig();
-            cfg.setLevel(level);
-        }
-        cfg.setMinLeftover(req.getMinLeftover());
-        cfg.setExpirationMonth(req.getExpirationMonth() == null ? null
-                : req.getExpirationMonth().withDayOfMonth(1));
-        levelConfigRepository.save(cfg);
-
-        // Percentages: Level 1 is built-in; 2–6 upsert each provided sub-level row.
-        if (level >= 2 && req.getRules() != null) {
-            for (LevelAllocationRuleRequest rule : req.getRules()) {
-                if (rule.getSubLevel() == null || rule.getSubLevel().isBlank()) continue;
-                if (parseLevel(rule.getSubLevel()) != level) {
-                    throw new IllegalArgumentException(
-                            "Sub-level " + rule.getSubLevel() + " doesn't belong to Level " + level + ".");
-                }
-                upsertRule(rule);
-            }
-        }
-        return getAllocationRules();
-    }
-
-    /** Upsert one sub-level's percentages; all-null → delete (reverts to "not set"). */
-    private void upsertRule(LevelAllocationRuleRequest req) {
-        String subLevel = req.getSubLevel();
-        int level = parseLevel(subLevel);
-        boolean allNull = req.getDonationPercent() == null && req.getEmergencyPercent() == null
-                && req.getInvestmentsPercent() == null && req.getStocksPercent() == null;
-        LevelAllocationRule existing = ruleRepository.findBySubLevel(subLevel).orElse(null);
-        if (allNull) {
-            if (existing != null) ruleRepository.delete(existing);
-            return;
-        }
-        LevelAllocationRule r = existing != null ? existing : new LevelAllocationRule();
-        r.setLevel(level);
-        r.setSubLevel(subLevel);
-        r.setDonationPercent(req.getDonationPercent());
-        r.setEmergencyPercent(req.getEmergencyPercent());
-        r.setInvestmentsPercent(req.getInvestmentsPercent());
-        r.setStocksPercent(req.getStocksPercent());
-        r.setNote(req.getNote() != null && req.getNote().isBlank() ? null : req.getNote());
-        ruleRepository.save(r);
-    }
-
-    private static BigDecimal parsePct(String s) {
-        return s == null ? null : new BigDecimal(s);
-    }
-
-    /** "{level}.{sub}" → level int. */
-    private int parseLevel(String subLevel) {
-        try {
-            return Integer.parseInt(subLevel.split("\\.")[0]);
-        } catch (RuntimeException e) {
-            throw new IllegalArgumentException("Bad sub-level format: " + subLevel);
-        }
+    /** 0 is "not asked", which this view always sent as null. */
+    private static BigDecimal notAskedNull(BigDecimal v) {
+        return v == null || v.signum() == 0 ? null : v;
     }
 
     /**
@@ -2055,15 +2112,6 @@ public class OverviewService {
      */
     private static ActionItem info(String code, Map<String, String> params, String text) {
         return ActionItem.builder().text(text).code(code).params(params).build();
-    }
-
-    /**
-     * The user's OWN note from the allocation-rules editor. It carries no code deliberately: the
-     * sentence is theirs, in whichever language they typed it, so there is nothing to translate
-     * and a key would print somebody else's words in its place.
-     */
-    private static ActionItem userNote(String text) {
-        return ActionItem.builder().text(text).build();
     }
 
     /** Map.of rejects null values, and a counterparty name reaches us from user data. */

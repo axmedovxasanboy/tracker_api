@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import uz.tracker.trackerproject.dto.response.AnalyticsResponse;
 import uz.tracker.trackerproject.service.AnalyticsService;
+import uz.tracker.trackerproject.service.LevelService;
 
 import java.time.LocalDate;
 import java.time.YearMonth;
@@ -22,6 +23,13 @@ public class AnalyticsController {
     private final AnalyticsService service;
 
     /**
+     * A start or an end of Level 5 due today is recorded before the figures are read. Field-injected,
+     * so the constructor stays as it is; absent (null) where the controller is built by hand.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private LevelService levelService;
+
+    /**
      * The Analytics page's figures for the months {@code from}..{@code to} (YYYY-MM, inclusive), as of
      * {@code date} (the owner's local day, YYYY-MM-DD; today when omitted). {@code to} defaults to the
      * month of {@code date} and {@code from} to {@code to}. A range that ends after the month of
@@ -31,7 +39,9 @@ public class AnalyticsController {
     public ResponseEntity<AnalyticsResponse> analytics(@RequestParam(required = false) String from,
                                                        @RequestParam(required = false) String to,
                                                        @RequestParam(required = false) String date) {
-        return ResponseEntity.ok(service.analytics(parseMonth("from", from), parseMonth("to", to), parseDate(date)));
+        LocalDate day = parseDate(date);
+        if (levelService != null) levelService.refreshQuietly(day);
+        return ResponseEntity.ok(service.analytics(parseMonth("from", from), parseMonth("to", to), day));
     }
 
     static LocalDate parseDate(String date) {

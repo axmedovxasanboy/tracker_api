@@ -20,6 +20,8 @@ import java.time.format.DateTimeParseException;
 public class ProfileController {
 
     private final ProfileService service;
+    /** A start or an end of Level 5 due today is recorded before the profile is read (LevelService). */
+    private final uz.tracker.trackerproject.service.LevelService levelService;
 
     /**
      * The profile for {@code date}'s month (the owner's local day, YYYY-MM-DD; today when omitted):
@@ -28,8 +30,9 @@ public class ProfileController {
     @GetMapping
     public ResponseEntity<ProfileResponse> profile(@RequestParam(required = false) String date,
                                                    Authentication authentication) {
-        return ResponseEntity.ok(service.profile(parseDate(date),
-                authentication == null ? null : authentication.getName()));
+        LocalDate day = parseDate(date);
+        levelService.refreshQuietly(day);
+        return ResponseEntity.ok(service.profile(day, authentication == null ? null : authentication.getName()));
     }
 
     private static LocalDate parseDate(String date) {

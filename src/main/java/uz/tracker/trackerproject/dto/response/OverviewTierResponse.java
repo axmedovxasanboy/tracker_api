@@ -11,21 +11,21 @@ import java.util.List;
  * Snapshot of the user's monthly financial tier. Every amount is UZS, the reporting currency —
  * nothing converts, and foreign cash pots never enter these figures.
  *
- * Level math (driven by leftMoney = income − mandatorySubscriptions, evaluated in UZS):
+ * Level math (driven by leftMoney = the month's income − mandatorySubscriptions, evaluated in UZS;
+ * LEVELS-ALLOCATION-SPEC, 2026-10-01):
  *   < 15M    → level 1
  *   < 30M    → level 2
  *   < 45M    → level 3
- *   < 60M    → level 4
- *   < 75M    → level 5
- *   < 90M    → level 6
- *   >= 90M   → null (above tier ceiling)
+ *   >= 45M   → level 4 (no upper limit)
+ *   level 5  → while a recorded Level 5 period covers the month (earned by pay, not by leftMoney)
  *
  * Sub-level (every level):
  *   X.1 → debtPayments == 0
  *   X.2 → 0 < debtPayments/income <= 0.70
  *   X.3 → debtPayments/income > 0.70
  *
- * Level 1's percentages are built in; Levels 2–6 read the rule configured for the sub-level.
+ * Every level picks one of seven situations the way Level 1 always did, and reads its percentages
+ * from that level's rules version in force for the month.
  */
 @Getter @Builder
 public class OverviewTierResponse {
@@ -86,7 +86,7 @@ public class OverviewTierResponse {
     /** "1.1" | "1.2" | "1.3" — null when level is not 1 (yet). */
     private String subLevel;
 
-    /** Human-readable badge label e.g. "Level 1.2" or "Above tier 6". */
+    /** Human-readable badge label e.g. "Level 1.2". */
     private String levelLabel;
 
     /** True when the user hasn't configured Settings.monthlyStableIncome. */

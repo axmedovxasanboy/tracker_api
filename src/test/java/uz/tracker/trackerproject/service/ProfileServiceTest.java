@@ -203,7 +203,11 @@ class ProfileServiceTest {
                 .containsExactly("DONATION", "EMERGENCY", "INVESTMENTS");   // no goal money: no GOALS line
     }
 
-    /** 25M left after bills is Level 2; with no debt its sub-level is 2.1 and the owner's rule for it applies. */
+    /**
+     * 25M left after bills is Level 2; with no debt it is in the "no loans" situation, and the owner's
+     * old rule for 2.1 became Level 2's first version for it (2026-10-01: every level has the seven
+     * situations, so the reason is the situation — "CUSTOM" is no longer sent).
+     */
     @Test
     void levelTwoUsesTheOwnersOwnRuleForItsSubLevel() {
         income("25000000");
@@ -214,7 +218,7 @@ class ProfileServiceTest {
         assertThat(p.getLevel()).isEqualTo(2);
         assertThat(p.getLevelFrom()).isEqualByComparingTo("15000000");
         assertThat(p.getNextLevelAt()).isEqualByComparingTo("30000000");
-        assertThat(p.getRule().getReason()).isEqualTo("CUSTOM");
+        assertThat(p.getRule().getReason()).isEqualTo("NO_DEBT");
         assertThat(p.getRule().getCutoff()).isNull();
         assertThat(p.getBuckets())
                 .extracting(Bucket::getBucket, b -> b.getPercent().toPlainString(),
@@ -229,7 +233,10 @@ class ProfileServiceTest {
         assertThat(p.getNextMonth()).isNull();
     }
 
-    /** A Level 2 sub-level nobody has set percentages for yet: named, and every bucket stays at 0. */
+    /**
+     * A Level 2 situation nobody set percentages for. Until 2026-10-01 it asked for nothing ("NO_RULE");
+     * now every level has every situation — Levels 2–5 start from Level 1's numbers (§6.2).
+     */
     @Test
     void aSubLevelWithoutAConfiguredRuleSaysSoAndAsksForNothing() {
         income("25000000");
@@ -237,38 +244,34 @@ class ProfileServiceTest {
         ProfileResponse p = service.profile(SEP_23, "owner");
 
         assertThat(p.getLevel()).isEqualTo(2);
-        assertThat(p.getRule().getReason()).isEqualTo("NO_RULE");
-        assertThat(p.getBuckets()).extracting(Bucket::getBucket)
-                .containsExactly("DONATION", "EMERGENCY", "INVESTMENTS");
-        assertThat(p.getBuckets()).allSatisfy(b -> {
-            assertThat(b.getPercent()).isEqualByComparingTo("0");
-            assertThat(b.getAmount()).isEqualByComparingTo("0");
-            assertThat(b.getNormalMonthAmount()).isEqualByComparingTo("0");
-        });
-        assertThat(p.getTotalAmount()).isEqualByComparingTo("0");
+        assertThat(p.getRule().getReason()).isEqualTo("NO_DEBT");
+        assertThat(p.getBuckets()).extracting(Bucket::getBucket, b -> b.getPercent().toPlainString())
+                .containsExactly(tuple("DONATION", "10"), tuple("EMERGENCY", "5"), tuple("INVESTMENTS", "15"));
+        assertThat(p.getTotalAmount()).isEqualByComparingTo("7500000");
     }
 
     /**
-     * 90M or more left after bills is above the top step: the engine gives no level and no
-     * guidance there, so neither does the profile. Level 6 still points at that ceiling.
+     * Since 2026-10-01 there is no ceiling and no Level 6: 45M or more left after bills is Level 4,
+     * however much — with its rules and no next band. (Only pay makes Level 5.)
      */
     @Test
     void aboveTheTopStepThereIsNoLevelAndLevelSixPointsAtIt() {
         income("100000000");
         ProfileResponse above = service.profile(SEP_23, "owner");
-        assertThat(above.isAboveCeiling()).isTrue();
-        assertThat(above.getLevel()).isNull();
-        assertThat(above.getLevelFrom()).isEqualByComparingTo("90000000");
+        assertThat(above.isAboveCeiling()).isFalse();
+        assertThat(above.getLevel()).isEqualTo(4);
+        assertThat(above.getBaseLevel()).isEqualTo(4);
+        assertThat(above.getLevelFrom()).isEqualByComparingTo("45000000");
         assertThat(above.getNextLevelAt()).isNull();
-        assertThat(above.getRule().getReason()).isEqualTo("NO_RULE");
-        assertThat(above.getTotalPercent()).isEqualByComparingTo("0");
+        assertThat(above.getRule().getReason()).isEqualTo("NO_DEBT");
+        assertThat(above.getTotalPercent()).isEqualByComparingTo("30");
 
         income("80000000");
-        ProfileResponse six = service.profile(SEP_23, "owner");
-        assertThat(six.isAboveCeiling()).isFalse();
-        assertThat(six.getLevel()).isEqualTo(6);
-        assertThat(six.getLevelFrom()).isEqualByComparingTo("75000000");
-        assertThat(six.getNextLevelAt()).isEqualByComparingTo("90000000");
+        ProfileResponse eighty = service.profile(SEP_23, "owner");
+        assertThat(eighty.isAboveCeiling()).isFalse();
+        assertThat(eighty.getLevel()).isEqualTo(4);
+        assertThat(eighty.getLevelFrom()).isEqualByComparingTo("45000000");
+        assertThat(eighty.getNextLevelAt()).isNull();
     }
 
     /**

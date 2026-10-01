@@ -50,6 +50,14 @@ public class TransactionService {
     @PersistenceContext
     private EntityManager entityManager;
 
+    /**
+     * The Emergency tab's rows, to move one with the transaction it mirrors. Field-injected like the
+     * EntityManager above, so the constructor every caller uses stays as it is; absent (null) where a
+     * service is built by hand, which then has no such rows to move.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private EmergencyRepository emergencyRepository;
+
     private static final Set<String> ALLOWED_SORT_FIELDS = Set.of(
             "transactionDate", "amount", "createdAt", "description");
 
@@ -97,6 +105,8 @@ public class TransactionService {
         Transaction transaction = buildTransaction(new Transaction(), request);
         Transaction saved = transactionRepository.save(transaction);
         autoCreateFinanceRecord(request, saved.getId());
+        // A payment that names its loan pays it, exactly as Pay on the loan does.
+        financeService.moveLoanEffect(FinanceService.LoanEffect.NONE, FinanceService.LoanEffect.of(saved));
         return TransactionResponse.from(saved);
     }
 
@@ -117,13 +127,52 @@ public class TransactionService {
         TransactionSubType previousSubType = existing.getSubType();
         Long previousInvestmentId = existing.getInvestmentId();
         Long previousLoanGivenId = existing.getLoanGivenId();
+        LocalDate previousDate = existing.getTransactionDate();
+        // What the row did to a loan before the edit — the edit moves it (amount, type, the loan named).
+        FinanceService.LoanEffect previousEffect = FinanceService.LoanEffect.of(existing);
 
         Transaction transaction = buildTransaction(existing, request);
         Transaction saved = transactionRepository.save(transaction);
 
         syncFinanceRecordOnUpdate(saved, previousAmount, previousSubType, previousInvestmentId,
                 previousLoanGivenId, request);
+        financeService.moveLoanEffect(previousEffect, FinanceService.LoanEffect.of(saved));
+        // A bill payment moved to another day: the bill's next due date follows the payments.
+        if (saved.getMonthlyPaymentId() != null && !java.util.Objects.equals(previousDate, saved.getTransactionDate())) {
+            financeService.refreshNextDue(saved.getMonthlyPaymentId(), previousDate, null);
+        }
+        syncTransferPartner(saved, previousAmount, previousDate);
         return TransactionResponse.from(saved);
+    }
+
+    /**
+     * One half of a move between the owner's own wallets edited: the other half takes the same amount
+     * and day, so the move stays a move — editing one half used to create or destroy money (the two
+     * wallets no longer agreed). Its month must be open, and when it is the half that takes money out
+     * and the amount grew, its wallet must hold the difference.
+     */
+    private void syncTransferPartner(Transaction edited, BigDecimal previousAmount, LocalDate previousDate) {
+        if (edited.getTransferPairId() == null) return;
+        boolean amountChanged = previousAmount == null || previousAmount.compareTo(edited.getAmount()) != 0;
+        boolean dateChanged = !java.util.Objects.equals(previousDate, edited.getTransactionDate());
+        if (!amountChanged && !dateChanged) return;
+        Transaction partner = transactionRepository
+                .findFirstByTransferPairIdAndIdNot(edited.getTransferPairId(), edited.getId()).orElse(null);
+        if (partner == null) return;
+        monthCloseService.assertMonthOpen(partner.getTransactionDate());
+        monthCloseService.assertMonthOpen(edited.getTransactionDate());
+        BigDecimal more = edited.getAmount().subtract(nullToZero(partner.getAmount()));
+        if (partner.getType() == TransactionType.EXPENSE && more.signum() > 0) {
+            if (partner.getCard() != null) {
+                checkCardBalance(partner.getCard().getId(), more, TransactionType.EXPENSE, null);
+            } else {
+                checkCashBalance(partner.getCurrency(), more);
+            }
+        }
+        partner.setAmount(edited.getAmount());
+        partner.setTransactionDate(edited.getTransactionDate());
+        if (partner.getCard() == null) partner.setCashAmount(edited.getAmount());
+        transactionRepository.save(partner);
     }
 
     @Transactional
@@ -132,6 +181,11 @@ public class TransactionService {
                 .orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
         monthCloseService.assertMonthOpen(tx.getTransactionDate());
         reverseFinanceRecordOnDelete(tx);
+        // A payment deleted gives the loan its money back: paid / received and status as before it.
+        financeService.moveLoanEffect(FinanceService.LoanEffect.of(tx), FinanceService.LoanEffect.NONE);
+        if (tx.getMonthlyPaymentId() != null) {
+            financeService.refreshNextDue(tx.getMonthlyPaymentId(), tx.getTransactionDate(), tx.getId());
+        }
 
         // If this is half of a transfer pair, also delete the other half.
         if (tx.getTransferPairId() != null) {
@@ -492,6 +546,10 @@ public class TransactionService {
             case LOAN_RECEIVED -> loanTakenRepository.findByOriginatingTransactionId(tx.getId())
                     .ifPresent(l -> {
                         l.setTotalAmount(req.getAmount());
+                        // A new total moves where what was paid leaves the loan (paid off, or not any more).
+                        if (nullToZero(l.getPaidAmount()).signum() > 0 || l.getStatus() == RecordStatus.PAID) {
+                            l.setStatus(FinanceService.repaymentStatus(nullToZero(l.getPaidAmount()), l.getTotalAmount()));
+                        }
                         l.setCurrency(req.getCurrency());
                         l.setBorrowedDate(req.getTransactionDate());
                         if (req.getPaymentStartDate() != null) l.setPaymentStartDate(req.getPaymentStartDate());
@@ -513,6 +571,9 @@ public class TransactionService {
                 loanGivenRepository.findByOriginatingTransactionId(tx.getId())
                     .ifPresent(l -> {
                         l.setTotalAmount(req.getAmount());
+                        if (nullToZero(l.getReceivedAmount()).signum() > 0 || l.getStatus() == RecordStatus.PAID) {
+                            l.setStatus(FinanceService.repaymentStatus(nullToZero(l.getReceivedAmount()), l.getTotalAmount()));
+                        }
                         l.setCurrency(req.getCurrency());
                         l.setLentDate(req.getTransactionDate());
                         l.setDescription(req.getDescription());
@@ -553,6 +614,15 @@ public class TransactionService {
                     if (diff.signum() > 0) financeService.addFundsToInvestment(req.getInvestmentId(), diff);
                     else if (diff.signum() < 0) financeService.removeFundsFromInvestment(req.getInvestmentId(), diff.abs());
                 } else {
+                    // An Emergency-tab contribution edited from History: its tab row follows.
+                    if (req.getSubType() == TransactionSubType.EMERGENCY_CONTRIBUTION) {
+                        emergencyCompanion(tx).ifPresent(e -> {
+                            e.setAmount(req.getAmount());
+                            e.setCurrency(req.getCurrency());
+                            e.setDate(req.getTransactionDate());
+                            emergencyRepository.save(e);
+                        });
+                    }
                     investmentRepository.findByOriginatingTransactionId(tx.getId())
                             .ifPresent(i -> {
                                 i.setInvestedAmount(req.getAmount());
@@ -577,12 +647,25 @@ public class TransactionService {
                                     Long investmentId, Long loanGivenId) {
         if (subType == null) return;
         switch (subType) {
+            // The row the loan came from takes the loan with it — the same rule as deleting the loan:
+            // refused while payments for it are in History.
             case LOAN_RECEIVED -> loanTakenRepository.findByOriginatingTransactionId(tx.getId())
-                    .ifPresent(loanTakenRepository::delete);
+                    .ifPresent(l -> {
+                        int paid = sizeOf(transactionRepository.findByRepaidLoanTakenIdOrderByTransactionDateDesc(l.getId()));
+                        if (paid > 0) throw new IllegalArgumentException(FinanceService.paymentsBlockDelete("loan", paid, "payment"));
+                        loanTakenRepository.delete(l);
+                    });
             // Same shape as INVESTMENT below: a tx that ORIGINATED the loan deletes the
             // record; a top-up tx just backs its amount out of the borrower's total.
             case LOAN_GIVEN -> loanGivenRepository.findByOriginatingTransactionId(tx.getId())
-                    .ifPresentOrElse(loanGivenRepository::delete,
+                    .ifPresentOrElse(l -> {
+                                int back = sizeOf(transactionRepository.findByRepaidLoanGivenIdOrderByTransactionDateDesc(l.getId()));
+                                if (back > 0) {
+                                    throw new IllegalArgumentException(
+                                            FinanceService.paymentsBlockDelete("loan", back, "payment back to you"));
+                                }
+                                loanGivenRepository.delete(l);
+                            },
                             () -> {
                                 if (loanGivenId != null) {
                                     financeService.removeFromLoanGiven(loanGivenId, amount);
@@ -608,6 +691,10 @@ public class TransactionService {
                         () -> {
                             if (investmentId != null) {
                                 financeService.removeFundsFromInvestment(investmentId, amount);
+                            } else if (subType == TransactionSubType.EMERGENCY_CONTRIBUTION) {
+                                // The Emergency tab's row for this money goes with it: left behind,
+                                // it kept counting in the fund on Savings and in Analytics.
+                                emergencyCompanion(tx).ifPresent(e -> emergencyRepository.delete(e));
                             }
                         });
             }
@@ -666,6 +753,7 @@ public class TransactionService {
         }
         t.setInvestmentId(req.getInvestmentId());
         t.setLoanGivenId(req.getLoanGivenId());
+        applyRepaymentLinks(t, req);
         // The allocation bucket this payment funds is recorded HERE, once, rather than re-derived
         // on every read from the target holding's savingsGoal flag: that flag outlives the month
         // the money moved in, so flipping it used to re-bucket months that were already closed
@@ -696,6 +784,46 @@ public class TransactionService {
             t.setCard(null);
         }
         return t;
+    }
+
+    /**
+     * The loan a payment pays. Sent keys set the link (null removes it); left out, the stored link
+     * stays — the bot's edits never send them. A repayment names a borrowed loan or a debt, never
+     * both (naming one moves it off the other); money back names a loan given. A row that is not
+     * that kind of payment — or is no longer, after an edit — names none, so it is no longer a
+     * payment of that loan anywhere (its list, its paid figure, the delete rule).
+     */
+    private static void applyRepaymentLinks(Transaction t, TransactionRequest req) {
+        if (req.repaidLoanTakenIdGiven() && req.repaidDebtIdGiven()
+                && req.getRepaidLoanTakenId() != null && req.getRepaidDebtId() != null) {
+            throw new IllegalArgumentException("A payment pays one loan or one debt, not both.");
+        }
+        if (req.repaidLoanTakenIdGiven()) {
+            t.setRepaidLoanTakenId(req.getRepaidLoanTakenId());
+            if (req.getRepaidLoanTakenId() != null) t.setRepaidDebtId(null);
+        }
+        if (req.repaidDebtIdGiven()) {
+            t.setRepaidDebtId(req.getRepaidDebtId());
+            if (req.getRepaidDebtId() != null) t.setRepaidLoanTakenId(null);
+        }
+        if (req.repaidLoanGivenIdGiven()) t.setRepaidLoanGivenId(req.getRepaidLoanGivenId());
+        if (!(t.getType() == TransactionType.EXPENSE && t.getSubType() == TransactionSubType.LOAN_REPAYMENT)) {
+            t.setRepaidLoanTakenId(null);
+            t.setRepaidDebtId(null);
+        }
+        if (!(t.getType() == TransactionType.INCOME && t.getSubType() == TransactionSubType.LOAN_RETURNED_TO_ME)) {
+            t.setRepaidLoanGivenId(null);
+        }
+    }
+
+    /** The Emergency-tab row mirroring this transaction, when there is one. */
+    private java.util.Optional<uz.tracker.trackerproject.entity.Emergency> emergencyCompanion(Transaction tx) {
+        if (emergencyRepository == null || tx.getId() == null) return java.util.Optional.empty();
+        return emergencyRepository.findByOriginatingTransactionId(tx.getId());
+    }
+
+    private static int sizeOf(List<?> rows) {
+        return rows == null ? 0 : rows.size();
     }
 
     /**

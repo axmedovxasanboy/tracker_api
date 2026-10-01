@@ -481,6 +481,7 @@ class AdvisorOwnerSeptemberTest {
         org.skyscreamer.jsonassert.JSONAssert.assertEquals("""
                 {"username":"owner","month":"2026-09","missingStableIncome":false,
                  "level":1,"aboveCeiling":false,"levelFrom":0,"nextLevelAt":15000000,
+                 "baseLevel":1,"level5Since":null,"road":null,"ruleFrom":"2026-09",
                  "stableIncome":7000000,"monthlyBills":5300000,"leftAfterBills":1700000,
                  "loanPayments":400000,"leftForSavings":1300000,"bonusThisMonth":16380000,"savingsBase":23380000,
                  "baseParts":{"salaryReceived":7889000,"stableIncome":7000000,"usesStableIncome":true,
@@ -572,5 +573,53 @@ class AdvisorOwnerSeptemberTest {
                 .containsExactly(tuple("BANK", 5L, "Kapitalbank · Talim kredit"));
         assertThat(owe.getToRepayFast()).isEqualByComparingTo("0");                // the Uzum loans are paid off
         assertThat(owe.getOwedToYou()).isEqualByComparingTo("0");
+    }
+
+    /**
+     * {@code GET /api/v1/levels} on the owner's 23 September (LEVELS-ALLOCATION-SPEC §3.1): Level 1
+     * (7,000,000 − 5,300,000 of bills = 1,700,000), the bank loan leaves under 5,000,000 — "bank loan,
+     * under 5,000,000 left", 5 / 2 / 8 % — and every level's first version, seeded at the boot from
+     * the first month (the tracking start) with Level 1's numbers and its 5,000,000 line.
+     */
+    @Test
+    void theLevelsPage() {
+        java.util.List<uz.tracker.trackerproject.entity.LevelRuleVersion> stored = new java.util.ArrayList<>();
+        LevelRuleVersionRepository versions = mock(LevelRuleVersionRepository.class);
+        when(versions.findAllByOrderByLevelAscFromMonthAsc()).thenAnswer(i -> java.util.List.copyOf(stored));
+        when(versions.countByLevel(any())).thenAnswer(i -> stored.stream().filter(v -> v.getLevel().equals(i.getArgument(0))).count());
+        when(versions.save(any(uz.tracker.trackerproject.entity.LevelRuleVersion.class))).thenAnswer(i -> {
+            stored.add(i.getArgument(0));
+            return i.getArgument(0);
+        });
+        LevelChangeRepository changes = mock(LevelChangeRepository.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(overview, "levelRuleVersionRepository", versions);
+        org.springframework.test.util.ReflectionTestUtils.setField(overview, "levelChangeRepository", changes);
+        LevelService levels = new LevelService(overview, versions, changes, new LevelChangeRecorder(overview, changes));
+        assertThat(levels.seedVersions()).isEqualTo(5);
+
+        uz.tracker.trackerproject.dto.response.LevelsResponse r = levels.levels(TODAY);
+
+        assertThat(r.getMonth()).isEqualTo("2026-09");
+        assertThat(r.getLevel()).isEqualTo(1);
+        assertThat(r.getBaseLevel()).isEqualTo(1);
+        assertThat(r.getLeftAfterBills()).isEqualByComparingTo("1700000");
+        assertThat(r.getSituation()).isEqualTo("BANK_LOAN_TIGHT");
+        assertThat(r.getPercents()).extracting(p -> p.getDonation().toPlainString(), p -> p.getEmergency().toPlainString(),
+                p -> p.getInvestments().toPlainString()).containsExactly("5", "2", "8");
+        assertThat(r.getLevel5Since()).isNull();
+        assertThat(r.getRoad()).isNull();
+        assertThat(r.getFirstMonth()).isEqualTo("2026-09");
+        assertThat(r.getLevels()).extracting(l -> l.getLevel(), l -> l.getInForce(), l -> l.getVersions().size(),
+                        l -> l.getVersions().getFirst().getCutoff().toPlainString())
+                .containsExactly(tuple(1, "2026-09", 1, "5000000"), tuple(2, "2026-09", 1, "5000000"),
+                        tuple(3, "2026-09", 1, "5000000"), tuple(4, "2026-09", 1, "5000000"), tuple(5, "2026-09", 1, "5000000"));
+        assertThat(r.getLevels().getFirst().getVersions().getFirst().getRules())
+                .extractingByKey("BANK_LOAN_TIGHT")
+                .extracting(p -> p.getDonation().toPlainString() + "/" + p.getEmergency().toPlainString() + "/"
+                        + p.getInvestments().toPlainString())
+                .isEqualTo("5/2/8");
+        // And the Plan reads the same as before the store existed: the September of every other test here.
+        assertThat(overview.getTierIgnoringSubscriptions(java.time.YearMonth.of(2026, 9), Currency.UZS, TODAY)
+                .getAllocation().getScenarioKey()).isEqualTo("1.2.1.tight");
     }
 }

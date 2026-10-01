@@ -11,4 +11,6 @@ import java.util.List;
 public interface EmergencyRepository extends JpaRepository<Emergency, Long> {
     List<Emergency> findAllByOrderByDateDesc();
     List<Emergency> findByDateBetweenOrderByDateDesc(LocalDate start, LocalDate end);
+    /** The Emergency-tab row that mirrors this transaction, if one does. */
+    java.util.Optional<Emergency> findByOriginatingTransactionId(Long transactionId);
 }

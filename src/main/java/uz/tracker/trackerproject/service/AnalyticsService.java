@@ -305,8 +305,8 @@ public class AnalyticsService {
                 .build();
 
         List<Investment> holdings = uzsHoldings();
-        Settings settings = settingsService.getOrCreate();
-        BigDecimal stable = settings == null ? null : settings.getMonthlyStableIncome();
+        // The monthly income of the range's last month (STABLE-INCOME-HISTORY).
+        BigDecimal stable = overviewService.stableIncomeFor(to);
 
         Position position = to.equals(current) ? position(date, holdings) : null;
         if (position != null) remember(position);

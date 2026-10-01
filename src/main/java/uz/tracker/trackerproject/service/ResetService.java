@@ -42,7 +42,8 @@ public class ResetService {
                     "donations, investments, emergencies, bank_loans, categories, cards, " +
                     "cash_balances, level_configs, level_allocation_rules, " +
                     "month_close_wallets, month_closes, wallet_check_in_lines, wallet_check_ins, " +
-                    "mark_paids, counterparties, position_snapshots, settings, app_users " +
+                    "mark_paids, counterparties, position_snapshots, stable_income_entries, level_rule_situations, " +
+                    "level_rule_versions, level_changes, settings, app_users " +
                     "RESTART IDENTITY CASCADE";
 
     @Transactional

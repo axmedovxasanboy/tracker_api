@@ -41,6 +41,7 @@ import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Function;
 
 /**
  * "How much can I spend a day without running short, counting my next salaries, bills, loan
@@ -193,23 +194,27 @@ public class DailyAdviceService {
         YearMonth current = YearMonth.from(today);
         BigDecimal have = nz(in.have());
         List<Transaction> later = laterThisMonth(today);
+        // Each month on its own income (STABLE-INCOME-HISTORY): this month's is the one handed in,
+        // a later month's is what is recorded for it — a raise from November is November's.
+        StableIncomeSchedule schedule = overviewService.incomeSchedule();
+        Function<YearMonth, BigDecimal> income = m -> incomeOf(schedule, m, current, stable);
 
         // ── 1–2. Income and the horizon ──
         List<Transaction> salaryThisMonth = salaryRows(current);
-        SalaryPattern pattern = salaryPattern(current, stable, salaryThisMonth);
+        SalaryPattern pattern = salaryPattern(current, income, salaryThisMonth);
         LocalDate until = pattern == null ? current.plusMonths(1).atEndOfMonth() : horizonEnd(pattern.mainDay(), today);
         Map<YearMonth, List<Transaction>> salaryAround = Map.of(
                 current.minusMonths(1), salaryRows(current.minusMonths(1)),
                 current, salaryThisMonth,
                 current.plusMonths(1), salaryRows(current.plusMonths(1)));
-        Salary salary = projectSalary(pattern, today, until, stable, nz(in.salaryComing()), salaryAround);
+        Salary salary = projectSalary(pattern, today, until, income, nz(in.salaryComing()), salaryAround);
         List<IncomePart> incomes = salary.incomes();
 
         // ── 3. Must-pays: through the end of the horizon's month, and at least a listing's worth ──
         LocalDate listTo = today.plusDays(UPCOMING_DAYS);
         LocalDate computeTo = YearMonth.from(until).atEndOfMonth();
         if (listTo.isAfter(computeTo)) computeTo = listTo;
-        List<Upcoming> due = obligations(today, computeTo, later, pattern, stable);
+        List<Upcoming> due = obligations(today, computeTo, later, pattern, income);
 
         // ── 4. Savings, set aside out of the salary that funds them ──
         // Kept in two parts, so the answer can say which one a too-high pace runs into: what the
@@ -239,7 +244,7 @@ public class DailyAdviceService {
         // A later month's set-asides: that month's own rule (a repayment plan starting can change
         // it) applied to the stable income — the allocation base of a month without a bonus.
         for (int i = 0; i < laterMonths.size(); i++) {
-            BigDecimal estimate = ruleSetAside(laterMonths.get(i), today, stable);
+            BigDecimal estimate = ruleSetAside(laterMonths.get(i), today, income.apply(laterMonths.get(i)));
             if (estimate.signum() > 0) setAside.merge(laterPaydays.get(i), estimate, BigDecimal::add);
         }
         // Savings goals' monthly payments, on the same days: what this month still owes (less what
@@ -398,7 +403,25 @@ public class DailyAdviceService {
      * salary paid on 3 October slot 203. Slots sort in the order a month's parts arrive. Package-private
      * for tests.
      */
-    record SalaryPattern(NavigableMap<Integer, BigDecimal> parts) {
+    record SalaryPattern(NavigableMap<Integer, BigDecimal> parts, BigDecimal base) {
+        /** A shape with no income it was read against: projected as it is in every month. */
+        SalaryPattern(NavigableMap<Integer, BigDecimal> parts) {
+            this(parts, null);
+        }
+
+        /**
+         * The parts as a month with {@code monthIncome} receives them: as read when that is the income
+         * the shape was read against ({@link #base}); else the same shape scaled to it, each part
+         * rounded down to 1,000 — a raise recorded for a month raises its salary, a cut lowers it.
+         */
+        NavigableMap<Integer, BigDecimal> partsFor(BigDecimal monthIncome) {
+            if (base == null || base.signum() <= 0 || monthIncome == null || monthIncome.compareTo(base) == 0) return parts;
+            NavigableMap<Integer, BigDecimal> scaled = new TreeMap<>();
+            parts.forEach((slot, amount) -> scaled.put(slot, amount.multiply(monthIncome)
+                    .divide(base, 0, RoundingMode.DOWN).divide(THOUSAND, 0, RoundingMode.DOWN).multiply(THOUSAND)));
+            return scaled;
+        }
+
         BigDecimal total() {
             return parts.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
         }
@@ -441,13 +464,15 @@ public class DailyAdviceService {
      * with its first part, and taking its shape then would drop every later part from the months
      * projected after it. Null: the fallback.
      */
-    private SalaryPattern salaryPattern(YearMonth current, BigDecimal stable, List<Transaction> thisMonth) {
+    private SalaryPattern salaryPattern(YearMonth current, Function<YearMonth, BigDecimal> income,
+                                        List<Transaction> thisMonth) {
         for (int back = 1; back <= SALARY_LOOKBACK_MONTHS; back++) {
             YearMonth month = current.minusMonths(back);
-            SalaryPattern pattern = patternOf(salaryRows(month), month, stable);
+            // Read against that month's own income: half of it is "the salary arrived".
+            SalaryPattern pattern = patternOf(salaryRows(month), month, income.apply(month));
             if (pattern != null) return pattern;
         }
-        return patternOf(thisMonth, current, stable);
+        return patternOf(thisMonth, current, income.apply(current));
     }
 
     /** {@code month}'s salary as parts by slot, or null when it is not "the salary arrived". */
@@ -460,7 +485,7 @@ public class DailyAdviceService {
             if (t.getAmount().compareTo(partFloor) < 0) continue;
             parts.merge(slot(month, t.getTransactionDate()), t.getAmount(), BigDecimal::add);
         }
-        return parts.isEmpty() ? null : new SalaryPattern(capAt(parts, stable));
+        return parts.isEmpty() ? null : new SalaryPattern(capAt(parts, stable), stable);
     }
 
     /**
@@ -546,8 +571,9 @@ public class DailyAdviceService {
      *
      * @param salaryAround last, this and next month's salary rows, by salary month
      */
-    private static Salary projectSalary(SalaryPattern pattern, LocalDate today, LocalDate until, BigDecimal stable,
-                                 BigDecimal salaryComing, Map<YearMonth, List<Transaction>> salaryAround) {
+    private static Salary projectSalary(SalaryPattern pattern, LocalDate today, LocalDate until,
+                                        Function<YearMonth, BigDecimal> income, BigDecimal salaryComing,
+                                        Map<YearMonth, List<Transaction>> salaryAround) {
         YearMonth current = YearMonth.from(today);
         NavigableMap<LocalDate, BigDecimal> byDay = new TreeMap<>();
         LocalDate mainPartOn = null;
@@ -562,8 +588,9 @@ public class DailyAdviceService {
                  month = month.plusMonths(1)) {
                 List<Transaction> rows = salaryAround.getOrDefault(month, List.of());
                 BigDecimal arrived = rows.stream().map(Transaction::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
-                BigDecimal cap = month.equals(current) ? salaryComing : clampZero(stable.subtract(arrived));
-                for (Map.Entry<Integer, BigDecimal> part : pattern.parts().entrySet()) {
+                // Never more than the month's own income says (this month: what is still to come).
+                BigDecimal cap = month.equals(current) ? salaryComing : clampZero(income.apply(month).subtract(arrived));
+                for (Map.Entry<Integer, BigDecimal> part : pattern.partsFor(income.apply(month)).entrySet()) {
                     BigDecimal covered = arrived.min(part.getValue());
                     arrived = arrived.subtract(covered);
                     LocalDate on = arrival(month, part.getKey());
@@ -580,7 +607,7 @@ public class DailyAdviceService {
                 mainPartOn = current.atEndOfMonth();
             }
             for (YearMonth ym = current.plusMonths(1); !ym.atDay(1).isAfter(until); ym = ym.plusMonths(1)) {
-                byDay.merge(ym.atDay(1), stable, BigDecimal::add);
+                byDay.merge(ym.atDay(1), income.apply(ym), BigDecimal::add);
             }
         }
         List<IncomePart> out = new ArrayList<>();
@@ -596,13 +623,13 @@ public class DailyAdviceService {
 
     /** Every must-pay from today to {@code to}, date ascending. */
     private List<Upcoming> obligations(LocalDate today, LocalDate to, List<Transaction> later,
-                                       SalaryPattern pattern, BigDecimal stable) {
+                                       SalaryPattern pattern, Function<YearMonth, BigDecimal> income) {
         List<Upcoming> items = new ArrayList<>();
         // Paid by today: a payment dated later this month is still in the wallets.
         OverviewService.MonthPaid paid = overviewService.computeMonthPaid(YearMonth.from(today), Currency.UZS, today);
         bills(today, to, later, items);
         bankLoans(today, to, paid == null ? BigDecimal.ZERO : nz(paid.bankInstallments()), later, items);
-        loansAndDebts(today, to, paid, later, pattern, stable, items);
+        loansAndDebts(today, to, paid, later, pattern, income, items);
         items.sort(Comparator.comparing(Upcoming::getDate)
                 .thenComparing(Upcoming::getAmount, Comparator.reverseOrder())
                 .thenComparing(Upcoming::getKind)
@@ -743,8 +770,8 @@ public class DailyAdviceService {
      * debt (one naming neither goes to the first ASAP ask still owing).
      */
     private void loansAndDebts(LocalDate today, LocalDate to, OverviewService.MonthPaid paid,
-                               List<Transaction> later, SalaryPattern pattern, BigDecimal stable,
-                               List<Upcoming> out) {
+                               List<Transaction> later, SalaryPattern pattern,
+                               Function<YearMonth, BigDecimal> income, List<Upcoming> out) {
         YearMonth current = YearMonth.from(today);
         List<OverviewService.DebtAsk> owed = new ArrayList<>(overviewService.debtAsks(current, today));
         owed.sort(Comparator.comparing(OverviewService.DebtAsk::asap)
@@ -801,7 +828,7 @@ public class DailyAdviceService {
                 BigDecimal ask;
                 if (o.asap()) {
                     if (!OverviewService.borrowedBy(o.borrowedDate(), ym)) continue;
-                    ask = OverviewService.asapAsk(remaining, stable);
+                    ask = OverviewService.asapAsk(remaining, income.apply(ym));   // that month's 70% line
                 } else {
                     if (!OverviewService.hasStartedBy(o.paymentStartDate(), ym)) continue;
                     ask = nz(o.plan()).min(remaining);
@@ -972,6 +999,17 @@ public class DailyAdviceService {
         if (c == null) return false;
         return Boolean.TRUE.equals(c.getBonusIncome())
                 || (c.getParent() != null && Boolean.TRUE.equals(c.getParent().getBonusIncome()));
+    }
+
+    /**
+     * {@code month}'s monthly income for the walk: this month's is the one the advisor handed in; a
+     * later (or earlier) month's is what is recorded for it, falling back to this month's when nothing
+     * is (a service built by hand, or no positive value).
+     */
+    static BigDecimal incomeOf(StableIncomeSchedule schedule, YearMonth month, YearMonth current, BigDecimal stable) {
+        if (schedule == null || month.equals(current)) return stable;
+        BigDecimal v = schedule.amountFor(month);
+        return v != null && v.signum() > 0 ? v : stable;
     }
 
     /** UZS is the only reporting currency; a legacy row with no currency is taken as UZS. */
