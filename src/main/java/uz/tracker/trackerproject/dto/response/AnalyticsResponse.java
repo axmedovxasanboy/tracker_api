@@ -11,9 +11,11 @@ import java.util.List;
 /**
  * Everything the web's Analytics page shows, for a range of months: where the money came from,
  * where it went, what was saved, and what the owner owns and owes. Read-only; the browser does no
- * classification. Rows count by their transaction date (never by salaryMonth), UZS only, dated on
- * or before {@link #date}, transfers between own wallets left out — see AnalyticsService for the
- * class each row falls into. Months are 'YYYY-MM'.
+ * classification. Rows count in the month of their transaction date — income marked as another
+ * month's salary in that month (salaryMonth: income counts in the month it is for) — UZS only, dated
+ * on or before {@link #date}, transfers between own wallets left out — see AnalyticsService for the
+ * month and the class each row falls into. {@code walletChange} alone keeps every row on its date:
+ * what the wallets did. Months are 'YYYY-MM'.
  */
 @Getter @Builder
 public class AnalyticsResponse {
@@ -23,18 +25,24 @@ public class AnalyticsResponse {
     private LocalDate date;
     private String from;
     private String to;
-    /** Earliest month with any counted row; null when there is none. */
+    /**
+     * Earliest month with any counted row — counted in it, or (a salary marked as another month's)
+     * reaching the wallets in it; null when there is none.
+     */
     private String firstMonth;
     /** Months from firstMonth to the month of {@link #date} with at least one counted row. */
     private int monthsWithData;
     /** Settings' monthly income; null when unset. */
     private BigDecimal stableIncome;
-    /** Rows dated inside the range but after {@link #date}: not counted anywhere else. */
+    /** Rows counted inside the range (by their month, AnalyticsService.monthOf) but dated after {@link #date}: not counted anywhere else. */
     private int notYetCount;
 
     /** The whole range. */
     private Flow totals;
-    /** The same number of months immediately before {@link #from}; null when that range has no counted row. */
+    /**
+     * The same number of months immediately before {@link #from}; null when no counted row counts in
+     * that range or reaches the wallets in it.
+     */
     private Flow previous;
     /** One per month of the range, oldest first; months before firstMonth are left out. */
     private List<MonthFlow> months;
@@ -75,7 +83,17 @@ public class AnalyticsResponse {
         protected BigDecimal lent = BigDecimal.ZERO;
         protected BigDecimal returned = BigDecimal.ZERO;
         protected BigDecimal fromSavings = BigDecimal.ZERO;
-        /** leftOver + borrowed − lent + returned + fromSavings: the net change of all UZS wallets. */
+        /**
+         * Pay that reached the wallets in another month than the one it counts in (salaryMonth): +
+         * what arrived in the period for a month outside it, − what counts in the period but arrived
+         * outside it. Zero unless a salary or bonus crosses the period's edge — September's salary
+         * paid on 2 October is −7,170,000 in September and +7,170,000 in October.
+         */
+        protected BigDecimal payForOtherMonths = BigDecimal.ZERO;
+        /**
+         * leftOver + borrowed − lent + returned + fromSavings + payForOtherMonths: the net change of
+         * all UZS wallets in the period, every row on the day it happened.
+         */
         protected BigDecimal walletChange = BigDecimal.ZERO;
         /** Number of counted rows (transfers excluded). */
         protected int count;
@@ -133,6 +151,11 @@ public class AnalyticsResponse {
             fromSavings = fromSavings.add(amount);
         }
 
+        /** Pay crossing the period's edge: positive = arrived here for another month, negative = the reverse. */
+        public void addPayForOtherMonths(BigDecimal amount) {
+            payForOtherMonths = payForOtherMonths.add(amount);
+        }
+
         public void counted() {
             count++;
         }
@@ -156,6 +179,7 @@ public class AnalyticsResponse {
             lent = lent.add(o.lent);
             returned = returned.add(o.returned);
             fromSavings = fromSavings.add(o.fromSavings);
+            payForOtherMonths = payForOtherMonths.add(o.payForOtherMonths);
             count += o.count;
             settle();
         }
@@ -164,7 +188,7 @@ public class AnalyticsResponse {
         public void settle() {
             out = everyday.add(bills).add(loanPayments);
             leftOver = earned.subtract(out).subtract(saved);
-            walletChange = leftOver.add(borrowed).subtract(lent).add(returned).add(fromSavings);
+            walletChange = leftOver.add(borrowed).subtract(lent).add(returned).add(fromSavings).add(payForOtherMonths);
         }
     }
 

@@ -82,9 +82,12 @@ public class Transaction {
     /**
      * Which month's salary this is, when that is not the month it arrived in — September's salary
      * paid on 3 October. Stored as the 1st of that month (the setter moves any day there). Only
-     * regular INCOME carries it (TransactionService drops it elsewhere); the allocation engine reads
-     * it for salary-tree and bonus income only. Null: the month of {@link #transactionDate}.
-     * Wallets, History and pace always use the actual date.
+     * regular INCOME in the salary tree (the bonus included) carries it — TransactionService drops it
+     * elsewhere, also when an edit moves the row out of the tree. Null: the month of
+     * {@link #transactionDate}.
+     * Income counts in the month it is for (2026-10-02): Analytics' monthly figures and History's
+     * month list ({@code GET /transactions?accountingMonth=true}) read it too. Wallets, check-ins and
+     * pace — real money on the real day — always use the actual date.
      */
     @Column(name = "salary_month")
     private LocalDate salaryMonth;

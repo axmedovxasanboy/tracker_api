@@ -721,7 +721,11 @@ public class OverviewService {
      * recorded under the salary's root.
      */
     Set<Long> salaryTree() {
-        List<Category> all = categoryRepository.findAll();
+        return salaryTree(categoryRepository.findAll());
+    }
+
+    /** {@link #salaryTree()} over these categories (all of them). */
+    static Set<Long> salaryTree(List<Category> all) {
         if (all == null) return null;
         Set<Long> roots = new java.util.HashSet<>();
         for (Category c : all) {

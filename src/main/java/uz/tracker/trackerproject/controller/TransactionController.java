@@ -39,11 +39,14 @@ public class TransactionController {
             @RequestParam(defaultValue = "transactionDate") String sortBy,
             @RequestParam(defaultValue = "desc") String sortDir,
             @RequestParam(defaultValue = "false") boolean excludeTransfers,
-            @RequestParam(defaultValue = "false") boolean cashOnly
+            @RequestParam(defaultValue = "false") boolean cashOnly,
+            // History's month view: list a whole month's rows by the month they count in (a salary
+            // marked as another month's is that month's) — see TransactionService.getAll.
+            @RequestParam(defaultValue = "false") boolean accountingMonth
     ) {
         return ResponseEntity.ok(transactionService.getAll(
                 type, currency, categoryId, cardId, investmentId, startDate, endDate, search,
-                page, size, sortBy, sortDir, excludeTransfers, cashOnly
+                page, size, sortBy, sortDir, excludeTransfers, cashOnly, accountingMonth
         ));
     }
 

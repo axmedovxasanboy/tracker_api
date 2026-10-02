@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 import uz.tracker.trackerproject.dto.request.*;
 import uz.tracker.trackerproject.dto.response.*;
 import uz.tracker.trackerproject.entity.Card;
+import uz.tracker.trackerproject.entity.Category;
 import uz.tracker.trackerproject.entity.Investment;
 import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.enums.*;
@@ -63,13 +64,21 @@ public class TransactionService {
 
     // ── CRUD ──────────────────────────────────────────────────────────────────
 
+    /**
+     * One page of the list. {@code accountingMonth} (History's month view): when the range is one whole
+     * month — the 1st to that month's last day — the rows that count in that month are listed: income
+     * marked as another month's salary moves to that month (September's salary paid on 2 October is
+     * September's, not October's), every other row stays on its date. For any other range the flag is
+     * ignored and the range is by date, as without it. Wallet lists never send it: a wallet's rows are
+     * real money on the real day.
+     */
     @Transactional(readOnly = true)
     public PageResponse<TransactionResponse> getAll(
             TransactionType type, Currency currency, Long categoryId, Long cardId,
             Long investmentId,
             LocalDate startDate, LocalDate endDate, String search,
             int page, int size, String sortBy, String sortDir,
-            boolean excludeTransfers, boolean cashOnly
+            boolean excludeTransfers, boolean cashOnly, boolean accountingMonth
     ) {
         if (size <= 0) size = 20;
         if (size > maxPageSize) size = maxPageSize;
@@ -84,7 +93,8 @@ public class TransactionService {
         PageRequest pageable = PageRequest.of(page, size, sort);
         var spec = TransactionSpecification.withFilters(
                 type, currency, categoryId, cardId, investmentId,
-                startDate, endDate, search, excludeTransfers, cashOnly);
+                startDate, endDate, search, excludeTransfers, cashOnly,
+                accountingMonth ? TransactionSpecification.wholeMonth(startDate, endDate) : null);
         Page<Transaction> result = transactionRepository.findAll(spec, pageable);
         return PageResponse.from(result.map(TransactionResponse::from));
     }
@@ -741,16 +751,6 @@ public class TransactionService {
                 || (req.getSubType() != null && req.getSubType() != TransactionSubType.REGULAR_INCOME)) {
             t.setSalaryMonth(null);
         }
-        // Pay can come a month early or late — never further: the month before, of, or after the date.
-        if (t.getSalaryMonth() != null && req.getTransactionDate() != null) {
-            long apart = java.time.temporal.ChronoUnit.MONTHS.between(
-                    java.time.YearMonth.from(req.getTransactionDate()), java.time.YearMonth.from(t.getSalaryMonth()));
-            if (Math.abs(apart) > 1) {
-                throw new IllegalArgumentException("The salary month must be the month before, the month of, or the "
-                        + "month after the date (" + java.time.YearMonth.from(t.getSalaryMonth()) + " is "
-                        + Math.abs(apart) + " months from " + req.getTransactionDate() + ").");
-            }
-        }
         t.setInvestmentId(req.getInvestmentId());
         t.setLoanGivenId(req.getLoanGivenId());
         applyRepaymentLinks(t, req);
@@ -777,6 +777,22 @@ public class TransactionService {
         } else {
             t.setCategory(null);
         }
+        // Only the salary's income — the salary tree, the bonus in it — says which month it is for:
+        // income moved out of it (a web edit that changes the category sends no salaryMonth) loses the
+        // stored one, so Analytics, History and the profile count the row in the same month.
+        if (t.getSalaryMonth() != null && !paysASalary(t.getCategory())) {
+            t.setSalaryMonth(null);
+        }
+        // Pay can come a month early or late — never further: the month before, of, or after the date.
+        if (t.getSalaryMonth() != null && req.getTransactionDate() != null) {
+            long apart = java.time.temporal.ChronoUnit.MONTHS.between(
+                    java.time.YearMonth.from(req.getTransactionDate()), java.time.YearMonth.from(t.getSalaryMonth()));
+            if (Math.abs(apart) > 1) {
+                throw new IllegalArgumentException("The salary month must be the month before, the month of, or the "
+                        + "month after the date (" + java.time.YearMonth.from(t.getSalaryMonth()) + " is "
+                        + Math.abs(apart) + " months from " + req.getTransactionDate() + ").");
+            }
+        }
         if (req.getCardId() != null) {
             t.setCard(cardRepository.findById(req.getCardId())
                     .orElseThrow(() -> new ResourceNotFoundException("Card", req.getCardId())));
@@ -784,6 +800,15 @@ public class TransactionService {
             t.setCard(null);
         }
         return t;
+    }
+
+    /**
+     * Income in this category is the salary's — a bonus, or in the salary tree
+     * ({@link OverviewService#salaryTree()}); with no tree every category is, as the engine has it.
+     */
+    private boolean paysASalary(Category category) {
+        if (OverviewService.isBonusCategory(category)) return true;
+        return OverviewService.isSalaryCategory(category, OverviewService.salaryTree(categoryRepository.findAll()));
     }
 
     /**

@@ -156,14 +156,178 @@ class AnalyticsServiceTest {
                 tuple(null, "Uncategorized", "OTHER", n("60000")));
     }
 
-    /** Analytics counts by the day the money arrived, never by the month a salary is marked as being for. */
-    @Test
-    void class5_aSalaryMarkedForAnotherMonthStillCountsOnTheDayItArrived() {
-        Category salary = f.category(10, "Salary", null);
-        f.ledger.income(sep(3), "7000000", salary).setSalaryMonth(AUG.atDay(1));
+    // ── Income counts in the month it is for (salaryMonth, 2026-10-02) ───────────
 
-        assertThat(september().getTotals().getEarnedPay()).isEqualByComparingTo("7000000");
-        assertThat(f.analytics.analytics(AUG, AUG, TODAY).getTotals().getEarned()).isEqualByComparingTo("0");
+    /**
+     * August's salary paid on 3 September is August's earned, not September's — still earned pay (its
+     * class does not change), and the months, the income lines, the range before, firstMonth and
+     * monthsWithData all see it in August.
+     */
+    @Test
+    void class5_aSalaryMarkedForAnotherMonthCountsInThatMonth() {
+        Category salary = f.category(10, "Salary", null);
+        Transaction late = f.ledger.income(sep(3), "7000000", salary);
+        late.setSalaryMonth(AUG.atDay(1));
+        f.spend(sep(4), "100000", null, "Bozor");
+
+        assertThat(AnalyticsService.classify(late)).isEqualTo(FlowClass.EARNED);
+        assertThat(AnalyticsService.monthOf(late)).isEqualTo(AUG);
+
+        AnalyticsResponse september = september();
+        assertThat(september.getTotals().getEarned()).isEqualByComparingTo("0");
+        assertThat(september.getIncome()).isEmpty();
+        assertThat(september.getTotals().getCount()).isEqualTo(1);
+        // The wallets got it on 3 September: September's wallet change says so, August's does not.
+        assertThat(september.getTotals().getPayForOtherMonths()).isEqualByComparingTo("7000000");
+        assertThat(september.getTotals().getWalletChange()).isEqualByComparingTo("6900000");   // − 100,000 spent
+        assertThat(september.getPrevious().getEarnedPay()).isEqualByComparingTo("7000000");   // August
+        assertThat(september.getPrevious().getPayForOtherMonths()).isEqualByComparingTo("-7000000");
+        assertThat(september.getPrevious().getWalletChange()).isEqualByComparingTo("0");
+        assertThat(september.getFirstMonth()).isEqualTo("2026-08");
+        assertThat(september.getMonthsWithData()).isEqualTo(2);
+        assertThat(september.getEveryday().getDaily()).hasSize(20);                            // untouched
+
+        AnalyticsResponse august = f.analytics.analytics(AUG, AUG, TODAY);
+        assertThat(august.getTotals().getEarned()).isEqualByComparingTo("7000000");
+        assertThat(august.getTotals().getEarnedPay()).isEqualByComparingTo("7000000");
+        assertThat(august.getIncome()).extracting("categoryId", "kind", "amount")
+                .containsExactly(tuple(10L, "PAY", n("7000000")));
+        assertThat(august.getMonths()).extracting(MonthFlow::getMonth).containsExactly("2026-08");
+        assertThat(august.getEveryday().getDaily()).extracting(Day::getAmount)
+                .allSatisfy(a -> assertThat(a).isEqualByComparingTo("0"));                     // no day of it in August
+
+        AnalyticsResponse both = f.analytics.analytics(AUG, SEP, TODAY);
+        assertThat(both.getMonths()).extracting(MonthFlow::getMonth, m -> m.getEarned().intValueExact(),
+                        m -> m.getWalletChange().intValueExact())
+                .containsExactly(tuple("2026-08", 7_000_000, 0), tuple("2026-09", 0, 6_900_000));
+        assertThat(both.getTotals().getEarned()).isEqualByComparingTo("7000000");              // once
+        assertThat(both.getTotals().getPayForOtherMonths()).isEqualByComparingTo("0");         // inside the range
+        assertThat(both.getTotals().getWalletChange()).isEqualByComparingTo("6900000");
+        both.getMonths().forEach(AnalyticsServiceTest::assertIdentities);
+        assertIdentities(both.getTotals());
+        assertIdentities(september.getPrevious());
+    }
+
+    /** Only income moves: a salaryMonth on anything else (the write path drops it) is not read. */
+    @Test
+    void onlyIncomeMovesToItsSalaryMonth() {
+        Transaction spend = f.spend(sep(3), "100000", null, "Bozor");
+        spend.setSalaryMonth(AUG.atDay(1));
+        Transaction paid = f.ledger.income(sep(3), "100000", null);
+
+        assertThat(AnalyticsService.monthOf(spend)).isEqualTo(SEP);
+        assertThat(AnalyticsService.monthOf(paid)).isEqualTo(SEP);
+        assertThat(september().getTotals().getEveryday()).isEqualByComparingTo("100000");
+    }
+
+    /** November's salary paid on 30 October is November's: October never sees it. */
+    @Test
+    void nextMonthsSalaryPaidEarlyCountsInNextMonth() {
+        YearMonth oct = YearMonth.of(2026, 10);
+        YearMonth nov = YearMonth.of(2026, 11);
+        Category salary = f.category(10, "Salary", null);
+        f.ledger.income(oct.atDay(30), "7000000", salary).setSalaryMonth(nov.atDay(1));
+        f.spend(oct.atDay(30), "50000", null, "Bozor");
+
+        AnalyticsResponse october = f.analytics.analytics(oct, oct, oct.atDay(31));
+        assertThat(october.getTotals().getEarned()).isEqualByComparingTo("0");
+        assertThat(october.getIncome()).isEmpty();
+        assertThat(october.getTotals().getPayForOtherMonths()).isEqualByComparingTo("7000000");  // came on the 30th
+        assertThat(october.getTotals().getWalletChange()).isEqualByComparingTo("6950000");
+        assertThat(october.getNotYetCount()).isZero();
+        assertThat(october.getMonthsWithData()).isEqualTo(1);              // November has not begun
+        assertThat(october.getMonths()).extracting(MonthFlow::getMonth).containsExactly("2026-10");
+
+        AnalyticsResponse november = f.analytics.analytics(nov, nov, nov.atDay(5));
+        assertThat(november.getTotals().getEarned()).isEqualByComparingTo("7000000");
+        assertThat(november.getTotals().getEarnedPay()).isEqualByComparingTo("7000000");
+        assertThat(november.getMonthsWithData()).isEqualTo(2);
+        assertThat(november.getPrevious().getEarned()).isEqualByComparingTo("0");        // October
+        assertThat(november.getPrevious().getEveryday()).isEqualByComparingTo("50000");
+        assertThat(november.getPrevious().getWalletChange()).isEqualByComparingTo("6950000");
+        assertThat(november.getTotals().getPayForOtherMonths()).isEqualByComparingTo("-7000000");
+        assertThat(november.getTotals().getWalletChange()).isEqualByComparingTo("0");
+        assertThat(november.getEveryday().getDaily()).hasSize(5);
+    }
+
+    /**
+     * Being dated after the owner's day keeps a row out, salary or not: it is only in notYetCount —
+     * of the range it will count in once its day comes.
+     */
+    @Test
+    void aSalaryDatedAfterTheOwnersDayIsNotYet_inTheMonthItIsFor() {
+        YearMonth oct = YearMonth.of(2026, 10);
+        LocalDate oct20 = oct.atDay(20);
+        Category salary = f.category(10, "Salary", null);
+        f.ledger.income(oct.atDay(25), "7000000", salary).setSalaryMonth(SEP.atDay(1));
+        f.ledger.income(oct.atDay(5), "1000000", salary);
+        f.spend(oct.atDay(21), "300000", null, "Ertaga");
+
+        AnalyticsResponse september = f.analytics.analytics(SEP, SEP, oct20);
+        assertThat(september.getTotals().getEarned()).isEqualByComparingTo("0");
+        assertThat(september.getNotYetCount()).isEqualTo(1);
+        AnalyticsResponse october = f.analytics.analytics(oct, oct, oct20);
+        assertThat(october.getTotals().getEarned()).isEqualByComparingTo("1000000");
+        assertThat(october.getTotals().getEveryday()).isEqualByComparingTo("0");
+        assertThat(october.getNotYetCount()).isEqualTo(1);                  // the spending only
+        assertThat(f.analytics.analytics(SEP, oct, oct20).getNotYetCount()).isEqualTo(2);
+
+        // Its day has come: September's.
+        AnalyticsResponse later = f.analytics.analytics(SEP, SEP, oct.atDay(25));
+        assertThat(later.getTotals().getEarned()).isEqualByComparingTo("7000000");
+        assertThat(later.getNotYetCount()).isZero();
+    }
+
+    /**
+     * The first row ever is November's salary paid on 30 October: October has nothing counted in it,
+     * yet it is the first month — its wallets got 7,000,000 — and November then has it as the month before.
+     */
+    @Test
+    void aMonthWhoseOnlyRowIsAnotherMonthsSalaryStillShowsWhatTheWalletsDid() {
+        YearMonth oct = YearMonth.of(2026, 10);
+        YearMonth nov = YearMonth.of(2026, 11);
+        Category salary = f.category(10, "Salary", null);
+        f.ledger.income(oct.atDay(30), "7000000", salary).setSalaryMonth(nov.atDay(1));
+
+        AnalyticsResponse october = f.analytics.analytics(oct, oct, oct.atDay(31));
+        assertThat(october.getFirstMonth()).isEqualTo("2026-10");
+        assertThat(october.getMonthsWithData()).isZero();
+        assertThat(october.getMonths()).extracting(MonthFlow::getMonth).containsExactly("2026-10");
+        assertThat(october.getTotals().getCount()).isZero();
+        assertThat(october.getTotals().getEarned()).isEqualByComparingTo("0");
+        assertThat(october.getTotals().getWalletChange()).isEqualByComparingTo("7000000");
+
+        AnalyticsResponse november = f.analytics.analytics(nov, nov, nov.atDay(5));
+        assertThat(november.getFirstMonth()).isEqualTo("2026-10");
+        assertThat(november.getTotals().getEarned()).isEqualByComparingTo("7000000");
+        assertThat(november.getTotals().getWalletChange()).isEqualByComparingTo("0");
+        assertThat(november.getPrevious().getCount()).isZero();
+        assertThat(november.getPrevious().getWalletChange()).isEqualByComparingTo("7000000");
+        assertThat(november.getEveryday().getPreviousDaily()).isNull();          // nothing counted in October
+        assertIdentities(november.getPrevious());
+    }
+
+    /** February's salary paid on 31 March: no day of February's charts to put it on, and nothing breaks. */
+    @Test
+    void aSalaryForTheMonthBeforeHasNoDayInEitherMonthsCharts() {
+        YearMonth feb = YearMonth.of(2027, 2);
+        YearMonth mar = YearMonth.of(2027, 3);
+        Category salary = f.category(10, "Salary", null);
+        f.ledger.income(mar.atDay(31), "7000000", salary).setSalaryMonth(feb.atDay(1));
+        f.spend(feb.atDay(10), "100000", null, "Bozor");
+        f.spend(mar.atDay(10), "200000", null, "Bozor");
+
+        AnalyticsResponse march = f.analytics.analytics(mar, mar, mar.atDay(31));
+        assertThat(march.getTotals().getEarned()).isEqualByComparingTo("0");
+        assertThat(march.getPrevious().getEarned()).isEqualByComparingTo("7000000");
+        assertThat(march.getEveryday().getPreviousDaily()).hasSize(28);
+        assertThat(march.getEveryday().getPreviousDaily().get(27).getCumulative()).isEqualByComparingTo("100000");
+        assertThat(march.getEveryday().getDaily()).hasSize(31);
+
+        AnalyticsResponse february = f.analytics.analytics(feb, feb, mar.atDay(31));
+        assertThat(february.getTotals().getEarned()).isEqualByComparingTo("7000000");
+        assertThat(february.getEveryday().getDaily()).hasSize(28);
+        assertThat(february.getEveryday().getDaily().get(27).getCumulative()).isEqualByComparingTo("100000");
     }
 
     @Test
@@ -405,7 +569,7 @@ class AnalyticsServiceTest {
                 .add(x.getSavedInvestments()).add(x.getSavedGoals()));
         assertThat(x.getLeftOver()).isEqualByComparingTo(x.getEarned().subtract(x.getOut()).subtract(x.getSaved()));
         assertThat(x.getWalletChange()).isEqualByComparingTo(x.getLeftOver().add(x.getBorrowed()).subtract(x.getLent())
-                .add(x.getReturned()).add(x.getFromSavings()));
+                .add(x.getReturned()).add(x.getFromSavings()).add(x.getPayForOtherMonths()));
     }
 
     @Test
@@ -452,6 +616,7 @@ class AnalyticsServiceTest {
         assertThat(t.getLent()).isEqualByComparingTo(sum.getLent());
         assertThat(t.getReturned()).isEqualByComparingTo(sum.getReturned());
         assertThat(t.getFromSavings()).isEqualByComparingTo(sum.getFromSavings());
+        assertThat(t.getPayForOtherMonths()).isEqualByComparingTo(sum.getPayForOtherMonths());
         assertThat(t.getWalletChange()).isEqualByComparingTo(sum.getWalletChange());
         assertThat(t.getCount()).isEqualTo(sum.getCount()).isEqualTo(34);
 
@@ -860,7 +1025,8 @@ class AnalyticsServiceTest {
                 "everyday", "bills", "loanPayments", "savings", "position", "positionHistory");
         String[] flow = {"earned", "earnedPay", "earnedBonus", "earnedOther", "everyday", "everydayUnitemised",
                 "bills", "loanPayments", "out", "saved", "savedDonation", "savedEmergency", "savedInvestments",
-                "savedGoals", "leftOver", "borrowed", "lent", "returned", "fromSavings", "walletChange", "count"};
+                "savedGoals", "leftOver", "borrowed", "lent", "returned", "fromSavings", "payForOtherMonths",
+                "walletChange", "count"};
         assertThat(json.get("totals").propertyNames()).containsExactlyInAnyOrder(flow);
         assertThat(json.get("months").get(0).propertyNames()).contains(flow).contains("month", "complete", "days")
                 .hasSize(flow.length + 3);

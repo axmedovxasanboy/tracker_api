@@ -19,16 +19,13 @@ import uz.tracker.trackerproject.dto.response.AnalyticsResponse.IncomeLine;
 import uz.tracker.trackerproject.dto.response.AnalyticsResponse.LoanLine;
 import uz.tracker.trackerproject.dto.response.AnalyticsResponse.MonthFlow;
 import uz.tracker.trackerproject.dto.response.AnalyticsResponse.Position;
-import uz.tracker.trackerproject.dto.response.AnalyticsResponse.PositionLoan;
 import uz.tracker.trackerproject.dto.response.AnalyticsResponse.PositionMonth;
 import uz.tracker.trackerproject.dto.response.AnalyticsResponse.PreviousDay;
 import uz.tracker.trackerproject.dto.response.AnalyticsResponse.SavingLine;
 import uz.tracker.trackerproject.entity.BankLoan;
 import uz.tracker.trackerproject.entity.Category;
 import uz.tracker.trackerproject.entity.Debt;
-import uz.tracker.trackerproject.entity.Emergency;
 import uz.tracker.trackerproject.entity.Investment;
-import uz.tracker.trackerproject.entity.LoanGiven;
 import uz.tracker.trackerproject.entity.LoanTaken;
 import uz.tracker.trackerproject.entity.MonthlyPayment;
 import uz.tracker.trackerproject.entity.PositionSnapshot;
@@ -38,6 +35,7 @@ import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.RepaymentType;
 import uz.tracker.trackerproject.enums.TransactionFlow;
 import uz.tracker.trackerproject.enums.TransactionSubType;
+import uz.tracker.trackerproject.enums.TransactionType;
 import uz.tracker.trackerproject.repository.BankLoanRepository;
 import uz.tracker.trackerproject.repository.DebtRepository;
 import uz.tracker.trackerproject.repository.EmergencyRepository;
@@ -66,9 +64,17 @@ import java.util.TreeSet;
  * The Analytics page's one read: where the money came from, where it went, what was saved, and
  * what the owner owns and owes — for a range of months.
  *
- * <p><b>Which rows count.</b> UZS only (currency UZS or null); by {@code transactionDate}, never by
- * {@code salaryMonth} (the basis History and the wallets use); dated on or before the owner's day;
+ * <p><b>Which rows count.</b> UZS only (currency UZS or null); dated on or before the owner's day;
  * a transfer between the owner's own wallets is ignored entirely.
+ *
+ * <p><b>In which month</b> ({@link #monthOf}, 2026-10-02). Income counts in the month it is for: an
+ * INCOME row marked as another month's salary ({@code salaryMonth}) is that month's — September's
+ * salary paid on 2 October is September's earned, not October's — as History's month list, the
+ * profile, the advisor and the allocation engine have it. Every other row counts in the month of its
+ * {@code transactionDate}. Being dated after the owner's day still keeps any row out (notYetCount).
+ * The wallets moved on the day the money came, so a flow's {@code payForOtherMonths} carries the pay
+ * that crosses its edge (+ arrived in it for another month, − counted in it but arrived in another)
+ * and {@code walletChange} stays what the wallets actually did.
  *
  * <p><b>How a counted row is classified</b> — {@link #classify}, first match wins:
  * <ol>
@@ -179,11 +185,16 @@ public class AnalyticsService {
         return OverviewService.isSalaryCategory(c, salaryTree) ? PAY : OTHER;
     }
 
+    private String savedKind(Transaction t) {
+        return savedKind(t, overviewService);
+    }
+
     /**
      * DONATION | EMERGENCY | INVESTMENTS | GOAL for a row of saved money, by its allocation bucket.
      * A donation is whatever the row's flow calls GIVEN — never decided a second time here.
+     * Package-private: the V2 breakdown splits Set aside by the same rule.
      */
-    private String savedKind(Transaction t) {
+    static String savedKind(Transaction t, OverviewService overviewService) {
         if (TransactionFlows.of(t) == TransactionFlow.GIVEN) return DONATION;
         String bucket = overviewService.bucketOf(t);
         if (AllocationBucket.EMERGENCY.equals(bucket)) return EMERGENCY;
@@ -191,7 +202,18 @@ public class AnalyticsService {
         return INVESTMENTS; // INVESTMENTS, and the legacy STOCKS bucket
     }
 
-    /** A counted row with its month and class. */
+    /**
+     * The month a counted row is counted in: an INCOME row's accounting month when it is marked as a
+     * month's salary ({@link Transaction#accountingMonth}), else the month of its date. Only the
+     * salary's regular income carries a {@code salaryMonth} (TransactionService drops it elsewhere);
+     * the class of the row ({@link #classify}) does not change.
+     */
+    static YearMonth monthOf(Transaction t) {
+        if (t.getType() == TransactionType.INCOME && t.getSalaryMonth() != null) return t.accountingMonth();
+        return YearMonth.from(t.getTransactionDate());
+    }
+
+    /** A counted row with its month ({@link #monthOf} — not always its date's) and class. */
     private record Row(Transaction t, YearMonth month, FlowClass cls) {
         BigDecimal amount() {
             return t.getAmount();
@@ -230,24 +252,37 @@ public class AnalyticsService {
         YearMonth previousTo = from.minusMonths(1);
 
         // ── The rows ──
-        List<Transaction> all = transactionRepository.findByTransactionDateBetween(BEGINNING, current.atEndOfMonth());
+        // To the end of next month: a salary for this month (or an earlier one) may already be
+        // recorded for the day it will come — dated after the owner's day it is only notYetCount.
+        List<Transaction> all = transactionRepository.findByTransactionDateBetween(BEGINNING, current.plusMonths(1).atEndOfMonth());
         List<Row> inRange = new ArrayList<>();
         List<Row> before = new ArrayList<>();
+        // Counted rows that reached the wallets in another month than the one they count in.
+        List<Row> crossing = new ArrayList<>();
         TreeSet<YearMonth> monthsWithRows = new TreeSet<>();
+        YearMonth firstArrived = null;
         int notYet = 0;
         for (Transaction t : all == null ? List.<Transaction>of() : all) {
             if (!counts(t)) continue;
-            YearMonth month = YearMonth.from(t.getTransactionDate());
-            boolean within = !month.isBefore(from) && !month.isAfter(to);
+            YearMonth month = monthOf(t);
+            boolean within = within(month, from, to);
             if (t.getTransactionDate().isAfter(date)) {
                 if (within) notYet++;
                 continue;
             }
-            monthsWithRows.add(month);
+            // Next month's salary paid early is next month's: no month after the owner's has data yet.
+            if (!month.isAfter(current)) monthsWithRows.add(month);
+            YearMonth arrived = YearMonth.from(t.getTransactionDate());
+            if (!arrived.equals(month)) {
+                crossing.add(new Row(t, month, classify(t)));
+                if (firstArrived == null || arrived.isBefore(firstArrived)) firstArrived = arrived;
+            }
             if (within) inRange.add(new Row(t, month, classify(t)));
-            else if (!month.isBefore(previousFrom) && !month.isAfter(previousTo)) before.add(new Row(t, month, classify(t)));
+            else if (within(month, previousFrom, previousTo)) before.add(new Row(t, month, classify(t)));
         }
         YearMonth firstMonth = monthsWithRows.isEmpty() ? null : monthsWithRows.first();
+        // A month a salary for another one reached the wallets in has a wallet change to show.
+        if (firstArrived != null && (firstMonth == null || firstArrived.isBefore(firstMonth))) firstMonth = firstArrived;
 
         // ── Flow: each month, the range, and the range before it ──
         Set<Long> salaryTree = overviewService.salaryTree();
@@ -264,6 +299,12 @@ public class AnalyticsService {
             book(byMonth.get(r.month()), r, kind);
             details.add(r, kind);
         }
+        for (Row r : crossing) {
+            MonthFlow counted = byMonth.get(r.month());
+            if (counted != null) counted.addPayForOtherMonths(walletPart(r).negate());
+            MonthFlow arrived = byMonth.get(YearMonth.from(r.date()));
+            if (arrived != null) arrived.addPayForOtherMonths(walletPart(r));
+        }
         Flow totals = new Flow();
         int days = 0;
         for (MonthFlow m : byMonth.values()) {
@@ -276,14 +317,21 @@ public class AnalyticsService {
         Flow previous = null;
         Map<Long, BigDecimal> previousByCategory = new HashMap<>();
         BigDecimal[] previousByDay = oneMonth ? zeros(previousTo.lengthOfMonth()) : null;
-        if (!before.isEmpty()) {
+        boolean arrivedBefore = crossing.stream()
+                .anyMatch(r -> within(YearMonth.from(r.date()), previousFrom, previousTo));
+        if (!before.isEmpty() || arrivedBefore) {
             previous = new Flow();
+            for (Row r : crossing) {
+                if (within(r.month(), previousFrom, previousTo)) previous.addPayForOtherMonths(walletPart(r).negate());
+                if (within(YearMonth.from(r.date()), previousFrom, previousTo)) previous.addPayForOtherMonths(walletPart(r));
+            }
             for (Row r : before) {
                 book(previous, r, kindOf(r, salaryTree));
                 if (r.cls() == FlowClass.EVERYDAY) {
                     previousByCategory.merge(idOf(top(r.t().getCategory())), r.amount(), BigDecimal::add);
                 }
-                if (previousByDay != null) {
+                // A row counted in another month than its date's (a salary) has no day in this one.
+                if (previousByDay != null && YearMonth.from(r.date()).equals(r.month())) {
                     int d = r.date().getDayOfMonth() - 1;
                     previousByDay[d] = previousByDay[d].add(everydayPart(r));
                 }
@@ -299,7 +347,7 @@ public class AnalyticsService {
                 .unitemised(totals.getEverydayUnitemised())
                 .categories(details.categories(previous == null ? null : previousByCategory))
                 .daily(oneMonth ? details.daily(from, date) : List.of())
-                .previousDaily(previous == null || previousByDay == null ? null : cumulative(previousByDay))
+                .previousDaily(before.isEmpty() || previousByDay == null ? null : cumulative(previousByDay))
                 .biggestDays(oneMonth ? details.biggestDays(from) : List.of())
                 .biggest(details.biggest())
                 .build();
@@ -344,8 +392,15 @@ public class AnalyticsService {
 
     /** Put one counted row into a flow ({@code kind} from {@link #kindOf}). */
     private static void book(Flow f, Row r, String kind) {
-        BigDecimal a = r.amount();
-        switch (r.cls()) {
+        book(f, r.cls(), r.amount(), kind);
+    }
+
+    /**
+     * Put one counted row — its class and amount — into a flow. Package-private: the V2 breakdown
+     * books its months by this very switch.
+     */
+    static void book(Flow f, FlowClass cls, BigDecimal a, String kind) {
+        switch (cls) {
             case BORROWED -> f.addBorrowed(a);
             case RETURNED -> f.addReturned(a);
             case FROM_SAVINGS -> f.addFromSavings(a);
@@ -359,6 +414,18 @@ public class AnalyticsService {
             case EVERYDAY -> f.addEverydayItemised(a);
         }
         f.counted();
+    }
+
+    /**
+     * What a row did to the wallets on its day: income in, everything else out. Only income ever
+     * counts in another month than its date's ({@link #monthOf}), so a crossing row is always money in.
+     */
+    private static BigDecimal walletPart(Row r) {
+        return r.t().getType() == TransactionType.INCOME ? r.amount() : r.amount().negate();
+    }
+
+    private static boolean within(YearMonth month, YearMonth from, YearMonth to) {
+        return !month.isBefore(from) && !month.isAfter(to);
     }
 
     /** What a row adds to everyday spending: itemised and not itemised add, a correction takes off. */
@@ -450,7 +517,8 @@ public class AnalyticsService {
 
         private void add(Row r, String kind) {
             Transaction t = r.t();
-            int day = month == null ? -1 : r.date().getDayOfMonth() - 1;
+            // The day in the month's chart; none for a row counted in another month than its date's.
+            int day = month == null || !YearMonth.from(r.date()).equals(month) ? -1 : r.date().getDayOfMonth() - 1;
             switch (r.cls()) {
                 case EARNED -> {
                     Long id = idOf(t.getCategory());
@@ -746,49 +814,10 @@ public class AnalyticsService {
         return out;
     }
 
+    /** The position today, holdings at their value now — {@link PositionReader}, which the snapshot job shares. */
     private Position position(LocalDate date, List<Investment> holdings) {
-        // The advisor's `have`: every UZS wallet's computed balance at the end of the day.
-        BigDecimal wallets = BigDecimal.ZERO;
-        for (MonthCloseService.ComputedWallet w : monthCloseService.computedWallets(date, Set.of())) {
-            if (w.currency() != null && w.currency() != Currency.UZS) continue;
-            wallets = wallets.add(nz(w.computed()));
-        }
-
-        // The Savings page's split: a goal, else the emergency fund, else a plain investment.
-        BigDecimal emergencyFund = BigDecimal.ZERO;
-        BigDecimal investments = BigDecimal.ZERO;
-        BigDecimal goals = BigDecimal.ZERO;
-        for (Investment i : holdings) {
-            BigDecimal value = AdvisorService.value(i);
-            if (Boolean.TRUE.equals(i.getSavingsGoal())) goals = goals.add(value);
-            else if (Boolean.TRUE.equals(i.getEmergencyFund())) emergencyFund = emergencyFund.add(value);
-            else investments = investments.add(value);
-        }
-        List<Emergency> contributions = emergencyRepository.findAllByOrderByDateDesc();
-        for (Emergency e : contributions == null ? List.<Emergency>of() : contributions) {
-            if (e.getAmount() == null || (e.getCurrency() != null && e.getCurrency() != Currency.UZS)) continue;
-            if (e.getDate() != null && e.getDate().isAfter(date)) continue;
-            emergencyFund = emergencyFund.add(e.getAmount());
-        }
-        BigDecimal own = wallets.add(emergencyFund).add(investments).add(goals);
-
-        // The same list, and the same `left`, the advisor's `owe` adds up.
-        List<PositionLoan> loans = new ArrayList<>();
-        for (OverviewService.OpenLoan l : overviewService.openLoans(date)) {
-            loans.add(PositionLoan.builder().kind(l.kind()).refId(l.refId()).name(l.name()).asap(l.asap())
-                    .original(l.original()).left(l.left()).monthly(l.monthly())
-                    .paidOffBy(l.paidOffBy() == null ? null : l.paidOffBy().toString()).build());
-        }
-        BigDecimal loansLeft = BigDecimal.ZERO;
-        for (PositionLoan l : loans) if (l.getLeft() != null) loansLeft = loansLeft.add(l.getLeft());
-
-        BigDecimal owed = BigDecimal.ZERO;
-        List<LoanGiven> given = loanGivenRepository.findAll();
-        for (LoanGiven l : given == null ? List.<LoanGiven>of() : given) owed = owed.add(AdvisorService.stillOwedToOwner(l));
-
-        return Position.builder().asOf(date).wallets(wallets).emergencyFund(emergencyFund)
-                .investments(investments).goals(goals).own(own).loans(loans).loansLeft(loansLeft)
-                .owedToYou(owed).net(own.subtract(loansLeft)).build();
+        return new PositionReader(monthCloseService, emergencyRepository, overviewService, loanGivenRepository)
+                .position(date, holdings, AdvisorService::value);
     }
 
     /**

@@ -173,6 +173,67 @@ class SalaryMonthTest {
         assertThat(tx.create(spend).getSalaryMonth()).isNull();
     }
 
+    /**
+     * Only the salary's income — the salary tree, its bonus included — says which month it is for
+     * (2026-10-02). Moved out of the tree by an edit that sends no salaryMonth (the web's, on a
+     * category change), a row loses the stored one: Analytics, History and the profile then all
+     * count it by its date. Income outside the tree never keeps one sent with it.
+     */
+    @Test
+    void onlyTheSalarysIncomeKeepsASalaryMonth() {
+        Category other = TransactionLedger.category("Other Income", false, null);
+        other.setId(3L);
+        other.setType(CategoryType.INCOME);
+        categories.add(other);
+        CategoryRepository categoryRepository = mock(CategoryRepository.class);
+        when(categoryRepository.findAll()).thenReturn(categories);
+        for (Category c : categories) when(categoryRepository.findById(c.getId())).thenReturn(Optional.of(c));
+        TransactionRepository repo = mock(TransactionRepository.class);
+        when(repo.save(any(Transaction.class))).thenAnswer(inv -> {
+            Transaction t = inv.getArgument(0);
+            if (t.getId() == null) t.setId(76L);
+            return t;
+        });
+        TransactionService tx = new TransactionService(repo, categoryRepository, mock(CardRepository.class),
+                mock(CashBalanceRepository.class), mock(FinanceService.class), mock(MonthCloseService.class),
+                mock(SettingsService.class), mock(LoanGivenRepository.class), mock(LoanTakenRepository.class),
+                mock(DonationRepository.class), mock(InvestmentRepository.class));
+
+        TransactionRequest pay = income(LocalDate.of(2026, 10, 2));
+        pay.setCategoryId(salary.getId());
+        pay.setSalaryMonth(SEP);
+        assertThat(tx.create(pay).getSalaryMonth()).isEqualTo(SEP);
+        TransactionRequest bonusPaid = income(LocalDate.of(2026, 10, 2));
+        bonusPaid.setCategoryId(bonus.getId());
+        bonusPaid.setSalaryMonth(SEP);
+        assertThat(tx.create(bonusPaid).getSalaryMonth()).isEqualTo(SEP);
+        TransactionRequest elsewhere = income(LocalDate.of(2026, 10, 2));
+        elsewhere.setCategoryId(other.getId());
+        elsewhere.setSalaryMonth(SEP);
+        assertThat(tx.create(elsewhere).getSalaryMonth()).isNull();
+
+        // Transaction 76, September's salary that came on 2 October, moved to "Other Income" on the web.
+        Transaction stored = new Transaction();
+        stored.setId(76L);
+        stored.setType(TransactionType.INCOME);
+        stored.setSubType(TransactionSubType.REGULAR_INCOME);
+        stored.setAmount(new BigDecimal("7170000"));
+        stored.setCurrency(Currency.UZS);
+        stored.setTransactionDate(LocalDate.of(2026, 10, 2));
+        stored.setCategory(salary);
+        stored.setSalaryMonth(SEP.atDay(1));
+        when(repo.findById(76L)).thenReturn(Optional.of(stored));
+        TransactionRequest sameTree = income(LocalDate.of(2026, 10, 2));       // no key, still the salary's
+        sameTree.setCategoryId(bonus.getId());
+        tx.update(76L, sameTree);
+        assertThat(stored.getSalaryMonth()).isEqualTo(SEP.atDay(1));
+        TransactionRequest moved = income(LocalDate.of(2026, 10, 2));          // no key, out of the tree
+        moved.setCategoryId(other.getId());
+        tx.update(76L, moved);
+        assertThat(stored.getSalaryMonth()).isNull();
+        assertThat(stored.accountingMonth()).isEqualTo(OCT);
+    }
+
     /** On the wire it is 'YYYY-MM' both ways; a request without the key says so. */
     @Test
     void theSalaryMonthTravelsAsYearMonth() throws Exception {

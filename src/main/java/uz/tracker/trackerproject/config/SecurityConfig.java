@@ -43,6 +43,9 @@ public class SecurityConfig {
                         // Non-secret Telegram bot config: the bot reads this before it has a session.
                         .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/settings/telegram").permitAll()
                         .requestMatchers("/actuator/health").permitAll()
+                        // The error dispatch of a request that already failed: without this, an unhandled
+                        // exception or a missing route answers 401, and clients read that as a lost session.
+                        .dispatcherTypeMatchers(jakarta.servlet.DispatcherType.ERROR).permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(e -> e.authenticationEntryPoint((req, res, ex) -> {
                     res.setStatus(HttpStatus.UNAUTHORIZED.value());

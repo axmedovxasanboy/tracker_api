@@ -322,4 +322,85 @@ class AnalyticsOwnerSeptemberTest {
                         tuple("LOAN", 5L, "Ota-onam (parents)", false, n("50000000"), n("50000000"), n("500000"), "2035-01"),
                         tuple("BANK", 1L, "Xalq Banki · Talim kredit", false, n("26000000"), null, n("400000"), null));
     }
+
+    /**
+     * The owner's bug of 2 October 2026 (transaction 76): September's salary, 7,170,000 from the
+     * ministry under the Salary root's own "Salary" sub-category, came on 2 October marked as
+     * September's. Income counts in the month it is for: it is September's earned — 41,204,000 (pay
+     * 15,059,000 + bonus 26,045,000 + other 100,000) — and October has earned nothing yet. The
+     * wallets got the money on 2 October, and walletChange still says so: September's stays the
+     * 8,878,000 they did (payForOtherMonths −7,170,000), October's is the 7,170,000 that came.
+     */
+    @Test
+    void septembersSalaryPaidOnTheSecondOfOctoberIsSeptembers() {
+        YearMonth oct = YearMonth.of(2026, 10);
+        LocalDate oct2 = oct.atDay(2);
+        Category salaryRoot = f.categories.stream().filter(c -> c.getId() == 10L).findFirst().orElseThrow();
+        Category salary = f.category(15, "Salary", salaryRoot);
+        Transaction late = f.ledger.income(oct2, "7170000", salary);
+        late.setDescription("Ministry of Construction");
+        late.setSalaryMonth(SEP.atDay(1));
+
+        AnalyticsResponse september = f.analytics.analytics(SEP, SEP, oct2);
+        Flow t = september.getTotals();
+        assertThat(t.getEarned()).isEqualByComparingTo("41204000");
+        assertThat(t.getEarnedPay()).isEqualByComparingTo("15059000");
+        assertThat(t.getEarnedBonus()).isEqualByComparingTo("26045000");
+        assertThat(t.getEarnedOther()).isEqualByComparingTo("100000");
+        assertThat(t.getOut()).isEqualByComparingTo("22291000");             // the rest of September as it was
+        assertThat(t.getLeftOver()).isEqualByComparingTo("14393000");        // 7,223,000 + 7,170,000
+        assertThat(t.getPayForOtherMonths()).isEqualByComparingTo("-7170000"); // counted here, came in October
+        assertThat(t.getWalletChange()).isEqualByComparingTo("8878000");     // what the wallets did in September
+        assertThat(t.getCount()).isEqualTo(31);
+        assertThat(september.getIncome()).extracting("categoryId", "name", "kind", "amount").containsExactly(
+                tuple(12L, "Bonus", "BONUS", n("26045000")),
+                tuple(15L, "Salary", "PAY", n("7170000")),
+                tuple(10L, "Salary", "PAY", n("5889000")),
+                tuple(11L, "Avans", "PAY", n("2000000")),
+                tuple(14L, "Other Income", "OTHER", n("100000")));
+        assertThat(september.getMonths()).singleElement().satisfies(m -> {
+            assertThat(m.isComplete()).isTrue();
+            assertThat(m.getEarned()).isEqualByComparingTo("41204000");
+        });
+        assertThat(september.getEveryday().getTotal()).isEqualByComparingTo("15036000");
+        assertThat(september.getEveryday().getDaily()).hasSize(30);
+        assertThat(september.getNotYetCount()).isZero();
+
+        AnalyticsResponse october = f.analytics.analytics(oct, oct, oct2);
+        assertThat(october.getTotals().getEarned()).isEqualByComparingTo("0");
+        assertThat(october.getTotals().getEarnedPay()).isEqualByComparingTo("0");
+        assertThat(october.getTotals().getCount()).isZero();
+        assertThat(october.getIncome()).isEmpty();
+        assertThat(october.getNotYetCount()).isZero();
+        assertThat(october.getMonthsWithData()).isEqualTo(1);               // September only
+        assertThat(october.getTotals().getPayForOtherMonths()).isEqualByComparingTo("7170000");
+        assertThat(october.getTotals().getWalletChange()).isEqualByComparingTo("7170000");   // it came on the 2nd
+        assertThat(october.getPrevious().getEarned()).isEqualByComparingTo("41204000");
+        assertThat(october.getPrevious().getWalletChange()).isEqualByComparingTo("8878000");
+
+        // Over both months it neither crosses an edge nor counts twice.
+        AnalyticsResponse both = f.analytics.analytics(SEP, oct, oct2);
+        assertThat(both.getMonths()).extracting(MonthFlow::getMonth, m -> m.getEarned().longValueExact(),
+                        m -> m.getWalletChange().longValueExact())
+                .containsExactly(tuple("2026-09", 41_204_000L, 8_878_000L), tuple("2026-10", 0L, 7_170_000L));
+        assertThat(both.getTotals().getEarned()).isEqualByComparingTo("41204000");
+        assertThat(both.getTotals().getPayForOtherMonths()).isEqualByComparingTo("0");
+        assertThat(both.getTotals().getWalletChange()).isEqualByComparingTo("16048000");
+    }
+
+    /**
+     * Recorded on 30 September for the day it will come (2 October), marked as September's: until
+     * then it is September's "not counted yet", and nothing else.
+     */
+    @Test
+    void septembersSalaryRecordedAheadIsSeptembersNotYet() {
+        Category salaryRoot = f.categories.stream().filter(c -> c.getId() == 10L).findFirst().orElseThrow();
+        f.ledger.income(LocalDate.of(2026, 10, 2), "7170000", f.category(15, "Salary", salaryRoot))
+                .setSalaryMonth(SEP.atDay(1));
+
+        AnalyticsResponse september = f.analytics.analytics(SEP, SEP, TODAY);
+        assertThat(september.getNotYetCount()).isEqualTo(1);
+        assertThat(september.getTotals().getEarned()).isEqualByComparingTo("34034000");
+        assertThat(september.getTotals().getWalletChange()).isEqualByComparingTo("8878000");
+    }
 }
