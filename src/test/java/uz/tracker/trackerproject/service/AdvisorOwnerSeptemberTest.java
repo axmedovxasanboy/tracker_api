@@ -299,9 +299,9 @@ class AdvisorOwnerSeptemberTest {
 
     /**
      * The goal the owner created on 23 September: 3,500,000 a month. With no start month it is asked
-     * from September, the month it was created — 3.5M today and 3.5M more on 7 October — and the walk
-     * is 1,077,000 short on 10 October, the rent's day. From October it asks nothing this month (no
-     * row) and its first 3.5M on 7 October, out of October's salary: not short.
+     * from September, the month it was created — a row this month; from October, none. Either way
+     * the daily figure is the month without it (plans left the walk on 13 Oct 2026): it used to read
+     * "1,077,000 short on 10 October" with the goal asked from September.
      */
     @Test
     void theOwnersGoalStartingInOctoberLeavesSeptemberAlone() {
@@ -319,19 +319,19 @@ class AdvisorOwnerSeptemberTest {
 
         AdvisorResponse fromSeptember = advisor.advise(TODAY);
         assertThat(fromSeptember.getSavingsThisMonth()).extracting(SavingsRow::getBucket).contains("GOAL");
-        assertThat(fromSeptember.getDaily().getShortBy().getDate()).isEqualTo(LocalDate.of(2026, 10, 10));
-        assertThat(fromSeptember.getDaily().getShortBy().getAmount()).isEqualByComparingTo("1077000");
 
         car.setPaymentStartDate(LocalDate.of(2026, 10, 1));
         AdvisorResponse fromOctober = advisor.advise(TODAY);
         assertThat(fromOctober.getSavingsThisMonth()).extracting(SavingsRow::getBucket).doesNotContain("GOAL");
-        Daily d = fromOctober.getDaily();
-        assertThat(d.getShortBy()).isNull();
-        assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        // 1,739,000 this month + October's 1,050,000 and the goal's 3,500,000 on 7 October.
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("6289000");
-        // 6,798,000 − 3,500,000 = 3,298,000 over 45 days.
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("73000");
+
+        for (Daily d : List.of(fromSeptember.getDaily(), fromOctober.getDaily())) {
+            assertThat(d.getShortBy()).isNull();
+            assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
+            // 1,739,000 this month + October's 1,050,000: the rule only.
+            assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2789000");
+            // 6,798,000 over 45 days.
+            assertThat(d.getSafePerDay()).isEqualByComparingTo("151000");
+        }
     }
 
     /**
@@ -548,12 +548,8 @@ class AdvisorOwnerSeptemberTest {
         assertThat(d.getVerdict()).isEqualTo("OVER_PACE");
         assertThat(d.getCause()).isEqualTo("PACE");
         assertThat(d.getSafePerDay()).isEqualByComparingTo("151000");
-        assertThat(d.getSafePerDayNoGoals()).isEqualByComparingTo("151000");       // there are no goals
         assertThat(d.getSafePerDayNoSavings()).isEqualByComparingTo("213000");     // still under the pace
-        assertThat(d.getBreakdown().getSetAside()).isEqualByComparingTo("2789000");
-        assertThat(d.getBreakdown().getGoals()).isEqualByComparingTo("0");
-        assertThat(d.getBreakdown().getSetAside().add(d.getBreakdown().getGoals()))
-                .isEqualByComparingTo(d.getBreakdown().getSavings());
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2789000");
 
         AdvisorResponse.Means m = r.getMeans();
         assertThat(m.getIncome()).isEqualByComparingTo("7000000");

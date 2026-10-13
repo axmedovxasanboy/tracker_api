@@ -94,9 +94,7 @@ class AdvisorMeansGoalsOweTest {
         f.holdings.remove(macbook);
         AdvisorResponse without = advise();
         assertThat(withWish.getDaily().getSafePerDay()).isEqualByComparingTo(without.getDaily().getSafePerDay());
-        assertThat(withWish.getDaily().getBreakdown().getGoals()).isEqualByComparingTo(without.getDaily().getBreakdown().getGoals());
         assertThat(withWish.getDaily().getBreakdown().getSavings()).isEqualByComparingTo(without.getDaily().getBreakdown().getSavings());
-        assertThat(withWish.getDaily().getSafePerDayNoGoals()).isEqualByComparingTo(without.getDaily().getSafePerDayNoGoals());
         assertThat(withWish.getSetAsideLeft()).isEqualByComparingTo(without.getSetAsideLeft());
         assertThat(withWish.getFree()).isEqualByComparingTo(without.getFree());
         assertThat(withWish.getMeans().getLeftToLive()).isEqualByComparingTo(without.getMeans().getLeftToLive());
@@ -110,9 +108,9 @@ class AdvisorMeansGoalsOweTest {
         assertThat(asPlan.getSavingsThisMonth()).filteredOn(r -> "GOAL".equals(r.getBucket()))
                 .extracting("refId", "target").containsExactly(tuple(40L, n("1000000")), tuple(41L, n("2000000")));
         assertThat(asPlan.getMeans().getGoals()).isEqualByComparingTo("3000000");
-        assertThat(asPlan.getDaily().getBreakdown().getGoals())
-                .isGreaterThan(withWish.getDaily().getBreakdown().getGoals());
-        assertThat(asPlan.getDaily().getSafePerDay()).isLessThan(withWish.getDaily().getSafePerDay());
+        // …in "do the plans fit?" only: no plan is in the daily figure (since 13 Oct 2026).
+        assertThat(asPlan.getDaily().getSafePerDay()).isEqualByComparingTo(withWish.getDaily().getSafePerDay());
+        assertThat(asPlan.getDaily().getBreakdown().getSavings()).isEqualByComparingTo(withWish.getDaily().getBreakdown().getSavings());
         assertThat(asPlan.getGoals()).extracting("id", "kind").containsExactly(tuple(40L, "PLAN"), tuple(41L, "PLAN"));
     }
 
@@ -126,7 +124,6 @@ class AdvisorMeansGoalsOweTest {
 
         assertThat(r.getSavingsThisMonth()).noneMatch(row -> "GOAL".equals(row.getBucket()));
         assertThat(r.getMeans().getGoals()).isEqualByComparingTo("0");
-        assertThat(r.getDaily().getBreakdown().getGoals()).isEqualByComparingTo("0");
         assertThat(r.getGoals()).extracting("id", "kind", "monthly", "status").containsExactly(tuple(42L, "WISH", null, null));
     }
 
@@ -211,6 +208,31 @@ class AdvisorMeansGoalsOweTest {
         assertThat(m.getGoals()).isEqualByComparingTo("3000000");
         assertThat(m.getLeftToLive()).isEqualByComparingTo("-1100000");
         assertThat(m.getVerdict()).isEqualTo("DOES_NOT_FIT");
+    }
+
+    /**
+     * The owner's October: plans asking more than the whole income. Home used to read that as "short
+     * 15M even if you spend nothing"; now the daily figure is the month without the plans, and "they do
+     * not fit" is the means' to say.
+     */
+    @Test
+    void plansThatDoNotFitLeaveTheDailyFigureAlone() {
+        aMonthWithRoomFor1900000();
+        spent("400000");
+        AdvisorResponse noPlans = advise();
+
+        goal(40, "MacBook", "10000000", "3500000");
+        goal(41, "Samsung", "12000000", "4000000");
+        goal(42, "Ota-onam", "50000000", "1000000");
+        AdvisorResponse withPlans = advise();
+
+        assertThat(withPlans.getMeans().getGoals()).isEqualByComparingTo("8500000");
+        assertThat(withPlans.getMeans().getVerdict()).isEqualTo("DOES_NOT_FIT");
+        assertThat(withPlans.getDaily().getShortBy()).isNull();
+        assertThat(withPlans.getDaily().getVerdict()).isEqualTo(noPlans.getDaily().getVerdict());
+        assertThat(withPlans.getDaily().getSafePerDay()).isEqualByComparingTo(noPlans.getDaily().getSafePerDay());
+        assertThat(withPlans.getDaily().getSafePerDay()).isPositive();
+        assertThat(withPlans.getDaily().getBreakdown().getNet()).isEqualByComparingTo(noPlans.getDaily().getBreakdown().getNet());
     }
 
     @Test
@@ -415,9 +437,9 @@ class AdvisorMeansGoalsOweTest {
                 .hasSize(27);
         assertThat(json.get("daily").propertyNames()).containsExactlyInAnyOrder("safePerDay", "until", "tightestOn",
                 "breakdown", "paceDaily", "paceFrom", "paceTo", "runsOutOn", "shortBy", "upcoming", "incomes",
-                "verdict", "cause", "safePerDayNoGoals", "safePerDayNoSavings");
+                "verdict", "cause", "safePerDayNoSavings");
         assertThat(json.get("daily").get("breakdown").propertyNames()).containsExactlyInAnyOrder(
-                "have", "comingIn", "goingOut", "savings", "net", "days", "setAside", "goals");
+                "have", "comingIn", "goingOut", "savings", "net", "days");
         assertThat(json.get("means").propertyNames()).containsExactlyInAnyOrder("income", "bills", "loanPayments",
                 "setAside", "goals", "leftToLive", "roomForGoals", "paceMonthly", "verdict");
         assertThat(json.get("goals").get(0).propertyNames()).containsExactlyInAnyOrder("id", "name", "kind", "target",

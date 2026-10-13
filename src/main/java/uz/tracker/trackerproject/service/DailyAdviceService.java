@@ -58,6 +58,14 @@ import java.util.function.Function;
  * — a rent paid "on the 28th", a salary entered ahead — has not moved any money yet: it enters the
  * walk on its own day instead.
  *
+ * <p><b>Plans are not in it.</b> A savings goal's monthly payment is the owner's choice, not a
+ * must-pay, so the figure is what is free after bills, loans and the rule's set-asides; whether the
+ * plans fit is said apart, by {@code AdvisorResponse.means}. Until 13 October 2026 the plans were set
+ * aside here too, and three plans asking 8.5M a month turned "about 35,000 a day" into "short 15M on
+ * 10 November, even if you spend nothing" — on Home, where nothing could be done about it. A goal
+ * contribution the owner has already RECORDED for a later day is still money leaving on that day,
+ * and is walked like any other saving.
+ *
  * <ol>
  *   <li><b>Income, conservatively.</b> The salary's shape (which days, how much) comes from the
  *       most recent COMPLETE month, up to {@value #SALARY_LOOKBACK_MONTHS} back, whose non-bonus
@@ -79,7 +87,8 @@ import java.util.function.Function;
  *   <li><b>Savings, out of the salary that funds them.</b> This month's unset-aside buckets on this
  *       month's main payday while its main part is still to come, else today; on each later
  *       month's main payday (the 1st without a history), that month's rule's percentages of the
- *       stable income — the allocation base of a month without a bonus.</li>
+ *       stable income — the allocation base of a month without a bonus. Plus any saving recorded
+ *       for a later day this month, on its day.</li>
  *   <li><b>Per day.</b> safePerDay = min over the horizon of net(c) ÷ days to c, rounded down to
  *       1,000; zero, with {@code shortBy}, when some day's net is below zero.</li>
  *   <li><b>Pace.</b> Everyday spending over the last 30 days (never before tracking started) —
@@ -111,7 +120,6 @@ public class DailyAdviceService {
     static final String OVER_PACE = "OVER_PACE";
     static final String SHORT = "SHORT";
     /** {@code Daily.cause}, for OVER_PACE only. */
-    static final String CAUSE_GOALS = "GOALS";
     static final String CAUSE_SAVINGS = "SAVINGS";
     static final String CAUSE_PACE = "PACE";
 
@@ -142,40 +150,9 @@ public class DailyAdviceService {
      * @param stableIncome the monthly stable income from Settings (positive)
      * @param salaryComing what this month's salary still owes: stable income − non-bonus regular income this month
      * @param setAsideLeft this month's set-asides not yet made
-     * @param goals        savings goals with a monthly payment, still short of their target — those
-     *                     whose payment starts in a later month too
      */
     public record Inputs(LocalDate today, BigDecimal have, BigDecimal stableIncome, BigDecimal salaryComing,
-                         BigDecimal setAsideLeft, List<Goal> goals) {
-        /** With no savings goal to set aside for. */
-        public Inputs(LocalDate today, BigDecimal have, BigDecimal stableIncome, BigDecimal salaryComing,
-                      BigDecimal setAsideLeft) {
-            this(today, have, stableIncome, salaryComing, setAsideLeft, List.of());
-        }
-    }
-
-    /**
-     * A savings goal's monthly payment, set aside like the plan's buckets (though outside their
-     * percentages) from its start month on. Its deadline plays no part: it is for display.
-     *
-     * @param monthly       the monthly payment (positive)
-     * @param paidThisMonth contributions to it this month, dated today or earlier
-     * @param toTarget      what is still missing to reach its target; null when it has none
-     * @param startMonth    the first month the payment is asked for ({@code Investment.paymentStartMonth});
-     *                      null = it has always started
-     */
-    public record Goal(Long id, BigDecimal monthly, BigDecimal paidThisMonth, BigDecimal toTarget,
-                       YearMonth startMonth) {
-        /** A goal whose payment has always started. */
-        public Goal(Long id, BigDecimal monthly, BigDecimal paidThisMonth, BigDecimal toTarget) {
-            this(id, monthly, paidThisMonth, toTarget, null);
-        }
-
-        /** Whether the payment is asked for in {@code month}: from the start month on. */
-        public boolean startedBy(YearMonth month) {
-            return startMonth == null || !startMonth.isAfter(month);
-        }
-    }
+                         BigDecimal setAsideLeft) {}
 
     /**
      * @param surplus the least the owner would ever have in hand beyond their own pace: the minimum,
@@ -217,20 +194,16 @@ public class DailyAdviceService {
         List<Upcoming> due = obligations(today, computeTo, later, pattern, income);
 
         // ── 4. Savings, set aside out of the salary that funds them ──
-        // Kept in two parts, so the answer can say which one a too-high pace runs into: what the
-        // rule's buckets ask (with what they carry), and what the goals — the plans — ask. A saving
-        // already recorded for a later day this month is the same money on its own day, so it
-        // belongs to the part it pays: a goal's when its bucket is SAVINGS, the rule's otherwise.
+        // What the rule's buckets ask (with what they carry). The plans' monthly payments are not
+        // here (see the class comment); a saving already RECORDED for a later day this month is —
+        // into a goal or not, it is money leaving on its own day.
         NavigableMap<LocalDate, BigDecimal> setAside = new TreeMap<>();
-        NavigableMap<LocalDate, BigDecimal> goals = new TreeMap<>();
         // Reserved before the salary arrives, they read as "short" every month until payday.
         LocalDate thisMonthOn = salary.mainPartOn() != null ? salary.mainPartOn() : today;
         BigDecimal setAsideLeft = nz(in.setAsideLeft());
         if (setAsideLeft.signum() > 0) setAside.merge(thisMonthOn, setAsideLeft, BigDecimal::add);
         for (Transaction t : later) {
-            if (!isSaving(t)) continue;
-            boolean toGoal = AllocationBucket.SAVINGS.equals(overviewService.bucketOf(t));
-            (toGoal ? goals : setAside).merge(t.getTransactionDate(), t.getAmount(), BigDecimal::add);
+            if (isSaving(t)) setAside.merge(t.getTransactionDate(), t.getAmount(), BigDecimal::add);
         }
         // Each later month in the horizon, on its main payday (the 1st without a salary history).
         List<LocalDate> laterPaydays = new ArrayList<>();
@@ -247,26 +220,6 @@ public class DailyAdviceService {
             BigDecimal estimate = ruleSetAside(laterMonths.get(i), today, income.apply(laterMonths.get(i)));
             if (estimate.signum() > 0) setAside.merge(laterPaydays.get(i), estimate, BigDecimal::add);
         }
-        // Savings goals' monthly payments, on the same days: what this month still owes (less what
-        // is recorded for a later day — the walk takes that on its own day), then the full payment
-        // each later month; all of it capped at what is still missing to reach the target. Nothing
-        // before the goal's start month: this month's only once it has started, and later months'
-        // from max(start month, next month).
-        for (Goal g : in.goals() == null ? List.<Goal>of() : in.goals()) {
-            BigDecimal monthly = nz(g.monthly());
-            if (monthly.signum() <= 0) continue;
-            BigDecimal cap = g.toTarget();
-            if (g.startedBy(current)) {
-                BigDecimal recordedLater = later.stream()
-                        .filter(t -> isSaving(t) && Objects.equals(t.getInvestmentId(), g.id()))
-                        .map(Transaction::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
-                cap = reserve(goals, thisMonthOn,
-                        clampZero(monthly.subtract(nz(g.paidThisMonth())).subtract(recordedLater)), cap);
-            }
-            for (int i = 0; i < laterPaydays.size(); i++) {
-                if (g.startedBy(laterMonths.get(i))) cap = reserve(goals, laterPaydays.get(i), monthly, cap);
-            }
-        }
 
         // ── 5–7. Walk the days ──
         // Income and must-pays by day; each walk then takes its own reservations off them.
@@ -279,10 +232,8 @@ public class DailyAdviceService {
         Pace pace = pace(today);
         BigDecimal paceDaily = pace == null ? null : pace.perDay();
 
-        // The answer, then the same walk twice more — without the goals' reservations, and with
-        // nothing set aside at all — to say WHY a pace that runs out does.
-        Walk walk = walk(have, flows, List.of(setAside, goals), today, until, paceDaily);
-        Walk noGoals = walk(have, flows, List.of(setAside), today, until, paceDaily);
+        // The answer, then the same walk with nothing set aside — to say WHY a pace that runs out does.
+        Walk walk = walk(have, flows, List.of(setAside), today, until, paceDaily);
         Walk noSavings = walk(have, flows, List.of(), today, until, paceDaily);
 
         boolean isShort = walk.isShort();
@@ -294,7 +245,7 @@ public class DailyAdviceService {
                 .safePerDay(walk.safePerDay())
                 .until(until)
                 .tightestOn(tightestOn)
-                .breakdown(breakdown(have, incomes, due, setAside, goals, today, tightestOn))
+                .breakdown(breakdown(have, incomes, due, setAside, today, tightestOn))
                 .paceDaily(paceDaily)
                 .paceFrom(pace == null ? null : pace.from())
                 .paceTo(pace == null ? null : pace.to())
@@ -303,22 +254,18 @@ public class DailyAdviceService {
                 .upcoming(due.stream().filter(u -> !u.getDate().isAfter(listTo)).toList())
                 .incomes(incomes)
                 .verdict(verdict)
-                .cause(OVER_PACE.equals(verdict) ? cause(noGoals.safePerDay(), noSavings.safePerDay(), paceDaily) : null)
-                .safePerDayNoGoals(noGoals.safePerDay())
+                .cause(OVER_PACE.equals(verdict) ? cause(noSavings.safePerDay(), paceDaily) : null)
                 .safePerDayNoSavings(noSavings.safePerDay())
                 .build();
         return new Result(daily, walk.minHeadroom());
     }
 
     /**
-     * Why the pace runs out (verdict OVER_PACE): GOALS when, without the plans' reservations, the
-     * safe amount a day is at least the pace; else SAVINGS when it is with nothing set aside at all;
-     * else PACE — the pace is too high even then.
+     * Why the pace runs out (verdict OVER_PACE): SAVINGS when, with nothing set aside at all, the
+     * safe amount a day is at least the pace; else PACE — the pace is too high even then.
      */
-    static String cause(BigDecimal safeNoGoals, BigDecimal safeNoSavings, BigDecimal paceDaily) {
-        if (safeNoGoals.compareTo(paceDaily) >= 0) return CAUSE_GOALS;
-        if (safeNoSavings.compareTo(paceDaily) >= 0) return CAUSE_SAVINGS;
-        return CAUSE_PACE;
+    static String cause(BigDecimal safeNoSavings, BigDecimal paceDaily) {
+        return safeNoSavings.compareTo(paceDaily) >= 0 ? CAUSE_SAVINGS : CAUSE_PACE;
     }
 
     /**
@@ -343,8 +290,8 @@ public class DailyAdviceService {
 
     /**
      * Walks the days: net(d) = have + {@code flows} by d (income less must-pays) − every reservation
-     * in {@code reserved} by d. The three figures the answer gives — the real one, the one without
-     * goals and the one with nothing set aside — are this one walk over fewer reservations.
+     * in {@code reserved} by d. The two figures the answer gives — the real one and the one with
+     * nothing set aside — are this one walk over fewer reservations.
      */
     private static Walk walk(BigDecimal have, NavigableMap<LocalDate, BigDecimal> flows,
                              List<NavigableMap<LocalDate, BigDecimal>> reserved,
@@ -917,29 +864,15 @@ public class DailyAdviceService {
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 
-    /**
-     * Sets {@code amount} aside on {@code on}, but no more than {@code cap} allows (null: no cap).
-     * Returns what the cap has left for the next reservation.
-     */
-    private static BigDecimal reserve(NavigableMap<LocalDate, BigDecimal> savings, LocalDate on,
-                                      BigDecimal amount, BigDecimal cap) {
-        BigDecimal take = cap == null ? amount : amount.min(clampZero(cap));
-        if (take.signum() > 0) savings.merge(on, take, BigDecimal::add);
-        return cap == null ? null : cap.subtract(take);
-    }
-
     private static Breakdown breakdown(BigDecimal have, List<IncomePart> incomes, List<Upcoming> items,
-                                       NavigableMap<LocalDate, BigDecimal> setAside,
-                                       NavigableMap<LocalDate, BigDecimal> goals, LocalDate today, LocalDate to) {
+                                       NavigableMap<LocalDate, BigDecimal> setAside, LocalDate today, LocalDate to) {
         BigDecimal in = incomes.stream().filter(i -> !i.getDate().isAfter(to))
                 .map(IncomePart::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal out = items.stream().filter(u -> !u.getDate().isAfter(to))
                 .map(Upcoming::getAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
-        BigDecimal rule = setAside.headMap(to, true).values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
-        BigDecimal plans = goals.headMap(to, true).values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
-        BigDecimal kept = rule.add(plans);
+        BigDecimal kept = setAside.headMap(to, true).values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
         return Breakdown.builder()
-                .have(have).comingIn(in).goingOut(out).savings(kept).setAside(rule).goals(plans)
+                .have(have).comingIn(in).goingOut(out).savings(kept)
                 .net(have.add(in).subtract(out).subtract(kept))
                 .days((int) daysFrom(today, to))
                 .build();

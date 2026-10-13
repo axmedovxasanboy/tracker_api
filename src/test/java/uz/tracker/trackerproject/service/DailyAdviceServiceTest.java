@@ -31,7 +31,6 @@ import uz.tracker.trackerproject.repository.TransactionRepository;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.NavigableMap;
@@ -589,105 +588,20 @@ class DailyAdviceServiceTest {
 
     // ── Savings goals ─────────────────────────────────────────────────────────
 
-    private DailyAdviceService.Result withGoal(LocalDate today, String have, String salaryComing,
-                                               DailyAdviceService.Goal goal) {
-        return service.compute(new DailyAdviceService.Inputs(today, new BigDecimal(have),
-                new BigDecimal("7000000"), new BigDecimal(salaryComing), BigDecimal.ZERO,
-                List.of(goal)));
-    }
-
-    private static DailyAdviceService.Goal car(String paidThisMonth, String toTarget) {
-        return new DailyAdviceService.Goal(11L, new BigDecimal("1000000"), new BigDecimal(paidThisMonth),
-                toTarget == null ? null : new BigDecimal(toTarget));
-    }
-
     /**
-     * 3 September, the salary due on the 7th, 1M a month into the car and 300,000 of it paid: the
-     * 700,000 left is set aside on the 7th, out of the salary — not today, which with 500,000 in hand
-     * would read as short until payday.
+     * A goal's monthly payment is not in the walk (since 13 Oct 2026), but a contribution recorded
+     * for the 28th is money leaving on the 28th: 400,000 then, with October's buckets (2,100,000) on
+     * the 7th.
      */
     @Test
-    void aGoalsPaymentWaitsForThePaydayThatFundsIt() {
-        ledger.income(LocalDate.of(2026, 8, 7), "7000000", SALARY);
-        LocalDate sep3 = LocalDate.of(2026, 9, 3);
-
-        Daily tight = withGoal(sep3, "500000", "7000000", car("300000", null)).daily();
-        assertThat(tight.getShortBy()).isNull();
-        assertThat(tight.getSafePerDay()).isEqualByComparingTo("125000");   // 500,000 over the 4 days to payday
-
-        // With more in hand the tightest day is the horizon's end, and the 700,000 is in it.
-        Daily d = withGoal(sep3, "2000000", "7000000", car("300000", null)).daily();
-        assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 10, 6));
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("700000");
-    }
-
-    /**
-     * 23 September, the salary in: this month's 700,000 today, then the full 1M on 7 October — but
-     * never more in all than is missing to reach the target. (October's buckets, 30% of the 7M,
-     * are set aside on the 7th as well: 2,100,000.)
-     */
-    @Test
-    void laterMonthsGetTheFullPaymentOnTheirPaydayCappedAtTheTarget() {
-        salaryOnThe7th();
-
-        Daily open = withGoal(SEP_23, "5000000", "0", car("300000", null)).daily();
-        assertThat(open.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(open.getBreakdown().getSavings()).isEqualByComparingTo("3800000");     // 0.7M + 1M + 2.1M
-
-        Daily capped = withGoal(SEP_23, "5000000", "0", car("300000", "1000000")).daily();
-        assertThat(capped.getBreakdown().getSavings()).isEqualByComparingTo("3100000");   // 0.7M + 0.3M + 2.1M
-        // 5M − 0.7M + 7M − 0.3M − 2.1M over 45 days
-        assertThat(capped.getSafePerDay()).isEqualByComparingTo("197000");
-    }
-
-    /** A contribution recorded for the 28th is set aside on the 28th — and not again today. */
-    @Test
-    void aGoalContributionRecordedForALaterDayCountsOnItsDayOnce() {
+    void aGoalContributionRecordedForALaterDayCountsOnItsDay() {
         salaryOnThe7th();
         ledger.add(LocalDate.of(2026, 9, 28), TransactionType.EXPENSE, TransactionSubType.INVESTMENT, "400000")
                 .setInvestmentId(11L);
 
-        Daily d = withGoal(SEP_23, "5000000", "0", car("0", null)).daily();
+        Daily d = daily(SEP_23, "5000000", "0");
 
-        // 600,000 today + 400,000 on the 28th + 1M on 7 October (+ October's buckets, 2.1M)
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("4100000");
-    }
-
-    /** The car's 1M a month with 300,000 of it paid, from {@code start} on. */
-    private static DailyAdviceService.Goal carFrom(YearMonth start, String toTarget) {
-        return new DailyAdviceService.Goal(11L, new BigDecimal("1000000"), new BigDecimal("300000"),
-                toTarget == null ? null : new BigDecimal(toTarget), start);
-    }
-
-    /**
-     * A goal whose payment starts in October sets nothing aside this month: 600,000 in hand is not
-     * short, where the same goal started this month would take 700,000 today. Its first payment is
-     * set aside on 7 October — October's payday, with October's buckets (2.1M) — still capped at
-     * what the goal is missing. One starting in November asks nothing before the horizon's end.
-     */
-    @Test
-    void aGoalIsSetAsideFromItsStartMonthsPaydayOn() {
-        salaryOnThe7th();
-
-        Daily started = withGoal(SEP_23, "600000", "0", car("300000", null)).daily();
-        assertThat(started.getShortBy()).isNotNull();
-        assertThat(started.getShortBy().getAmount()).isEqualByComparingTo("100000");   // 600,000 − 700,000 today
-
-        Daily notYet = withGoal(SEP_23, "600000", "0", carFrom(YearMonth.of(2026, 10), null)).daily();
-        assertThat(notYet.getShortBy()).isNull();
-        assertThat(notYet.getTightestOn()).isEqualTo(LocalDate.of(2026, 10, 6));
-        assertThat(notYet.getBreakdown().getSavings()).isEqualByComparingTo("0");       // nothing before the 7th
-        assertThat(notYet.getSafePerDay()).isEqualByComparingTo("42000");               // 600,000 over 14 days
-
-        Daily october = withGoal(SEP_23, "5000000", "0", carFrom(YearMonth.of(2026, 10), null)).daily();
-        assertThat(october.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(october.getBreakdown().getSavings()).isEqualByComparingTo("3100000"); // 1M + 2.1M on the 7th
-
-        Daily capped = withGoal(SEP_23, "5000000", "0", carFrom(YearMonth.of(2026, 10), "400000")).daily();
-        assertThat(capped.getBreakdown().getSavings()).isEqualByComparingTo("2500000");  // 0.4M + 2.1M
-
-        Daily november = withGoal(SEP_23, "5000000", "0", carFrom(YearMonth.of(2026, 11), null)).daily();
-        assertThat(november.getBreakdown().getSavings()).isEqualByComparingTo("2100000"); // 7 Nov is past 6 Nov
+        assertThat(d.getBreakdown().getSavings()).isEqualByComparingTo("2500000");
     }
 }

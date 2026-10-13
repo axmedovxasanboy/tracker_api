@@ -35,8 +35,8 @@ import static org.mockito.Mockito.when;
 /**
  * {@code daily.verdict} and {@code daily.cause}: which state the day is in, and — when the pace runs
  * out — what it runs into. Both come from figures the answer already carries: the verdict from
- * {@code shortBy} / {@code runsOutOn}, the cause from the same walk run again with the goals'
- * reservations removed, and with nothing set aside at all.
+ * {@code shortBy} / {@code runsOutOn}, the cause from the same walk run again with nothing set aside
+ * at all. (The plans' monthly payments are in neither walk since 13 Oct 2026, so GOALS is gone.)
  *
  * <p>One setting throughout: 23 September, 7,000,000 a month paid on the 7th (this month's is in),
  * no debts — so October's rule sets 30% = 2,100,000 aside on 7 October, and the horizon ends on
@@ -93,13 +93,9 @@ class DailyVerdictTest {
         ledger.expense(LocalDate.of(2026, 9, 12), total);
     }
 
-    private static DailyAdviceService.Goal plan(long id, String monthly) {
-        return new DailyAdviceService.Goal(id, new BigDecimal(monthly), BigDecimal.ZERO, null);
-    }
-
-    private Daily daily(String have, String setAsideLeft, DailyAdviceService.Goal... goals) {
+    private Daily daily(String have, String setAsideLeft) {
         return service.compute(new DailyAdviceService.Inputs(SEP_23, new BigDecimal(have), new BigDecimal("7000000"),
-                BigDecimal.ZERO, new BigDecimal(setAsideLeft), List.of(goals))).daily();
+                BigDecimal.ZERO, new BigDecimal(setAsideLeft))).daily();
     }
 
     // ── verdict ───────────────────────────────────────────────────────────────
@@ -115,7 +111,6 @@ class DailyVerdictTest {
         assertThat(d.getVerdict()).isEqualTo("OK");
         assertThat(d.getCause()).isNull();
         assertThat(d.getSafePerDay()).isEqualByComparingTo("308000");
-        assertThat(d.getSafePerDayNoGoals()).isEqualByComparingTo("308000");       // no goals to remove
         assertThat(d.getSafePerDayNoSavings()).isEqualByComparingTo("355000");
     }
 
@@ -125,21 +120,6 @@ class DailyVerdictTest {
 
         assertThat(d.getVerdict()).isEqualTo("OK");
         assertThat(d.getCause()).isNull();
-    }
-
-    /** 5,000,000 a month for a plan, today and on 7 October: 3,900,000 is left on day 45 — 86,000 a day. */
-    @Test
-    void overPace_becauseOfTheGoals() {
-        spent("2300000");                                         // 100,000 a day
-
-        Daily d = daily("9000000", "0", plan(1, "5000000"));
-
-        assertThat(d.getShortBy()).isNull();
-        assertThat(d.getRunsOutOn()).isEqualTo(LocalDate.of(2026, 11, 1));         // 3,900,000 lasts 39 days
-        assertThat(d.getVerdict()).isEqualTo("OVER_PACE");
-        assertThat(d.getSafePerDay()).isEqualByComparingTo("86000");
-        assertThat(d.getSafePerDayNoGoals()).isEqualByComparingTo("308000");       // ≥ the pace: the plans are why
-        assertThat(d.getCause()).isEqualTo("GOALS");
     }
 
     /** 8,000,000 still to set aside this month leaves 1,000,000 until payday; no goals at all. */
@@ -152,7 +132,6 @@ class DailyVerdictTest {
         assertThat(d.getVerdict()).isEqualTo("OVER_PACE");
         assertThat(d.getRunsOutOn()).isEqualTo(LocalDate.of(2026, 9, 26));
         assertThat(d.getSafePerDay()).isEqualByComparingTo("71000");               // 1,000,000 ÷ 14
-        assertThat(d.getSafePerDayNoGoals()).isEqualByComparingTo("71000");        // below the pace: not the goals
         assertThat(d.getSafePerDayNoSavings()).isEqualByComparingTo("355000");     // ≥ the pace
         assertThat(d.getCause()).isEqualTo("SAVINGS");
     }
@@ -162,10 +141,10 @@ class DailyVerdictTest {
     void overPace_becauseThePaceItselfIsTooHigh() {
         spent("9200000");                                         // 400,000 a day
 
-        Daily d = daily("9000000", "0", plan(1, "500000"));
+        Daily d = daily("9000000", "0");
 
         assertThat(d.getVerdict()).isEqualTo("OVER_PACE");
-        assertThat(d.getSafePerDayNoGoals()).isEqualByComparingTo("308000");
+        assertThat(d.getSafePerDay()).isEqualByComparingTo("308000");
         assertThat(d.getSafePerDayNoSavings()).isEqualByComparingTo("355000");
         assertThat(d.getCause()).isEqualTo("PACE");
     }
@@ -190,8 +169,7 @@ class DailyVerdictTest {
         assertThat(d.getVerdict()).isEqualTo("SHORT");
         assertThat(d.getCause()).isNull();
         assertThat(d.getSafePerDay()).isEqualByComparingTo("0");
-        assertThat(d.getSafePerDayNoGoals()).isEqualByComparingTo("0");            // the rent is not a saving
-        assertThat(d.getSafePerDayNoSavings()).isEqualByComparingTo("0");
+        assertThat(d.getSafePerDayNoSavings()).isEqualByComparingTo("0");          // the rent is not a saving
     }
 
     /** Short only because of what is set aside: the walk without savings is not short, and says how much a day. */
@@ -202,7 +180,6 @@ class DailyVerdictTest {
         assertThat(d.getVerdict()).isEqualTo("SHORT");
         assertThat(d.getCause()).isNull();
         assertThat(d.getSafePerDay()).isEqualByComparingTo("0");
-        assertThat(d.getSafePerDayNoGoals()).isEqualByComparingTo("0");
         assertThat(d.getSafePerDayNoSavings()).isEqualByComparingTo("71000");      // 1,000,000 ÷ 14 days to payday
     }
 
@@ -212,68 +189,52 @@ class DailyVerdictTest {
     void theCauseIsDecidedAtOrAboveThePace() {
         BigDecimal pace = new BigDecimal("308000");
         // Exactly the pace counts as holding it.
-        assertThat(DailyAdviceService.cause(new BigDecimal("308000"), new BigDecimal("355000"), pace)).isEqualTo("GOALS");
-        assertThat(DailyAdviceService.cause(new BigDecimal("307000"), new BigDecimal("308000"), pace)).isEqualTo("SAVINGS");
-        assertThat(DailyAdviceService.cause(new BigDecimal("307000"), new BigDecimal("307000"), pace)).isEqualTo("PACE");
-        // GOALS comes first even when nothing set aside would hold the pace too.
-        assertThat(DailyAdviceService.cause(new BigDecimal("400000"), new BigDecimal("500000"), pace)).isEqualTo("GOALS");
+        assertThat(DailyAdviceService.cause(new BigDecimal("308000"), pace)).isEqualTo("SAVINGS");
+        assertThat(DailyAdviceService.cause(new BigDecimal("307000"), pace)).isEqualTo("PACE");
     }
 
-    /** The same boundary through the walk: 308,000 a day is exactly what the walk without goals allows. */
+    /** The same boundary through the walk: 355,000 a day is exactly what nothing set aside allows. */
     @Test
-    void aPaceOfExactlyWhatTheWalkWithoutGoalsAllowsIsTheGoals_oneThousandMoreIsNot() {
-        spent("7084000");                                         // 308,000 a day
-        Daily at = daily("9000000", "0", plan(1, "5000000"));
-        assertThat(at.getPaceDaily()).isEqualByComparingTo("308000");
-        assertThat(at.getSafePerDayNoGoals()).isEqualByComparingTo("308000");
+    void aPaceOfExactlyWhatNothingSetAsideAllowsIsTheSavings_oneThousandMoreIsNot() {
+        spent("8165000");                                         // 355,000 a day
+        Daily at = daily("9000000", "8000000");
+        assertThat(at.getPaceDaily()).isEqualByComparingTo("355000");
+        assertThat(at.getSafePerDayNoSavings()).isEqualByComparingTo("355000");
         assertThat(at.getVerdict()).isEqualTo("OVER_PACE");
-        assertThat(at.getCause()).isEqualTo("GOALS");
+        assertThat(at.getCause()).isEqualTo("SAVINGS");
 
-        ledger.expense(LocalDate.of(2026, 9, 13), "23000");       // 309,000 a day
-        Daily above = daily("9000000", "0", plan(1, "5000000"));
-        assertThat(above.getPaceDaily()).isEqualByComparingTo("309000");
-        assertThat(above.getCause()).isEqualTo("SAVINGS");         // 355,000 with nothing set aside still holds it
+        ledger.expense(LocalDate.of(2026, 9, 13), "23000");       // 356,000 a day
+        Daily above = daily("9000000", "8000000");
+        assertThat(above.getPaceDaily()).isEqualByComparingTo("356000");
+        assertThat(above.getCause()).isEqualTo("PACE");
     }
 
-    // ── breakdown: setAside + goals = savings ─────────────────────────────────
+    // ── breakdown: what is set aside ──────────────────────────────────────────
 
     @Test
-    void theBreakdownSplitsSavingsIntoTheRuleAndTheGoals() {
-        Daily d = daily("9000000", "600000", plan(1, "1000000"));
+    void theBreakdownsSavingsAreWhatTheRuleSetsAside() {
+        Daily d = daily("9000000", "600000");
 
         Breakdown b = d.getBreakdown();
         assertThat(d.getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(b.getSetAside()).isEqualByComparingTo("2700000");               // 600,000 today + October's 2,100,000
-        assertThat(b.getGoals()).isEqualByComparingTo("2000000");                  // 1,000,000 today and on 7 October
-        assertThat(b.getSavings()).isEqualByComparingTo("4700000");
-        assertThat(b.getSetAside().add(b.getGoals())).isEqualByComparingTo(b.getSavings());
-        assertThat(b.getNet()).isEqualByComparingTo("11300000");                   // 9M + 7M − 4.7M, as before the split
+        assertThat(b.getSavings()).isEqualByComparingTo("2700000");                // 600,000 today + October's 2,100,000
+        assertThat(b.getNet()).isEqualByComparingTo("13300000");                   // 9M + 7M − 2.7M
     }
 
     /**
-     * A saving already recorded for a later day this month is the same money on its own day, so it
-     * sits in the part it pays: a contribution to a goal with the goals, a donation with the rule.
+     * A saving already recorded for a later day this month is money leaving on its own day — a
+     * contribution to a goal as much as a donation, though a goal's monthly payment is not counted.
      */
     @Test
-    void aSavingRecordedForALaterDayCountsInThePartItPays() {
+    void aSavingRecordedForALaterDayCountsOnItsDay() {
         Transaction toGoal = ledger.add(LocalDate.of(2026, 9, 28), TransactionType.EXPENSE, TransactionSubType.INVESTMENT, "1000000");
         toGoal.setInvestmentId(1L);
         toGoal.setAllocationBucket(AllocationBucket.SAVINGS);
         ledger.add(LocalDate.of(2026, 9, 27), TransactionType.EXPENSE, TransactionSubType.DONATION, "300000")
                 .setAllocationBucket(AllocationBucket.DONATION);
 
-        Breakdown b = daily("9000000", "0", plan(1, "1000000")).getBreakdown();
-
-        assertThat(b.getGoals()).isEqualByComparingTo("2000000");                  // the 28th's row + 7 October
-        assertThat(b.getSetAside()).isEqualByComparingTo("2400000");               // the 27th's donation + October's rule
-        assertThat(b.getSetAside().add(b.getGoals())).isEqualByComparingTo(b.getSavings());
-    }
-
-    @Test
-    void withNoSavingsAtAllBothPartsAreZero() {
         Breakdown b = daily("9000000", "0").getBreakdown();
 
-        assertThat(b.getGoals()).isEqualByComparingTo("0");
-        assertThat(b.getSetAside().add(b.getGoals())).isEqualByComparingTo(b.getSavings());
+        assertThat(b.getSavings()).isEqualByComparingTo("3400000");                // the 28th + the 27th + October's rule
     }
 }

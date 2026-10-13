@@ -74,8 +74,8 @@ public class Investment {
 
     /**
      * A savings goal the owner keeps on the list but sets nothing aside for — a WISH rather than a
-     * PLAN. It asks for nothing anywhere (no reservation in the daily figure, no row in the month's
-     * savings, no suggestion), though money can still be put into it. The flag alone decides it:
+     * PLAN. It asks for nothing anywhere (no row in the month's savings, not in the advisor's "do the
+     * plans fit?", no suggestion), though money can still be put into it. The flag alone decides it:
      * the monthly payment, its start month and the deadline stay stored, so flipping it back
      * restores the plan as it was. Nullable: null = false, so rows from before it existed are plans.
      */
@@ -97,7 +97,7 @@ public class Investment {
     /**
      * The first month a savings goal's monthly payment is asked for — always stored as the 1st of
      * that month (the setter moves any day there). Before it the advisor lists no row for the goal
-     * and the daily figure sets nothing aside for it. Null = the month of {@link #purchaseDate}, so
+     * and does not count it in "do the plans fit?". Null = the month of {@link #purchaseDate}, so
      * a goal saved before this column existed keeps being asked for from the month it was created.
      */
     @Column(name = "payment_start_date")

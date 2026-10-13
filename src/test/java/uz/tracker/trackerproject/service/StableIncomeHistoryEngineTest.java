@@ -177,7 +177,7 @@ class StableIncomeHistoryEngineTest {
         AdvisorResponse before = adviseWithRaise(false);
         assertThat(before.getDaily().getIncomes()).extracting(i -> i.getDate(), i -> plain(i.getAmount()))
                 .containsExactly(tuple(LocalDate.of(2026, 10, 7), "7000000"));
-        assertThat(before.getDaily().getBreakdown().getSetAside()).isEqualByComparingTo("4200000");   // 2,100,000 now + October's
+        assertThat(before.getDaily().getBreakdown().getSavings()).isEqualByComparingTo("4200000");   // 2,100,000 now + October's
 
         AdvisorResponse after = adviseWithRaise(true);
 
@@ -185,7 +185,7 @@ class StableIncomeHistoryEngineTest {
         assertThat(after.getDaily().getIncomes()).extracting(i -> i.getDate(), i -> plain(i.getAmount()))
                 .containsExactly(tuple(LocalDate.of(2026, 10, 7), "9000000"));
         assertThat(after.getDaily().getTightestOn()).isEqualTo(LocalDate.of(2026, 11, 6));
-        assertThat(after.getDaily().getBreakdown().getSetAside()).isEqualByComparingTo("4800000");    // 2,100,000 + 2,700,000
+        assertThat(after.getDaily().getBreakdown().getSavings()).isEqualByComparingTo("4800000");    // 2,100,000 + 2,700,000
     }
 
     @Test

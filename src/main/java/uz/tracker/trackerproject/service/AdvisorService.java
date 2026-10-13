@@ -196,14 +196,13 @@ public class AdvisorService {
         // ── Free ──
         BigDecimal free = missingIncome ? null : have.add(coming).subtract(billsLeft).subtract(setAsideLeft);
 
-        // ── Savings goals with a monthly payment: outside the plan's percentages, set aside all the same ──
+        // ── Savings goals with a monthly payment: outside the plan's percentages and the daily figure ──
         List<Investment> holdings = investmentRepository.findAll();
         List<GoalMonth> goalMonths = missingIncome ? List.of() : goalMonths(holdings, date);
 
         // ── Per day: past this month, up to the salary after next ──
         DailyAdviceService.Result perDay = missingIncome ? null : dailyAdviceService.compute(
-                new DailyAdviceService.Inputs(date, have, expected, coming, setAsideLeft,
-                        goalMonths.stream().map(GoalMonth::plan).toList()));
+                new DailyAdviceService.Inputs(date, have, expected, coming, setAsideLeft));
         Daily daily = perDay == null ? null : perDay.daily();
 
         // ── What to do next ──
@@ -511,16 +510,12 @@ public class AdvisorService {
             return SavingsRow.builder().bucket("GOAL").refId(goal.getId()).name(goal.getName())
                     .target(target).paid(paid).remaining(clampZero(target.subtract(paid))).build();
         }
-
-        DailyAdviceService.Goal plan() {
-            return new DailyAdviceService.Goal(goal.getId(), monthly, paid, toTarget, startMonth);
-        }
     }
 
     /**
      * The PLANS — savings goals with a monthly payment that are not wishes — that have not reached
-     * their target (or have none) — those whose payment starts in a later month too: the daily figure sets their payment aside
-     * from that month's payday, while this month's rows list only the started ones. "Paid" is what
+     * their target (or have none) — those whose payment starts in a later month too: {@link #means}
+     * counts next month's, while this month's rows list only the started ones. "Paid" is what
      * was put into the goal this month up to and including {@code date} — a contribution recorded
      * for a later day has not left the wallets yet.
      */
@@ -625,8 +620,10 @@ public class AdvisorService {
      *
      * <p>"Really need" is measured, not assumed: the spare money is the LEAST the per-day walk ever
      * has in hand, on any day to the end of its horizon (the day before the salary after next),
-     * once every bill, loan payment and saving due by then is met AND the owner keeps spending at
-     * their own recorded pace — {@code min over d of net(d) − paceDaily × days(d)}. Every day, not
+     * once every bill, loan payment and set-aside due by then is met AND the owner keeps spending at
+     * their own recorded pace — {@code min over d of net(d) − paceDaily × days(d)}. The plans' monthly
+     * payments are not in that walk (since 13 Oct 2026): spare money is what a plan can take, so it
+     * is offered to a plan first. Every day, not
      * just the last: money that carries the owner to payday is not spare because the next salary
      * refills the account afterwards. (Measured only on the last day, a walk short by 5.1M before
      * payday still offered to invest 1.2M — more than the wallets held.) The old month-scoped

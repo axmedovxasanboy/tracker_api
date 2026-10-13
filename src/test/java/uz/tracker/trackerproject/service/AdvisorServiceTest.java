@@ -515,25 +515,14 @@ class AdvisorServiceTest {
         // The bot's lists stay as they were: goals are not in setAside.
         assertThat(r.getSetAside()).extracting(AdvisorResponse.SetAside::getBucket)
                 .containsExactly("DONATION", "EMERGENCY", "INVESTMENTS");
-
-        // The walk is handed both, to set them aside like the buckets.
-        ArgumentCaptor<DailyAdviceService.Inputs> in = ArgumentCaptor.forClass(DailyAdviceService.Inputs.class);
-        verify(dailyAdviceService).compute(in.capture());
-        assertThat(in.getValue().goals())
-                .extracting(DailyAdviceService.Goal::id, g -> g.paidThisMonth().toPlainString(),
-                        g -> g.toTarget().toPlainString())
-                .containsExactly(
-                        org.assertj.core.groups.Tuple.tuple(5L, "400000", "9000000"),
-                        org.assertj.core.groups.Tuple.tuple(6L, "0", "200000"));
     }
 
     /**
-     * A goal whose payment starts next month asks nothing yet — no row this month — but the walk is
-     * handed it with its start month, to set the payment aside from that month's payday. Without a
-     * start month the payment starts in the month the goal was created. In October both have a row.
+     * A goal whose payment starts next month asks nothing yet — no row this month. Without a start
+     * month the payment starts in the month the goal was created. In October both have a row.
      */
     @Test
-    void aGoalStartingInALaterMonthHasNoRowUntilThenButTheWalkKnowsWhenItStarts() {
+    void aGoalStartingInALaterMonthHasNoRowUntilThen() {
         Investment car = goal(5, "Car", "42000000", "0");
         car.setMonthlyContribution(new BigDecimal("3500000"));
         car.setPurchaseDate(SEP_18);
@@ -555,14 +544,6 @@ class AdvisorServiceTest {
                         org.assertj.core.groups.Tuple.tuple("EMERGENCY", null),
                         org.assertj.core.groups.Tuple.tuple("INVESTMENTS", null),
                         org.assertj.core.groups.Tuple.tuple("GOAL", 7L));
-        ArgumentCaptor<DailyAdviceService.Inputs> in = ArgumentCaptor.forClass(DailyAdviceService.Inputs.class);
-        verify(dailyAdviceService).compute(in.capture());
-        assertThat(in.getValue().goals())
-                .extracting(DailyAdviceService.Goal::id, DailyAdviceService.Goal::startMonth)
-                .containsExactly(
-                        org.assertj.core.groups.Tuple.tuple(5L, YearMonth.of(2026, 10)),
-                        org.assertj.core.groups.Tuple.tuple(6L, YearMonth.of(2026, 10)),
-                        org.assertj.core.groups.Tuple.tuple(7L, SEP));
 
         AdvisorResponse october = advise(LocalDate.of(2026, 10, 12));
 

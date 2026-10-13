@@ -274,7 +274,8 @@ public class AdvisorResponse {
      * The daily figure and everything behind it. Money is UZS; every date is the owner's local day.
      *
      * <p>For each day c from {@link AdvisorResponse#date} to {@link #until}:
-     * net(c) = have + income due by c − must-pays due by c − savings reserved by c, and
+     * net(c) = have + income due by c − must-pays due by c − the rule's set-asides by c (never the
+     * plans' monthly payments: whether those fit is {@link Means}), and
      * {@link #safePerDay} is the smallest net(c) ÷ (days from today to c, inclusive), rounded down
      * to 1,000 — the most that can be spent every day without any later payment going unmet.
      */
@@ -294,7 +295,7 @@ public class AdvisorResponse {
         private LocalDate paceTo;
         /** First day the money no longer covers what is due if {@link #paceDaily} is spent every day; null if it lasts. */
         private LocalDate runsOutOn;
-        /** Set when even spending nothing leaves the must-pays and savings unmet. */
+        /** Set when even spending nothing leaves the must-pays and the rule's set-asides unmet. */
         private ShortBy shortBy;
         /** Must-pays dated today … today + 34, overdue ones dated today; date ascending. */
         private List<Upcoming> upcoming;
@@ -306,28 +307,26 @@ public class AdvisorResponse {
          */
         private String verdict;
         /**
-         * Why, for OVER_PACE only (else null). GOALS: {@link #safePerDayNoGoals} ≥ {@link #paceDaily}
-         * — without the plans' reservations the pace would hold. SAVINGS: not GOALS, and
-         * {@link #safePerDayNoSavings} ≥ paceDaily. PACE: neither — too high even with nothing set aside.
+         * Why, for OVER_PACE only (else null). SAVINGS: {@link #safePerDayNoSavings} ≥ {@link #paceDaily}
+         * — with nothing set aside the pace would hold. PACE: too high even then. (GOALS is gone since
+         * 13 Oct 2026: the plans are no longer in this figure at all — see {@link Means}.)
          */
         private String cause;
-        /** {@link #safePerDay} by the same walk with every goal reservation removed. Same rounding. */
-        private BigDecimal safePerDayNoGoals;
-        /** The same with every savings reservation removed: the rule's buckets, what they carry, and goals. */
+        /** {@link #safePerDay} by the same walk with nothing set aside: the rule's buckets, what they carry, recorded savings. */
         private BigDecimal safePerDayNoSavings;
     }
 
-    /** net = have + comingIn − goingOut − savings, over {@code days} days. */
+    /**
+     * net = have + comingIn − goingOut − savings, over {@code days} days. {@code savings} is what the
+     * rule sets aside (with what it carries) and any saving recorded for a later day — never the
+     * plans' monthly payments.
+     */
     @Getter @Builder
     public static class Breakdown {
         private BigDecimal have;
         private BigDecimal comingIn;
         private BigDecimal goingOut;
         private BigDecimal savings;
-        /** The part of {@link #savings} that is the rule's buckets and their carry-over. */
-        private BigDecimal setAside;
-        /** The part of {@link #savings} that is goals. setAside + goals = savings. */
-        private BigDecimal goals;
         private BigDecimal net;
         private int days;
     }
