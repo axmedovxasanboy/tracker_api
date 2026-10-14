@@ -11,6 +11,7 @@ import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.TransactionType;
 
 import java.math.BigDecimal;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -186,6 +187,23 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
             """, nativeQuery = true)
     List<String> findDescriptionSuggestions(@Param("categoryId") Long categoryId,
                                             @Param("prefix") String prefix);
+
+    // Every description used in these categories, one per name whatever its case or spacing (spelt
+    // as it was last written), most used first, then most recent. The person picker's list.
+    @Query(value = """
+            SELECT used.name FROM (
+                SELECT (ARRAY_AGG(TRIM(description) ORDER BY transaction_date DESC, id DESC))[1] AS name,
+                       COUNT(*) AS times,
+                       MAX(transaction_date) AS latest
+                FROM transactions
+                WHERE category_id IN (:categoryIds)
+                  AND TRIM(description) <> ''
+                GROUP BY LOWER(TRIM(description))
+            ) used
+            ORDER BY used.times DESC, used.latest DESC, used.name
+            LIMIT 300
+            """, nativeQuery = true)
+    List<String> findDescriptionsUsedIn(@Param("categoryIds") Collection<Long> categoryIds);
 
     @Modifying
     @Query("UPDATE Transaction t SET t.card = NULL WHERE t.card.id = :cardId")

@@ -116,5 +116,12 @@ public class CategoryService {
         }
         c.setAnonymizes(Boolean.TRUE.equals(req.getAnonymizes()));
         c.setBonusIncome(Boolean.TRUE.equals(req.getBonusIncome()));
+        // Sent: as sent. Left out: an edit keeps what it had (the bot's edit form does not know the
+        // field), a new sub-category takes its parent's, a new root starts off.
+        if (req.getAsksPerson() != null) {
+            c.setAsksPerson(req.getAsksPerson());
+        } else if (c.getId() == null) {
+            c.setAsksPerson(parent != null && Boolean.TRUE.equals(parent.getAsksPerson()));
+        }
     }
 }

@@ -86,4 +86,10 @@ public class TransactionController {
     ) {
         return ResponseEntity.ok(transactionService.getDescriptionSuggestions(categoryId, q));
     }
+
+    /** The people named in a category that asks who the money is for, most used first. */
+    @GetMapping("/names")
+    public ResponseEntity<List<String>> getPersonNames(@RequestParam Long categoryId) {
+        return ResponseEntity.ok(transactionService.getPersonNames(categoryId));
+    }
 }

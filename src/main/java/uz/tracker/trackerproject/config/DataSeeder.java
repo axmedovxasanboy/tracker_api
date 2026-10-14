@@ -145,6 +145,45 @@ public class DataSeeder implements CommandLineRunner {
         // Runs last: every default and bucket category now exists, so all of them get
         // their Uzbek name in one pass.
         backfillUzbekCategoryNames();
+
+        // Categories from before "asks who it is for" get it decided once, from their label: a
+        // description field the owner called "Kimga" / "To whom" names a person. After that it
+        // is the owner's own switch on the Categories page.
+        backfillAsksPerson();
+    }
+
+    /** A description label that asks for a person: "Kimga", "Kim uchun", "To whom", "Who"… */
+    private static final java.util.regex.Pattern WHO_LABEL = java.util.regex.Pattern.compile(
+            "^(kimga|kim uchun|kimdan|kim|to whom|for whom|from whom|who)\\b.*",
+            java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE);
+
+    static boolean labelAsksPerson(String label) {
+        return label != null && WHO_LABEL.matcher(label.trim()).matches();
+    }
+
+    /**
+     * Decide asksPerson for every category that has never had it: on when its label asks for a
+     * person, or its parent's does; off otherwise. Idempotent — only nulls are written, so the
+     * owner's own choice is never overruled.
+     */
+    private void backfillAsksPerson() {
+        List<Category> unset = categoryRepository.findAll().stream()
+                .filter(c -> c.getAsksPerson() == null)
+                .toList();
+        if (unset.isEmpty()) return;
+        int on = 0;
+        for (Category c : unset) {
+            Category parent = c.getParent();
+            boolean asks = labelAsksPerson(c.getDescriptionLabel())
+                    || (parent != null && (Boolean.TRUE.equals(parent.getAsksPerson())
+                        || labelAsksPerson(parent.getDescriptionLabel())));
+            c.setAsksPerson(asks);
+            if (asks) on++;
+        }
+        categoryRepository.saveAll(unset);
+        if (on > 0) {
+            System.out.println("[DataSeeder] " + on + " category/categories now ask who the money is for.");
+        }
     }
 
     /**
@@ -665,6 +704,7 @@ public class DataSeeder implements CommandLineRunner {
         c.setColor(color);
         c.setIcon(icon);
         c.setApplicableSubType(subType);
+        c.setAsksPerson(false);
         return c;
     }
 

@@ -22,6 +22,7 @@ public class CategoryResponse {
     private Boolean descriptionRequired;
     private Boolean anonymizes;
     private Boolean bonusIncome;
+    private Boolean asksPerson;
     private Long parentId;
     private List<CategoryResponse> children;
 
@@ -38,6 +39,7 @@ public class CategoryResponse {
                 .descriptionRequired(c.getDescriptionRequired() == null || c.getDescriptionRequired())
                 .anonymizes(Boolean.TRUE.equals(c.getAnonymizes()))
                 .bonusIncome(Boolean.TRUE.equals(c.getBonusIncome()))
+                .asksPerson(Boolean.TRUE.equals(c.getAsksPerson()))
                 .parentId(c.getParent() != null ? c.getParent().getId() : null)
                 .children(c.getChildren() == null ? List.of()
                         : c.getChildren().stream().map(CategoryResponse::flat).toList())
@@ -58,6 +60,7 @@ public class CategoryResponse {
                 .descriptionRequired(c.getDescriptionRequired() == null || c.getDescriptionRequired())
                 .anonymizes(Boolean.TRUE.equals(c.getAnonymizes()))
                 .bonusIncome(Boolean.TRUE.equals(c.getBonusIncome()))
+                .asksPerson(Boolean.TRUE.equals(c.getAsksPerson()))
                 .parentId(c.getParent() != null ? c.getParent().getId() : null)
                 .children(List.of())
                 .build();

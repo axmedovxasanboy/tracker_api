@@ -24,6 +24,7 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.Month;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -210,6 +211,41 @@ public class TransactionService {
     public List<String> getDescriptionSuggestions(Long categoryId, String query) {
         if (query == null || query.isBlank()) return List.of();
         return transactionRepository.findDescriptionSuggestions(categoryId, query.trim());
+    }
+
+    /**
+     * Who the owner has named in a category that asks for a person (Category.asksPerson): every
+     * description used anywhere in its family — the root and all its sub-categories, since the same
+     * people turn up under each — one per name, most used first. The titles the server writes for a
+     * blank description (the category's own name, "Parent — Child") are not people and are left out.
+     */
+    @Transactional(readOnly = true)
+    public List<String> getPersonNames(Long categoryId) {
+        Category category = categoryRepository.findById(categoryId)
+                .orElseThrow(() -> new ResourceNotFoundException("Category", categoryId));
+        Category root = category;
+        while (root.getParent() != null) root = root.getParent();
+
+        List<Category> family = new ArrayList<>(List.of(root));
+        for (int i = 0; i < family.size(); i++) {
+            for (Category child : categoryRepository.findByParentId(family.get(i).getId())) {
+                if (family.stream().noneMatch(c -> c.getId().equals(child.getId()))) family.add(child);
+            }
+        }
+        Set<String> serverTitles = new HashSet<>(Set.of("—"));
+        for (Category c : family) {
+            serverTitles.add(lower(c.getName()));
+            if (c.getNameUz() != null) serverTitles.add(lower(c.getNameUz()));
+            if (c.getParent() != null) serverTitles.add(lower(c.getParent().getName() + " — " + c.getName()));
+        }
+        return transactionRepository.findDescriptionsUsedIn(family.stream().map(Category::getId).toList())
+                .stream()
+                .filter(name -> name != null && !serverTitles.contains(lower(name)))
+                .toList();
+    }
+
+    private static String lower(String s) {
+        return s.trim().toLowerCase(java.util.Locale.ROOT);
     }
 
     @Transactional

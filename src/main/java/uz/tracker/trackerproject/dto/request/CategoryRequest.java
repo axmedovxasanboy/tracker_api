@@ -38,4 +38,11 @@ public class CategoryRequest {
 
     /** When true (income category), its income adds the level's share of it to that month's targets — see Category.bonusIncome. */
     private Boolean bonusIncome;
+
+    /**
+     * When true, the add form asks who the money is for as a pick of people — see Category.asksPerson.
+     * Null keeps what an edited category has (the bot's edit does not send it) and gives a new
+     * sub-category its parent's.
+     */
+    private Boolean asksPerson;
 }

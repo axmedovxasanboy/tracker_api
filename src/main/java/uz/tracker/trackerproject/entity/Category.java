@@ -82,6 +82,16 @@ public class Category {
     @Column(name = "bonus_income")
     private Boolean bonusIncome;
 
+    /**
+     * When true, the description of a transaction in this category is the person the money went to
+     * (or came from) — "Kimga" under Family & support — and the web's add form asks for it as a pick
+     * from the people already named in this category's family, or a new one, the way the Loans page
+     * asks who was lent money. Null only on rows from before the field: DataSeeder decides those
+     * once from their label, and every row it or the API writes has a value.
+     */
+    @Column(name = "asks_person")
+    private Boolean asksPerson;
+
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "parent_id")
     private Category parent;
