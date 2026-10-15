@@ -111,6 +111,12 @@ public class OverviewService {
     private uz.tracker.trackerproject.repository.LevelRuleVersionRepository levelRuleVersionRepository;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private uz.tracker.trackerproject.repository.LevelChangeRepository levelChangeRepository;
+    /**
+     * Each month's rule as its first day fixed it ({@link #fixedRule}). Absent where the service is
+     * built by hand, which then works every month out from today's data, as before.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private uz.tracker.trackerproject.repository.MonthRuleRepository monthRuleRepository;
 
     @Transactional(readOnly = true)
     public OverviewIncomeResponse getIncome(YearMonth month, Currency displayCurrency) {
@@ -146,7 +152,8 @@ public class OverviewService {
      * the loan and debt balances are the CURRENT ones — no snapshots of those are stored; but which
      * obligations count (a bank loan's dates, a loan or debt's payment-start
      * month), the bonus income that raises the base, and every "paid this month" figure are
-     * scoped to the requested month.
+     * scoped to the requested month. The level and the situation are the ones the month's first day
+     * fixed ({@link #fixedRule}), where it did.
      */
     @Transactional(readOnly = true)
     public OverviewTierResponse getTier(YearMonth month, Currency displayCurrency) {
@@ -227,8 +234,11 @@ public class OverviewService {
         BigDecimal ruleDebtUzs = ruleDebtUzs(debt34Uzs, plannedSetAsideUzs, incomeUzs);
 
         // Levels 1–4 from the income − bills; Level 5 while a recorded Level 5 period covers the month.
-        Integer level = missingIncome ? null : levelOf(month, leftMoneyUzs, levelChanges());
-        String subLevel = computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
+        // A month its first day already fixed keeps that level and situation, whatever came since.
+        FixedRule fixed = missingIncome ? null : fixedRule(month);
+        Integer level = missingIncome ? null : fixed != null ? fixed.level() : levelOf(month, leftMoneyUzs, levelChanges());
+        String subLevel = fixed != null ? subLevelOf(level, fixed.situation())
+                : computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
         String levelLabel = computeLevelLabel(level, subLevel, missingIncome);
 
         // Allocation base = the stable income + the bonus received for the month (owner's decision,
@@ -279,8 +289,8 @@ public class OverviewService {
                     "Pay your mandatory subscription(s) for " + monthLabel(month)
                             + " first — your level and allocation unlock once they're covered.");
         } else {
-            allocation = computeAllocation(month, ruleBook(), level, incomeUzs, allocBaseUzs, mandatoryUzs,
-                    bankUzs, debt34Uzs, debtRatio, plannedSetAsideUzs,
+            allocation = computeAllocation(month, ruleBook(), level, fixed == null ? null : fixed.situation(),
+                    incomeUzs, allocBaseUzs, mandatoryUzs, bankUzs, debt34Uzs, debtRatio, plannedSetAsideUzs,
                     displayCurrency, paid, marks, monthPaid, upcomingChargeActions(month, displayCurrency));
         }
 
@@ -436,7 +446,10 @@ public class OverviewService {
         BigDecimal stableUzs = nullToZero(income.amountFor(selected));
         List<uz.tracker.trackerproject.entity.LevelChange> changes = levelChanges();
         SavingsRules.Book book = ruleBook();
-        Integer level = levelOf(selected, stableUzs.subtract(mandatoryUzs), changes);
+        Map<YearMonth, FixedRule> fixedRules = fixedRules();
+        FixedRule fixedSelected = fixedRule(selected, fixedRules);
+        Integer level = fixedSelected != null ? fixedSelected.level()
+                : levelOf(selected, stableUzs.subtract(mandatoryUzs), changes);
 
         // The owner's carry rule (see carriedInto): what a month leaves unpaid of target + carried is
         // carried into the next; an overpayment never carries.
@@ -450,8 +463,9 @@ public class OverviewService {
         Set<Long> salaryTree = salaryTree();
         for (YearMonth m = start; !m.isAfter(selected); m = m.plusMonths(1)) {
             BigDecimal stableM = nullToZero(income.amountFor(m));
-            Integer levelM = levelOf(m, stableM.subtract(mandatoryUzs), changes);
-            BucketMonth bm = bucketMonth(m, stableM, mandatoryUzs, levelM, book, salaryTree, today);
+            FixedRule fixedM = stableM.signum() > 0 ? fixedRule(m, fixedRules) : null;
+            Integer levelM = fixedM != null ? fixedM.level() : levelOf(m, stableM.subtract(mandatoryUzs), changes);
+            BucketMonth bm = bucketMonth(m, stableM, mandatoryUzs, levelM, fixedM, book, salaryTree, today);
             boolean isSelected = m.equals(selected);
             boolean monthHasActivity = false;
             List<MonthBucketLine> lines = new ArrayList<>(LEDGER_WIDTH);
@@ -589,11 +603,12 @@ public class OverviewService {
 
     /**
      * {@code m}'s figures as the ledger has always rebuilt them: that month's bank loans and debt
-     * asks pick its sub-level and situation, and the month's level's rules version in force then
-     * gives the percentages; its income and bonus make its base.
+     * asks pick its sub-level and situation — unless its first day fixed them ({@code fixed}) — and
+     * the month's level's rules version in force then gives the percentages; its income and bonus
+     * make its base.
      */
     private BucketMonth bucketMonth(YearMonth m, BigDecimal stableUzs, BigDecimal mandatoryUzs, Integer level,
-                                    SavingsRules.Book book, Set<Long> salaryTree, LocalDate today) {
+                                    FixedRule fixed, SavingsRules.Book book, Set<Long> salaryTree, LocalDate today) {
         // Each month is charged the bank loans that ran in IT. Asking about today instead charged
         // July for a loan taken in September, and dropped a paid-off loan from the months it was
         // still being paid in.
@@ -605,16 +620,19 @@ public class OverviewService {
         BigDecimal ruleDebtUzs = ruleDebtUzs(debt34Uzs, monthlyUzs, stableUzs);
         BigDecimal debtPaymentsUzs = bankUzs.add(debt34Uzs);
         BigDecimal debtRatio = stableUzs.signum() > 0 ? debtPaymentsUzs.divide(stableUzs, MC) : null;
-        String subLevel = stableUzs.signum() <= 0 ? null : computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
+        String subLevel = stableUzs.signum() <= 0 ? null
+                : fixed != null ? subLevelOf(level, fixed.situation())
+                : computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
         // The month's level's version in force that month — its cutoff splits, its numbers ask.
         String[] pct;
         if (stableUzs.signum() <= 0 || level == null) {
             pct = new String[LEDGER_WIDTH];                                    // no income that month: nothing asked
         } else {
             SavingsRules.Version v = book.version(level, m);
-            SavingsRules.Pick pick = SavingsRules.pick(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
-                    debt34Uzs, ruleDebtUzs, debtRatio, v.cutoff());
-            pct = v.percents(pick.situation()).strings();
+            String situation = fixed != null ? fixed.situation()
+                    : SavingsRules.pick(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
+                            debt34Uzs, ruleDebtUzs, debtRatio, v.cutoff()).situation();
+            pct = v.percents(situation).strings();
         }
         BigDecimal bonusUzs = sumBonusIncomeUzs(m);
         BigDecimal base = allocationBaseUzs(stableUzs, bonusUzs);
@@ -656,13 +674,15 @@ public class OverviewService {
         LocalDate today = LocalDate.now();
         List<uz.tracker.trackerproject.entity.LevelChange> changes = levelChanges();
         SavingsRules.Book book = ruleBook();
+        Map<YearMonth, FixedRule> fixedRules = fixedRules();
         BigDecimal[] carried = zeros();
         for (YearMonth m = start; m.isBefore(month); m = m.plusMonths(1)) {
             // Each month's own income: what it asked, and so what it left unpaid, never moves when
             // the income changes from a later month.
             BigDecimal stableM = nullToZero(income.amountFor(m));
-            BucketMonth bm = bucketMonth(m, stableM, mandatoryUzs, levelOf(m, stableM.subtract(mandatoryUzs), changes),
-                    book, salaryTree, today);
+            FixedRule fixedM = stableM.signum() > 0 ? fixedRule(m, fixedRules) : null;
+            Integer levelM = fixedM != null ? fixedM.level() : levelOf(m, stableM.subtract(mandatoryUzs), changes);
+            BucketMonth bm = bucketMonth(m, stableM, mandatoryUzs, levelM, fixedM, book, salaryTree, today);
             for (int b = 0; b < LEDGER_WIDTH; b++) {
                 carried[b] = clampZero(bm.target()[b].add(carried[b]).subtract(bm.paid()[b]));
             }
@@ -1633,7 +1653,7 @@ public class OverviewService {
      * picking the situation.
      */
     private TierAllocation computeAllocation(
-            YearMonth month, SavingsRules.Book book, Integer level,
+            YearMonth month, SavingsRules.Book book, Integer level, String fixedSituation,
             BigDecimal incomeUzs, BigDecimal allocBaseUzs, BigDecimal mandatoryUzs,
             BigDecimal bankMonthlyUzs,
             BigDecimal debt34Uzs, BigDecimal debtRatio,
@@ -1646,22 +1666,24 @@ public class OverviewService {
                     "Set monthly income to see allocation guidance.");
         }
         SavingsRules.Version version = book.version(level, month);
+        // The situation the month's first day fixed; else picked from today's loans.
         // loanInstallments = bank only → ZERO in the 4th slot, since borrowed money is personal debt.
-        SavingsRules.Pick pick = SavingsRules.pick(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO,
-                debt34Uzs, ruleDebtUzs(debt34Uzs, plannedSetAsideUzs, incomeUzs), debtRatio, version.cutoff());
-        String[] p = version.percents(pick.situation()).strings();
+        String situation = fixedSituation != null ? fixedSituation
+                : SavingsRules.pick(incomeUzs, mandatoryUzs, bankMonthlyUzs, BigDecimal.ZERO, debt34Uzs,
+                        ruleDebtUzs(debt34Uzs, plannedSetAsideUzs, incomeUzs), debtRatio, version.cutoff()).situation();
+        String[] p = version.percents(situation).strings();
         List<AllocationLine> lines = percentLines(allocBaseUzs, displayCurrency, paid, marks,
                 p[0], p[1], p[2]);
 
         // Bank installments pay via PayBankInstallmentModal; the set-aside and the ASAP pay-back
-        // (borrowed money + debts) via PayPersonalLoanModal.
-        List<ActionItem> actions = situationActions(pick.situation(), monthPaid, bankMonthlyUzs,
+        // (borrowed money + debts) via PayPersonalLoanModal — what is owed now, whatever the rule.
+        List<ActionItem> actions = situationActions(situation, monthPaid, bankMonthlyUzs,
                 nullToZero(debt34Uzs), plannedSetAsideUzs, displayCurrency, upcoming);
-        String key = SavingsRules.scenarioKey(level, pick.situation());
+        String key = SavingsRules.scenarioKey(level, situation);
 
         return TierAllocation.builder()
                 .scenarioKey(key)
-                .scenarioLabel(scenarioLabel(level, pick.situation(), version.cutoff()))
+                .scenarioLabel(scenarioLabel(level, situation, version.cutoff()))
                 .lines(lines)
                 .actions(actions)
                 .allocationLocked(isAllocationLocked(actions))
@@ -1876,11 +1898,133 @@ public class OverviewService {
                 ? YearMonth.from(latest.getMonth()) : null;
     }
 
-    /** {@code month}'s level as the engine evaluates it; null without an income that month. */
+    /** {@code month}'s level as the engine evaluates it — the one its first day fixed, if it did; null without an income that month. */
     Integer levelFor(YearMonth month) {
         BigDecimal income = stableIncomeFor(month);
         if (income == null || income.signum() <= 0) return null;
+        FixedRule fixed = fixedRule(month);
+        if (fixed != null) return fixed.level();
         return levelOf(month, income.subtract(sumActiveSubscriptionsUzs()), levelChanges());
+    }
+
+    // ── A month's rule, fixed on its first day (the owner, 2026-10-15) ────────
+
+    /** The level and the situation a month's first day decided. */
+    record FixedRule(int level, String situation) {}
+
+    /** The month under way on the owner's clock. */
+    static YearMonth ownerMonth() {
+        return YearMonth.now(LevelScheduler.OWNER_ZONE);
+    }
+
+    /**
+     * {@code month}'s rule as its first day fixed it: the stored one; for the month under way not yet
+     * stored, what its first day decides ({@link #ruleAtStart}) — the next read stores it. Null for
+     * any other month without one (the months before the rule was introduced, a month still to come),
+     * and wherever the service is built by hand: those are worked out from today's data, as before.
+     */
+    FixedRule fixedRule(YearMonth month) {
+        if (monthRuleRepository == null) return null;
+        uz.tracker.trackerproject.entity.MonthRule row = monthRuleRepository.findByMonth(month.atDay(1)).orElse(null);
+        if (row != null) return new FixedRule(row.getLevel(), row.getSituation());
+        return month.equals(ownerMonth()) ? ruleAtStart(month) : null;
+    }
+
+    /** The same, from {@link #fixedRules} read once — for the ledger's month-by-month walk. */
+    FixedRule fixedRule(YearMonth month, Map<YearMonth, FixedRule> stored) {
+        if (monthRuleRepository == null) return null;
+        FixedRule row = stored.get(month);
+        if (row != null) return row;
+        return month.equals(ownerMonth()) ? ruleAtStart(month) : null;
+    }
+
+    /** Every stored month's rule; empty where the service is built by hand. */
+    Map<YearMonth, FixedRule> fixedRules() {
+        Map<YearMonth, FixedRule> out = new java.util.HashMap<>();
+        if (monthRuleRepository == null) return out;
+        for (uz.tracker.trackerproject.entity.MonthRule r : monthRuleRepository.findAll()) {
+            if (r.getMonth() == null || r.getLevel() == null || r.getSituation() == null) continue;
+            out.put(YearMonth.from(r.getMonth()), new FixedRule(r.getLevel(), r.getSituation()));
+        }
+        return out;
+    }
+
+    /**
+     * What {@code month}'s first day decides: its income − today's bills (and a Level 5 period
+     * covering it) give the level; the bank loans taken and the money borrowed or owed BEFORE that
+     * day — as much of it as was left that morning — give the situation, by the same choice as
+     * always ({@link SavingsRules#pick}, the 10% small-monthly-loan rule applied) at the split line of
+     * the level's version in force. A loan taken during the month, or one repaid during it, changes
+     * nothing until the next month's first day. Null without an income that month.
+     */
+    FixedRule ruleAtStart(YearMonth month) {
+        BigDecimal income = stableIncomeFor(month);
+        if (income == null || income.signum() <= 0) return null;
+        BigDecimal bills = sumActiveSubscriptionsUzs();
+        int level = levelOf(month, income.subtract(bills), levelChanges());
+        LocalDate start = month.atDay(1);
+
+        BigDecimal bank = BigDecimal.ZERO;
+        for (BankLoan b : bankLoanRepository.findAll()) {
+            if (b.getMonthlyPayment() == null || b.getMonthlyPayment().signum() <= 0) continue;
+            if (b.getTakenDate() != null && !b.getTakenDate().isBefore(start)) continue;   // taken this month
+            if (!bankLoanRunsIn(b, month)) continue;
+            bank = bank.add(b.getMonthlyPayment());
+        }
+
+        BigDecimal all = BigDecimal.ZERO;
+        BigDecimal monthly = BigDecimal.ZERO;
+        for (LoanTaken l : loanTakenRepository.findAll()) {
+            if (!isUzs(l.getCurrency()) || !borrowedBefore(l.getBorrowedDate(), start)) continue;
+            List<Repaid> repaid = repaid(transactionRepository.findByRepaidLoanTakenIdOrderByTransactionDateDesc(l.getId()),
+                    markPaidRepository.findByKindAndRefId("PERSONAL_LOAN", l.getId()));
+            BigDecimal left = leftAtStart(l.getTotalAmount(), l.getPaidAmount(), l.getStatus(), repaid, start);
+            if (left.signum() <= 0) continue;
+            if (l.effectiveRepaymentType() == RepaymentType.MONTHLY) {
+                BigDecimal ask = hasStartedBy(l.getPaymentStartDate(), month) ? l.getPlannedMonthlyPayment().min(left) : BigDecimal.ZERO;
+                all = all.add(ask);
+                monthly = monthly.add(ask);
+            } else {
+                all = all.add(asapAsk(left, income));
+            }
+        }
+        for (Debt d : debtRepository.findAll()) {
+            if (!isUzs(d.getCurrency()) || !borrowedBefore(d.getBorrowedDate(), start)) continue;
+            List<Repaid> repaid = repaid(transactionRepository.findByRepaidDebtIdOrderByTransactionDateDesc(d.getId()),
+                    markPaidRepository.findByKindAndRefId("DEBT", d.getId()));
+            BigDecimal left = leftAtStart(d.getTotalAmount(), d.getPaidAmount(), d.getStatus(), repaid, start);
+            if (left.signum() > 0) all = all.add(asapAsk(left, income));
+        }
+
+        BigDecimal ratio = bank.add(all).divide(income, MC);
+        SavingsRules.Pick pick = SavingsRules.pick(income, bills, bank, BigDecimal.ZERO, all,
+                ruleDebtUzs(all, monthly, income), ratio, ruleBook().version(level, month).cutoff());
+        return new FixedRule(level, pick.situation());
+    }
+
+    /** Borrowed before {@code start} — a row without a date always counts, as everywhere else. */
+    private static boolean borrowedBefore(LocalDate borrowedDate, LocalDate start) {
+        return borrowedDate == null || borrowedDate.isBefore(start);
+    }
+
+    /**
+     * What was still owed on the morning of {@code start}: what is left now plus what was repaid
+     * since. One marked paid off without a repayment since was already settled.
+     */
+    private static BigDecimal leftAtStart(BigDecimal total, BigDecimal paid, RecordStatus status,
+                                          List<Repaid> repaid, LocalDate start) {
+        BigDecimal since = repaidSince(repaid, start);
+        BigDecimal left = clampZero(nullToZero(total).subtract(nullToZero(paid)));
+        if (status == RecordStatus.PAID) left = BigDecimal.ZERO;
+        return since.signum() > 0 ? left.add(since) : left;
+    }
+
+    /** The sub-level a situation stands for: .1 no loans, .3 heavy, .2 everything between. */
+    static String subLevelOf(Integer level, String situation) {
+        if (level == null || situation == null) return null;
+        String suffix = SavingsRules.NO_DEBT.equals(situation) ? "1"
+                : SavingsRules.HEAVY_DEBT.equals(situation) ? "3" : "2";
+        return level + "." + suffix;
     }
 
     /** Today's active monthly bills, UZS — what every month's level is measured after. */
@@ -2049,8 +2193,11 @@ public class OverviewService {
         boolean missingIncome = currentIncome == null || currentIncome.signum() <= 0;
 
         Integer curLevel = missingIncome ? null : levelFor(now);
+        FixedRule fixedNow = missingIncome ? null : fixedRule(now);
         String curSubLevel = null;
-        if (curLevel != null) {
+        if (fixedNow != null) {
+            curSubLevel = subLevelOf(curLevel, fixedNow.situation());
+        } else if (curLevel != null) {
             BigDecimal stableUzs = currentIncome;
             BigDecimal bankNow = sumBankLoanMonthlyPaymentsUzs(now);
             List<DebtAsk> asksNow = debtAsks(now, now.atEndOfMonth());

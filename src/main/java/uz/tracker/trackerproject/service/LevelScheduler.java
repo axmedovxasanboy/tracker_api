@@ -11,7 +11,8 @@ import java.time.ZoneId;
  * Evaluates the Level 5 run once a day, shortly after midnight in Tashkent, so a start or an end of
  * Level 5 is recorded in its month whichever page is opened — or none (LEVELS-ALLOCATION-SPEC §1.1:
  * a change is written only while its month is in progress). The pages that show the level evaluate
- * it too; the recorder writes only when a change is due, so running both is harmless.
+ * it too; the recorder writes only when a change is due, so running both is harmless. The same run
+ * fixes the month's savings rule on its 1st ({@link MonthRuleRecorder}).
  */
 @Component
 @RequiredArgsConstructor

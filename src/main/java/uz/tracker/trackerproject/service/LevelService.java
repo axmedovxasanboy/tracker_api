@@ -51,6 +51,9 @@ public class LevelService {
     private final LevelRuleVersionRepository versions;
     private final LevelChangeRepository changes;
     private final LevelChangeRecorder recorder;
+    /** Fixes each month's rule on its first day. Field-injected: absent where the service is built by hand. */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private MonthRuleRecorder monthRules;
 
     // ── GET /levels ───────────────────────────────────────────────────────────
 
@@ -266,6 +269,13 @@ public class LevelService {
             recorder.refresh(date);
         } catch (RuntimeException e) {
             log.warn("Could not evaluate the Level 5 run for {}: {}", date, e.toString());
+        }
+        // After the Level 5 run, so a start or an end due on the 1st is in the month's level.
+        if (monthRules == null) return;
+        try {
+            monthRules.fix(date);
+        } catch (RuntimeException e) {
+            log.warn("Could not fix the savings rule for {}: {}", YearMonth.from(date), e.toString());
         }
     }
 
