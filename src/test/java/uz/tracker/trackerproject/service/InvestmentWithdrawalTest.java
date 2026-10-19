@@ -221,6 +221,41 @@ class InvestmentWithdrawalTest {
         assertThat(InvestmentResponse.from(iman).getGrowthPercent()).isNull();
     }
 
+    /**
+     * Opening a holding on Savings lists its money in and out: the rows booked on it, and — for a
+     * holding made from a Transactions-page entry, which cannot carry its id — that first deposit.
+     */
+    @Test
+    void aHoldingsListIncludesTheEntryThatCreatedIt() {
+        Transaction first = new Transaction();
+        first.setId(40L);
+        first.setType(TransactionType.EXPENSE);
+        first.setAmount(new BigDecimal("2000000"));
+        first.setCurrency(Currency.UZS);
+        first.setDescription("IMAN");
+        first.setTransactionDate(LocalDate.of(2026, 6, 1));
+        Transaction putIn = new Transaction();
+        putIn.setId(41L);
+        putIn.setType(TransactionType.EXPENSE);
+        putIn.setAmount(new BigDecimal("3000000"));
+        putIn.setCurrency(Currency.UZS);
+        putIn.setDescription("Contribution — IMAN");
+        putIn.setTransactionDate(LocalDate.of(2026, 9, 2));
+        putIn.setInvestmentId(9L);
+        when(transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(9L)).thenReturn(List.of(putIn));
+        when(transactionRepository.findById(40L)).thenReturn(Optional.of(first));
+
+        // Booked on it only: as before.
+        assertThat(service.getInvestmentContributions(9L)).extracting(r -> r.getId()).containsExactly(41L);
+
+        iman.setOriginatingTransactionId(40L);
+        assertThat(service.getInvestmentContributions(9L)).extracting(r -> r.getId()).containsExactly(41L, 40L);
+
+        // Created on Savings: the first deposit is booked on it already and is not listed twice.
+        when(transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(9L)).thenReturn(List.of(putIn, first));
+        assertThat(service.getInvestmentContributions(9L)).extracting(r -> r.getId()).containsExactly(41L, 40L);
+    }
+
     /** The database's sub-type CHECKs — transactions and categories — are rebuilt with the new value. */
     @Test
     void theSubTypeCheckConstraintsAllowTheWithdrawal() throws Exception {

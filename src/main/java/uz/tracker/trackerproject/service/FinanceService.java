@@ -930,11 +930,26 @@ public class FinanceService {
         return InvestmentResponse.from(investmentRepository.save(i));
     }
 
+    /**
+     * Every put-in and take-out booked on one holding, newest first — what Savings lists when a
+     * holding is opened. A holding made from an entry on the Transactions page is named by that
+     * entry, which cannot carry the holding's id (the holding is made after it), so its first
+     * deposit is added from {@code originatingTransactionId}.
+     */
     @Transactional(readOnly = true)
     public List<TransactionResponse> getInvestmentContributions(Long id) {
-        if (!investmentRepository.existsById(id)) throw new ResourceNotFoundException("Investment", id);
-        return transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(id).stream()
-                .map(TransactionResponse::from).toList();
+        Investment i = investmentRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Investment", id));
+        List<Transaction> rows = new java.util.ArrayList<>(transactionRepository.findByInvestmentIdOrderByTransactionDateDesc(id));
+        Long origin = i.getOriginatingTransactionId();
+        if (origin != null && rows.stream().noneMatch(t -> origin.equals(t.getId()))) {
+            transactionRepository.findById(origin).ifPresent(first -> {
+                rows.add(first);
+                rows.sort(java.util.Comparator.comparing(Transaction::getTransactionDate)
+                        .thenComparing(Transaction::getId).reversed());
+            });
+        }
+        return rows.stream().map(TransactionResponse::from).toList();
     }
 
     // ---- Repayments ----
