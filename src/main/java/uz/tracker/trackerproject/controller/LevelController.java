@@ -3,6 +3,7 @@ package uz.tracker.trackerproject.controller;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import uz.tracker.trackerproject.dto.request.CustomSavingRequest;
 import uz.tracker.trackerproject.dto.request.LevelRulesRequest;
 import uz.tracker.trackerproject.dto.response.LevelNoticeResponse;
 import uz.tracker.trackerproject.dto.response.LevelsResponse;
@@ -40,6 +41,31 @@ public class LevelController {
     public ResponseEntity<LevelsResponse> deleteRules(@PathVariable String level, @PathVariable String month,
                                                       @RequestParam(required = false) String date) {
         return ResponseEntity.ok(service.deleteRules(level, month, parseDate(date)));
+    }
+
+    // ── The owner's own savings, beside the three ─────────────────────────────
+
+    @PostMapping("/savings")
+    public ResponseEntity<LevelsResponse> createSaving(@RequestBody CustomSavingRequest req,
+                                                       @RequestParam(required = false) String date) {
+        return ResponseEntity.ok(service.createSaving(req, parseDate(date)));
+    }
+
+    @PutMapping("/savings/{id}")
+    public ResponseEntity<LevelsResponse> renameSaving(@PathVariable Long id, @RequestBody CustomSavingRequest req,
+                                                       @RequestParam(required = false) String date) {
+        return ResponseEntity.ok(service.renameSaving(id, req, parseDate(date)));
+    }
+
+    @PostMapping("/savings/{id}/stop")
+    public ResponseEntity<LevelsResponse> stopSaving(@PathVariable Long id, @RequestBody(required = false) CustomSavingRequest req,
+                                                     @RequestParam(required = false) String date) {
+        return ResponseEntity.ok(service.stopSaving(id, req, parseDate(date)));
+    }
+
+    @DeleteMapping("/savings/{id}")
+    public ResponseEntity<LevelsResponse> deleteSaving(@PathVariable Long id, @RequestParam(required = false) String date) {
+        return ResponseEntity.ok(service.deleteSaving(id, parseDate(date)));
     }
 
     /** 200 with the oldest change {@code client} (WEB | BOT) has not seen; 204 when there is none. */

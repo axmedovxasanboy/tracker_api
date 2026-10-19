@@ -130,7 +130,9 @@ public class AnalyticsResponse {
             switch (kind) {
                 case "DONATION" -> savedDonation = savedDonation.add(amount);
                 case "EMERGENCY" -> savedEmergency = savedEmergency.add(amount);
-                case "GOAL" -> savedGoals = savedGoals.add(amount);
+                // The owner's own savings are personal pots like goals: with them in this split, never
+                // in Investments (the Set aside breakdown lists them apart, as "CUSTOM").
+                case "GOAL", "CUSTOM" -> savedGoals = savedGoals.add(amount);
                 default -> savedInvestments = savedInvestments.add(amount);
             }
         }

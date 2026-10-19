@@ -118,6 +118,8 @@ public class AnalyticsService {
     static final String DONATION = "DONATION";
     static final String EMERGENCY = "EMERGENCY";
     static final String INVESTMENTS = "INVESTMENTS";
+    /** Money put into one of the owner's own savings (AllocationBucket.CUSTOM). */
+    static final String CUSTOM = "CUSTOM";
     static final String GOAL = "GOAL";
     static final String BANK = "BANK";
     static final String LOAN = "LOAN";
@@ -190,7 +192,7 @@ public class AnalyticsService {
     }
 
     /**
-     * DONATION | EMERGENCY | INVESTMENTS | GOAL for a row of saved money, by its allocation bucket.
+     * DONATION | EMERGENCY | INVESTMENTS | CUSTOM | GOAL for a row of saved money, by its allocation bucket.
      * A donation is whatever the row's flow calls GIVEN — never decided a second time here.
      * Package-private: the V2 breakdown splits Set aside by the same rule.
      */
@@ -199,6 +201,7 @@ public class AnalyticsService {
         String bucket = overviewService.bucketOf(t);
         if (AllocationBucket.EMERGENCY.equals(bucket)) return EMERGENCY;
         if (AllocationBucket.SAVINGS.equals(bucket)) return GOAL;
+        if (AllocationBucket.CUSTOM.equals(bucket)) return CUSTOM;
         return INVESTMENTS; // INVESTMENTS, and the legacy STOCKS bucket
     }
 

@@ -18,6 +18,7 @@ import uz.tracker.trackerproject.dto.response.ProfileResponse.Rule;
 import uz.tracker.trackerproject.dto.response.TierAllocation;
 import uz.tracker.trackerproject.dto.response.TierAllocation.AllocationLine;
 import uz.tracker.trackerproject.entity.Category;
+import uz.tracker.trackerproject.entity.Investment;
 import uz.tracker.trackerproject.entity.Transaction;
 import uz.tracker.trackerproject.enums.Currency;
 import uz.tracker.trackerproject.enums.TransactionSubType;
@@ -103,6 +104,19 @@ public class ProfileService {
                     .amount(line == null ? BigDecimal.ZERO : nz(line.getMinAmount()))
                     .normalMonthAmount(share(salaryBase, percent))
                     .carried(nz(carried == null ? null : carried.get(name)))
+                    .build());
+        }
+        // Then the owner's own savings: each one this month asks for, or that carries from before.
+        for (AllocationLine line : ownLines(tier.getAllocation())) {
+            BigDecimal percent = line.isRecommended() && line.getMinPercent() != null ? line.getMinPercent() : BigDecimal.ZERO;
+            BigDecimal carry = nz(carried == null ? null : carried.get(OverviewService.customKey(line.getRefId())));
+            if (percent.signum() <= 0 && carry.signum() <= 0) continue;
+            buckets.add(Bucket.builder()
+                    .bucket(AllocationBucket.CUSTOM).refId(line.getRefId()).name(line.getLabel())
+                    .percent(percent)
+                    .amount(percent.signum() > 0 ? nz(line.getMinAmount()) : BigDecimal.ZERO)
+                    .normalMonthAmount(share(salaryBase, percent))
+                    .carried(carry)
                     .build());
         }
         Rule rule = rule(tier, month);
@@ -308,6 +322,29 @@ public class ProfileService {
                     .build());
             total = total.add(amounts[i]);
         }
+        // The own savings: what went into each this month, against its target and carry.
+        Map<Long, BigDecimal> ownPaid = overviewService.customPaid(month);
+        Map<Long, Bucket> ownTargets = new LinkedHashMap<>();
+        if (targets != null) {
+            for (Bucket b : targets) if (AllocationBucket.CUSTOM.equals(b.getBucket())) ownTargets.put(b.getRefId(), b);
+        }
+        for (Investment s : overviewService.customSavings()) {
+            BigDecimal amount = nz(ownPaid.get(s.getId()));
+            Bucket b = ownTargets.get(s.getId());
+            if (amount.signum() <= 0 && b == null) continue;
+            BigDecimal target = b == null ? (targets == null ? null : BigDecimal.ZERO) : b.getAmount();
+            BigDecimal carried = b == null ? (targets == null ? null : BigDecimal.ZERO) : b.getCarried();
+            lines.add(AllocatedLine.builder()
+                    .bucket(AllocationBucket.CUSTOM).refId(s.getId()).name(s.getName())
+                    .amount(amount)
+                    .percentOfIncome(percentOf(amount, income))
+                    .percentOfBase(percentOf(amount, savingsBase))
+                    .target(target)
+                    .carried(carried)
+                    .over(target == null ? null : clampZero(amount.subtract(target.add(nz(carried)))))
+                    .build());
+            total = total.add(amount);
+        }
         BigDecimal goals = BigDecimal.ZERO;
         for (Transaction t : transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
                 TransactionSubType.INVESTMENT, month.atDay(1), date)) {
@@ -352,6 +389,17 @@ public class ProfileService {
             buckets.add(NextBucket.builder().bucket(BUCKETS.get(i)).percent(percent)
                     .normalMonthAmount(share(salaryBase, percent)).build());
         }
+        // The own savings next month asks for; any that changes from this month says "from {month}" too.
+        Map<Long, BigDecimal> nowOwn = new java.util.HashMap<>();
+        for (Bucket b : thisBuckets) if (AllocationBucket.CUSTOM.equals(b.getBucket())) nowOwn.put(b.getRefId(), b.getPercent());
+        for (AllocationLine line : ownLines(tier.getAllocation())) {
+            BigDecimal percent = line.isRecommended() && line.getMinPercent() != null ? line.getMinPercent() : BigDecimal.ZERO;
+            same &= percent.compareTo(nz(nowOwn.remove(line.getRefId()))) == 0;
+            if (percent.signum() <= 0) continue;
+            buckets.add(NextBucket.builder().bucket(AllocationBucket.CUSTOM).refId(line.getRefId()).name(line.getLabel())
+                    .percent(percent).normalMonthAmount(share(salaryBase, percent)).build());
+        }
+        same &= nowOwn.values().stream().allMatch(p -> p.signum() == 0);
         if (same) return null;
         return NextMonth.builder()
                 .month(next.toString())
@@ -360,6 +408,12 @@ public class ProfileService {
                 .leftForSavings(leftForSavings)
                 .buckets(buckets)
                 .build();
+    }
+
+    /** The allocation's own-saving lines (CUSTOM), asked or not, in the engine's order. */
+    private static List<AllocationLine> ownLines(TierAllocation allocation) {
+        if (allocation == null || allocation.getLines() == null) return List.of();
+        return allocation.getLines().stream().filter(l -> AllocationBucket.CUSTOM.equals(l.getBucket())).toList();
     }
 
     /** The allocation line for {@code bucket} when this month's rule asks for it; null when it does not. */

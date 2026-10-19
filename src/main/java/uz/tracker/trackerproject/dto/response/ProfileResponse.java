@@ -129,8 +129,14 @@ public class ProfileResponse {
 
     @Getter @Builder
     public static class AllocatedLine {
-        /** DONATION | EMERGENCY | INVESTMENTS | GOALS */
+        /** DONATION | EMERGENCY | INVESTMENTS | CUSTOM (an own saving) | GOALS */
         private String bucket;
+        /** CUSTOM: the own saving's (Investment) id; left out for a built-in bucket. */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        private Long refId;
+        /** CUSTOM: the own saving's name; left out for a built-in bucket. */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        private String name;
         /**
          * A bucket: exactly the {@code paid} the advisor reports for it (marks included). GOALS:
          * contributions to savings goals this month, dated today or earlier.
@@ -196,8 +202,17 @@ public class ProfileResponse {
 
     @Getter @Builder
     public static class Bucket {
-        /** DONATION | EMERGENCY | INVESTMENTS */
+        /**
+         * DONATION | EMERGENCY | INVESTMENTS — always, in this order — then CUSTOM, one per own saving
+         * this month asks for or that carries.
+         */
         private String bucket;
+        /** CUSTOM: the own saving's (Investment) id; left out for a built-in bucket. */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        private Long refId;
+        /** CUSTOM: the own saving's name; left out for a built-in bucket. */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        private String name;
         private BigDecimal percent;
         /** percent × savingsBase — the month's target, the same figure as the advisor's. */
         private BigDecimal amount;
@@ -221,6 +236,12 @@ public class ProfileResponse {
     @Getter @Builder
     public static class NextBucket {
         private String bucket;
+        /** CUSTOM: the own saving's (Investment) id; left out for a built-in bucket. */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        private Long refId;
+        /** CUSTOM: the own saving's name; left out for a built-in bucket. */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        private String name;
         private BigDecimal percent;
         private BigDecimal normalMonthAmount;
     }

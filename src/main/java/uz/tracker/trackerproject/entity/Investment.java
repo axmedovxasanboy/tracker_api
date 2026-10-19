@@ -132,6 +132,20 @@ public class Investment {
     @Column(name = "originating_transaction_id")
     private Long originatingTransactionId;
 
+    /**
+     * One of the owner's own savings (Savings rules → New saving, 2026-10-19): a pot beside the three
+     * built-in buckets, asked its own percentage per level and situation
+     * ({@link LevelRuleVersion#getCustomPercents}). Put in / Take out like any holding, but its money
+     * is its own — never the Investments bucket's ({@code AllocationBucket.CUSTOM}). Never a goal or
+     * the emergency fund.
+     */
+    @Column(name = "custom_saving")
+    private Boolean customSaving;
+
+    public boolean isCustomSaving() {
+        return Boolean.TRUE.equals(customSaving);
+    }
+
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

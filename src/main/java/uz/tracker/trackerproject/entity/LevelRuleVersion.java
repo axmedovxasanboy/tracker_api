@@ -45,6 +45,21 @@ public class LevelRuleVersion {
     @MapKeyColumn(name = "situation", length = 32)
     private Map<String, SituationPercents> rules = new LinkedHashMap<>();
 
+    /**
+     * The owner's own savings' percentages in this version ({@link Investment#isCustomSaving}):
+     * {@link #cell} → percent. A saving this version does not name asks nothing here.
+     */
+    @ElementCollection(fetch = FetchType.EAGER)
+    @CollectionTable(name = "level_rule_custom_percents", joinColumns = @JoinColumn(name = "version_id"))
+    @MapKeyColumn(name = "cell", length = 64)
+    @Column(name = "percent", nullable = false, precision = 5, scale = 1)
+    private Map<String, BigDecimal> customPercents = new LinkedHashMap<>();
+
+    /** The key of one saving's percentage in one situation: "BANK_LOAN_TIGHT#12". */
+    public static String cell(String situation, Long savingId) {
+        return situation + "#" + savingId;
+    }
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

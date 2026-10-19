@@ -80,11 +80,33 @@ public final class SavingsRules {
         LEVEL1_DEFAULT = Collections.unmodifiableMap(m);
     }
 
-    /** One version of a level's rules, from a month on. */
-    public record Version(int level, YearMonth from, BigDecimal cutoff, Map<String, Percents> rules) {
+    /**
+     * One version of a level's rules, from a month on: the three built-in percentages per situation,
+     * and the owner's own savings' ({@code custom}: situation → saving id → percent; a saving a
+     * situation does not name asks nothing in it).
+     */
+    public record Version(int level, YearMonth from, BigDecimal cutoff, Map<String, Percents> rules,
+                          Map<String, Map<Long, BigDecimal>> custom) {
+        public Version(int level, YearMonth from, BigDecimal cutoff, Map<String, Percents> rules) {
+            this(level, from, cutoff, rules, Map.of());
+        }
+
         public Percents percents(String situation) {
             Percents p = rules.get(situation);
             return p != null ? p : LEVEL1_DEFAULT.get(situation);
+        }
+
+        /** The owner's own savings' percentages in {@code situation}, by saving id; empty when none. */
+        public Map<Long, BigDecimal> custom(String situation) {
+            Map<Long, BigDecimal> m = custom == null ? null : custom.get(situation);
+            return m == null ? Map.of() : m;
+        }
+
+        /** Everything {@code situation} asks: the three built-in percentages and every own saving's. */
+        public BigDecimal total(String situation) {
+            BigDecimal t = percents(situation).total();
+            for (BigDecimal p : custom(situation).values()) t = t.add(nz(p));
+            return t;
         }
 
         static Version of(LevelRuleVersion v) {
@@ -94,7 +116,27 @@ public final class SavingsRules {
                 rules.put(s, p == null ? LEVEL1_DEFAULT.get(s)
                         : new Percents(nz(p.getDonation()), nz(p.getEmergency()), nz(p.getInvestments())));
             }
-            return new Version(v.getLevel(), YearMonth.from(v.getFromMonth()), v.getCutoff(), rules);
+            Map<String, Map<Long, BigDecimal>> custom = new LinkedHashMap<>();
+            if (v.getCustomPercents() != null) {
+                for (Map.Entry<String, BigDecimal> e : v.getCustomPercents().entrySet()) {
+                    Cell c = Cell.parse(e.getKey());
+                    if (c != null) custom.computeIfAbsent(c.situation(), k -> new TreeMap<>()).put(c.savingId(), nz(e.getValue()));
+                }
+            }
+            return new Version(v.getLevel(), YearMonth.from(v.getFromMonth()), v.getCutoff(), rules, custom);
+        }
+    }
+
+    /** One stored own-saving percentage's key ({@link LevelRuleVersion#cell}), read back; null when malformed. */
+    public record Cell(String situation, Long savingId) {
+        public static Cell parse(String key) {
+            int hash = key == null ? -1 : key.indexOf('#');
+            if (hash <= 0) return null;
+            try {
+                return new Cell(key.substring(0, hash), Long.valueOf(key.substring(hash + 1)));
+            } catch (NumberFormatException e) {
+                return null;
+            }
         }
     }
 

@@ -95,6 +95,7 @@ final class HoldingLinks {
     static String kindOf(Investment h) {
         if (Boolean.TRUE.equals(h.getSavingsGoal())) return "GOAL";
         if (Boolean.TRUE.equals(h.getEmergencyFund())) return "EMERGENCY";
+        if (h.isCustomSaving()) return "CUSTOM";
         return "INVESTMENT";
     }
 

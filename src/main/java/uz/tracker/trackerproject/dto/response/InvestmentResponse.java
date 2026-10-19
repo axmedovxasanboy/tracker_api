@@ -56,6 +56,8 @@ public class InvestmentResponse {
     /** True when recorded as an opening balance (already-owned holding; no transaction, excluded
         from the monthly allocation buckets). */
     private boolean openingBalance;
+    /** One of the owner's own savings (made on Savings rules), not an investment. */
+    private boolean customSaving;
     private LocalDateTime createdAt;
 
     public static InvestmentResponse from(Investment i) {
@@ -91,6 +93,7 @@ public class InvestmentResponse {
                         : value.subtract(i.getInvestedAmount()).multiply(BigDecimal.valueOf(100))
                                 .divide(i.getInvestedAmount(), 1, RoundingMode.HALF_UP))
                 .openingBalance(Boolean.TRUE.equals(i.getOpeningBalance()))
+                .customSaving(i.isCustomSaving())
                 .createdAt(i.getCreatedAt())
                 .build();
     }

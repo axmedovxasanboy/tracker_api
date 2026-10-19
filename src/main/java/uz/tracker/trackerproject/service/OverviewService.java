@@ -599,7 +599,8 @@ public class OverviewService {
      * each bucket's target (percentage × base) and what was paid into it (marks included).
      */
     private record BucketMonth(String subLevel, String[] pct, BigDecimal bonus, BigDecimal base,
-                               BigDecimal[] target, BigDecimal[] paid, BigDecimal[] marked) {}
+                               BigDecimal[] target, BigDecimal[] paid, BigDecimal[] marked,
+                               Map<Long, BigDecimal> customTarget, Map<Long, BigDecimal> customPaid) {}
 
     /**
      * {@code m}'s figures as the ledger has always rebuilt them: that month's bank loans and debt
@@ -625,6 +626,7 @@ public class OverviewService {
                 : computeSubLevel(level, bankUzs.add(ruleDebtUzs), debtRatio);
         // The month's level's version in force that month — its cutoff splits, its numbers ask.
         String[] pct;
+        Map<Long, BigDecimal> customPct = Map.of();
         if (stableUzs.signum() <= 0 || level == null) {
             pct = new String[LEDGER_WIDTH];                                    // no income that month: nothing asked
         } else {
@@ -633,9 +635,17 @@ public class OverviewService {
                     : SavingsRules.pick(stableUzs, mandatoryUzs, bankUzs, BigDecimal.ZERO,
                             debt34Uzs, ruleDebtUzs, debtRatio, v.cutoff()).situation();
             pct = v.percents(situation).strings();
+            customPct = v.custom(situation);
         }
         BigDecimal bonusUzs = sumBonusIncomeUzs(m);
         BigDecimal base = allocationBaseUzs(stableUzs, bonusUzs);
+        // The owner's own savings, on the same base: what the month asked of each, what went in.
+        Map<Long, BigDecimal> customTarget = new java.util.HashMap<>();
+        for (Map.Entry<Long, BigDecimal> e : customPct.entrySet()) {
+            if (e.getValue() != null && e.getValue().signum() > 0) {
+                customTarget.put(e.getKey(), base.multiply(e.getValue(), MC).divide(HUNDRED, MC));
+            }
+        }
         // Marks read once per month and folded in here, so the loop never queries them twice.
         BucketPaid marks = computeBucketMarks(m);
         BucketPaid paid = withBucketMarks(computePaidThisMonth(m, Currency.UZS, false), marks);
@@ -645,7 +655,9 @@ public class OverviewService {
         }
         return new BucketMonth(subLevel, pct, bonusUzs, base, target,
                 new BigDecimal[]{paid.donation(), paid.emergency(), paid.investments()},
-                new BigDecimal[]{marks.donation(), marks.emergency(), marks.investments()});
+                new BigDecimal[]{marks.donation(), marks.emergency(), marks.investments()},
+                // Every month's put-ins, asked or not: they clear what earlier months carried in.
+                customTarget, customPaid(m));
     }
 
     /**
@@ -676,6 +688,7 @@ public class OverviewService {
         SavingsRules.Book book = ruleBook();
         Map<YearMonth, FixedRule> fixedRules = fixedRules();
         BigDecimal[] carried = zeros();
+        Map<Long, BigDecimal> carriedCustom = new java.util.HashMap<>();
         for (YearMonth m = start; m.isBefore(month); m = m.plusMonths(1)) {
             // Each month's own income: what it asked, and so what it left unpaid, never moves when
             // the income changes from a later month.
@@ -686,9 +699,24 @@ public class OverviewService {
             for (int b = 0; b < LEDGER_WIDTH; b++) {
                 carried[b] = clampZero(bm.target()[b].add(carried[b]).subtract(bm.paid()[b]));
             }
+            carryCustom(carriedCustom, bm);
         }
         for (int b = 0; b < LEDGER_WIDTH; b++) out.put(LEDGER_BUCKETS[b], carried[b]);
+        Set<Long> live = customSavings().stream().map(Investment::getId).collect(java.util.stream.Collectors.toSet());
+        for (Map.Entry<Long, BigDecimal> e : carriedCustom.entrySet()) {
+            if (live.contains(e.getKey()) && e.getValue().signum() > 0) out.put(customKey(e.getKey()), e.getValue());
+        }
         return out;
+    }
+
+    /** One month on each own saving's carry, by the same rule as the three: max(0, target + carried − paid). */
+    private static void carryCustom(Map<Long, BigDecimal> carried, BucketMonth bm) {
+        Set<Long> ids = new java.util.HashSet<>(carried.keySet());
+        ids.addAll(bm.customTarget().keySet());
+        for (Long id : ids) {
+            BigDecimal due = nullToZero(bm.customTarget().get(id)).add(nullToZero(carried.get(id)));
+            carried.put(id, clampZero(due.subtract(nullToZero(bm.customPaid().get(id)))));
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1411,8 +1439,7 @@ public class OverviewService {
             holding = investmentRepository.findById(investmentId).orElse(null);
         }
         var booked = AllocationBucket.forHolding(subType, holding);
-        return AllocationBucket.forSubType(booked,
-                holding != null && Boolean.TRUE.equals(holding.getSavingsGoal()));
+        return AllocationBucket.forPayment(booked, holding);
     }
 
     @Transactional(readOnly = true)
@@ -1531,6 +1558,7 @@ public class OverviewService {
                         uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT, start, end)) {
             BigDecimal amt = t.getAmount();
             if (amt == null || amt.signum() <= 0) continue;
+            if (AllocationBucket.CUSTOM.equals(t.getAllocationBucket())) continue;   // an own saving's: customPaid
             if (isSavingsGoalTx(t)) savings = savings.add(amt);
             else investments = investments.add(amt);
         }
@@ -1596,7 +1624,7 @@ public class OverviewService {
             case "INVESTMENTS" -> transactionRepository
                     .findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
                             uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT, start, end)
-                    .stream().filter(t -> !isSavingsGoalTx(t))
+                    .stream().filter(t -> !isSavingsGoalTx(t) && !AllocationBucket.CUSTOM.equals(t.getAllocationBucket()))
                     .forEach(t -> rows.add(investmentBucketRow(t, "INVESTMENTS")));
             case "SAVINGS" -> transactionRepository
                     .findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
@@ -1674,6 +1702,7 @@ public class OverviewService {
         String[] p = version.percents(situation).strings();
         List<AllocationLine> lines = percentLines(allocBaseUzs, displayCurrency, paid, marks,
                 p[0], p[1], p[2]);
+        lines.addAll(customLines(month, version, situation, allocBaseUzs, displayCurrency));
 
         // Bank installments pay via PayBankInstallmentModal; the set-aside and the ASAP pay-back
         // (borrowed money + debts) via PayPersonalLoanModal — what is owed now, whatever the rule.
@@ -2412,6 +2441,56 @@ public class OverviewService {
                 .paidPercent(paidPercent)
                 .remainingAmount(remaining)
                 .build();
+    }
+
+    // ── The owner's own savings ───────────────────────────────────────────────
+
+    /** The key an own saving's carry is kept under beside DONATION / EMERGENCY / INVESTMENTS: "CUSTOM:12". */
+    public static String customKey(Long savingId) {
+        return AllocationBucket.CUSTOM + ":" + savingId;
+    }
+
+    /** The owner's own savings — the pots made on Savings rules — oldest first. */
+    public List<Investment> customSavings() {
+        List<Investment> all = investmentRepository.findAll();
+        return all == null ? List.of() : all.stream()
+                .filter(Investment::isCustomSaving)
+                .sorted(Comparator.comparing(Investment::getId))
+                .toList();
+    }
+
+    /** What went into each own saving in {@code month}, by its pot's id: its put-ins, by transaction date. */
+    Map<Long, BigDecimal> customPaid(YearMonth month) {
+        Map<Long, BigDecimal> out = new java.util.HashMap<>();
+        List<Transaction> rows = transactionRepository.findBySubTypeAndTransactionDateBetweenOrderByTransactionDateDesc(
+                uz.tracker.trackerproject.enums.TransactionSubType.INVESTMENT, month.atDay(1), month.atEndOfMonth());
+        for (Transaction t : rows == null ? List.<Transaction>of() : rows) {
+            if (!AllocationBucket.CUSTOM.equals(t.getAllocationBucket()) || t.getInvestmentId() == null) continue;
+            if (t.getAmount() == null || t.getAmount().signum() <= 0) continue;
+            out.merge(t.getInvestmentId(), t.getAmount(), BigDecimal::add);
+        }
+        return out;
+    }
+
+    /**
+     * One line per own saving, after the three: its percentage in the month's situation (the
+     * version in force; none → not asked this month), on the same base, and what went in. Every
+     * saving has a line, asked or not, so what earlier months left unpaid can still be shown.
+     */
+    private List<AllocationLine> customLines(YearMonth month, SavingsRules.Version version, String situation,
+                                             BigDecimal baseUzs, Currency displayCurrency) {
+        List<Investment> savings = customSavings();
+        if (savings.isEmpty()) return List.of();
+        Map<Long, BigDecimal> percents = version.custom(situation);
+        Map<Long, BigDecimal> paid = customPaid(month);
+        List<AllocationLine> lines = new ArrayList<>(savings.size());
+        for (Investment s : savings) {
+            BigDecimal pct = percents.get(s.getId());
+            String pctStr = pct == null || pct.signum() <= 0 ? null : pct.stripTrailingZeros().toPlainString();
+            lines.add(line(AllocationBucket.CUSTOM, s.getName(), pctStr, baseUzs, displayCurrency,
+                    nullToZero(paid.get(s.getId())), BigDecimal.ZERO).toBuilder().refId(s.getId()).build());
+        }
+        return lines;
     }
 
     private TierAllocation notDefinedAllocation(String code, Map<String, String> params, String note) {

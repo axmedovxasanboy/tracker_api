@@ -186,7 +186,8 @@ public class AdvisorService {
         List<SetAside> setAside = new ArrayList<>();
         for (BucketDue d : bucketDues(allocation, carried)) {
             if (d.remaining().signum() <= 0) continue;
-            setAside.add(SetAside.builder().bucket(d.bucket()).percent(d.percent()).target(d.target())
+            setAside.add(SetAside.builder().bucket(d.bucket()).refId(d.refId()).name(d.name())
+                    .percent(d.percent()).target(d.target())
                     .carried(d.carried()).paid(d.paid()).remaining(d.remaining()).build());
         }
         BigDecimal setAsideLeft = setAside.stream().map(SetAside::getRemaining).reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -232,6 +233,16 @@ public class AdvisorService {
         if (!missingIncome) {
             if (!afterBills) {
                 for (SetAside a : setAside) {
+                    if (AllocationBucket.CUSTOM.equals(a.getBucket())) {
+                        suggestions.add(Suggestion.builder()
+                                .code("advisor.s.setAsideOwn")
+                                .params(Map.of("bucket", AllocationBucket.CUSTOM, "name", a.getName()))
+                                .text("Set aside " + fmt(a.getRemaining()) + " for " + a.getName() + ".")
+                                .kind("DO").action("SET_ASIDE").bucket(AllocationBucket.CUSTOM).refId(a.getRefId())
+                                .amount(a.getRemaining())
+                                .build());
+                        continue;
+                    }
                     boolean starting = "EMERGENCY".equals(a.getBucket()) && !hasEmergencyFund;
                     suggestions.add(Suggestion.builder()
                             .code(starting ? "advisor.s.startEmergency" : "advisor.s.setAside")
@@ -433,7 +444,8 @@ public class AdvisorService {
         List<SavingsRow> rows = new ArrayList<>();
         for (BucketDue d : buckets) {
             if (d.target().signum() <= 0 && d.carried().signum() <= 0) continue;
-            rows.add(SavingsRow.builder().bucket(d.bucket()).percent(d.percent()).target(d.target())
+            rows.add(SavingsRow.builder().bucket(d.bucket()).refId(d.refId()).name(d.name())
+                    .percent(d.percent()).target(d.target())
                     .carried(d.carried()).paid(d.paid()).remaining(d.remaining()).build());
         }
         for (GoalMonth g : goals) {
@@ -471,7 +483,7 @@ public class AdvisorService {
      * Package-private with {@link #bucketDues}: Analytics' "asked" is this month's target + carried.
      */
     record BucketDue(String bucket, BigDecimal percent, BigDecimal target, BigDecimal carried,
-                             BigDecimal paid, BigDecimal remaining) {}
+                             BigDecimal paid, BigDecimal remaining, Long refId, String name) {}
 
     /**
      * Each bucket of the Plan's allocation with what earlier months carried into it:
@@ -482,13 +494,16 @@ public class AdvisorService {
         List<BucketDue> out = new ArrayList<>();
         if (allocation == null || allocation.getLines() == null) return out;
         for (TierAllocation.AllocationLine line : allocation.getLines()) {
-            BigDecimal carry = nz(carried.get(line.getBucket()));
+            // An own saving carries under its own key ("CUSTOM:12"), each apart from the others.
+            boolean own = AllocationBucket.CUSTOM.equals(line.getBucket());
+            BigDecimal carry = nz(carried.get(own ? OverviewService.customKey(line.getRefId()) : line.getBucket()));
             boolean asked = line.isRecommended();
             BigDecimal target = asked ? nz(line.getMinAmount()) : BigDecimal.ZERO;
             BigDecimal percent = asked ? line.getMinPercent() : BigDecimal.ZERO;
             BigDecimal paid = nz(line.getPaidAmount());
             out.add(new BucketDue(line.getBucket(), percent, target, carry, paid,
-                    clampZero(target.add(carry).subtract(paid))));
+                    clampZero(target.add(carry).subtract(paid)),
+                    own ? line.getRefId() : null, own ? line.getLabel() : null));
         }
         return out;
     }

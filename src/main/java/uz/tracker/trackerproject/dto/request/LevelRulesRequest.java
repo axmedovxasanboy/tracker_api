@@ -24,5 +24,7 @@ public class LevelRulesRequest {
         private BigDecimal donation;
         private BigDecimal emergency;
         private BigDecimal investments;
+        /** Own savings' percentages by id; a saving left out keeps the one in force at {@code from}. */
+        private Map<Long, BigDecimal> custom;
     }
 }

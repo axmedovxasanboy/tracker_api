@@ -909,6 +909,8 @@ public class FinanceService {
                     req.getDate(), req.getCardId(), req.getCategoryId(),
                     description);
             tx.setInvestmentId(i.getId());
+            // An own saving's money is its own: counted for it, never in the Investments bucket.
+            if (i.isCustomSaving()) tx.setAllocationBucket(AllocationBucket.CUSTOM);
             transactionRepository.save(tx);
         }
 

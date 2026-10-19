@@ -796,7 +796,8 @@ public class TransactionService {
         // (see AllocationBucket). An edit re-decides it, which is correct — editing a transaction
         // is gated on both its old and its new month being open, so a genuine mis-categorisation
         // stays correctable while a closed month cannot move.
-        t.setAllocationBucket(AllocationBucket.forSubType(req.getSubType(), fundsASavingsGoal(req)));
+        t.setAllocationBucket(fundsAnOwnSaving(req) ? AllocationBucket.CUSTOM
+                : AllocationBucket.forSubType(req.getSubType(), fundsASavingsGoal(req)));
         // Pure-cash transactions (no card) ALWAYS book the full amount as cash so the
         // cash-balance query can attribute them. Card-linked rows honour whatever the
         // request specified (0 = pure card, > 0 = split payment).
@@ -921,6 +922,12 @@ public class TransactionService {
         return investmentRepository.findById(req.getInvestmentId())
                 .map(i -> Boolean.TRUE.equals(i.getSavingsGoal()))
                 .orElse(false);
+    }
+
+    /** Does this request's INVESTMENT row put money into one of the owner's own savings? Only a top-up names its pot. */
+    private boolean fundsAnOwnSaving(TransactionRequest req) {
+        if (req.getSubType() != TransactionSubType.INVESTMENT || req.getInvestmentId() == null) return false;
+        return investmentRepository.findById(req.getInvestmentId()).map(Investment::isCustomSaving).orElse(false);
     }
 
     private static String emptyToNull(String s) {

@@ -120,7 +120,7 @@ public class AnalyticsBreakdownService {
     static final String PERSON = "PERSON";
 
     /** Set aside's groups, in the page's fixed order. */
-    static final List<String> SET_ASIDE_GROUPS = List.of("INVESTMENTS", "EMERGENCY", "GOALS", "DONATIONS");
+    static final List<String> SET_ASIDE_GROUPS = List.of("INVESTMENTS", "EMERGENCY", "CUSTOM", "GOALS", "DONATIONS");
     /** What moved but is no income or spending, in the page's fixed order. */
     static final List<TransactionFlow> MOVED_FLOWS = List.of(TransactionFlow.BORROWED, TransactionFlow.LENT,
             TransactionFlow.RETURNED, TransactionFlow.FROM_SAVINGS);
@@ -555,6 +555,7 @@ public class AnalyticsBreakdownService {
             case AnalyticsService.DONATION -> "DONATIONS";
             case AnalyticsService.EMERGENCY -> "EMERGENCY";
             case AnalyticsService.GOAL -> "GOALS";
+            case AnalyticsService.CUSTOM -> "CUSTOM";
             default -> "INVESTMENTS";
         };
         Ref top = Ref.of("group:" + group, GROUP, null, group, null);
@@ -673,6 +674,8 @@ public class AnalyticsBreakdownService {
                 }
                 case SET_ASIDE -> {
                     for (String g : SET_ASIDE_GROUPS) {
+                        // The own savings' group only once there is one: it is a choice, not a given.
+                        if ("CUSTOM".equals(g) && tables.holdings().stream().noneMatch(Investment::isCustomSaving)) continue;
                         always(new LineId(Part.SET_ASIDE, "group:" + g, null), Ref.of("group:" + g, GROUP, null, g, null));
                         tops.add("group:" + g);
                     }

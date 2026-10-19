@@ -35,13 +35,14 @@ record PositionReader(MonthCloseService monthCloseService, EmergencyRepository e
             wallets = wallets.add(nz(w.computed()));
         }
 
-        // The Savings page's split: a goal, else the emergency fund, else a plain investment.
+        // The Savings page's split: a goal (or an own saving — a personal pot, counted with them, as
+        // Analytics' flow does), else the emergency fund, else a plain investment.
         BigDecimal emergencyFund = BigDecimal.ZERO;
         BigDecimal investments = BigDecimal.ZERO;
         BigDecimal goals = BigDecimal.ZERO;
         for (Investment i : holdings) {
             BigDecimal value = valueOf.apply(i);
-            if (Boolean.TRUE.equals(i.getSavingsGoal())) goals = goals.add(value);
+            if (Boolean.TRUE.equals(i.getSavingsGoal()) || i.isCustomSaving()) goals = goals.add(value);
             else if (Boolean.TRUE.equals(i.getEmergencyFund())) emergencyFund = emergencyFund.add(value);
             else investments = investments.add(value);
         }

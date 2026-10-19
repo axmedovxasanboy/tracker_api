@@ -258,4 +258,27 @@ class AllocationBucketWriteTimeTest {
 
         assertThat(savedTransaction().getAllocationBucket()).isEqualTo("EMERGENCY");
     }
+
+    /** One of the owner's own savings (made on Savings rules): its money is its own, never Investments. */
+    @Test
+    void aTopUpOfAnOwnSavingIsStampedCustom() {
+        Investment car = holding(11L, false);
+        car.setCustomSaving(true);
+        when(investmentRepository.findById(11L)).thenReturn(Optional.of(car));
+
+        transactionService.create(topUp(11L));
+
+        assertThat(savedTransaction().getAllocationBucket()).isEqualTo("CUSTOM");
+    }
+
+    @Test
+    void puttingMoneyIntoAnOwnSavingStampsItCustom() {
+        Investment car = holding(11L, false);
+        car.setCustomSaving(true);
+        when(investmentRepository.findById(11L)).thenReturn(Optional.of(car));
+
+        financeService.contributeToInvestment(11L, contribution());
+
+        assertThat(savedTransaction().getAllocationBucket()).isEqualTo("CUSTOM");
+    }
 }

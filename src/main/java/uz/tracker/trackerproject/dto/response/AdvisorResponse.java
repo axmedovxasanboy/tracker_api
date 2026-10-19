@@ -231,8 +231,14 @@ public class AdvisorResponse {
 
     @Getter @Builder
     public static class SetAside {
-        /** DONATION | EMERGENCY | INVESTMENTS */
+        /** DONATION | EMERGENCY | INVESTMENTS | CUSTOM (one of the owner's own savings) */
         private String bucket;
+        /** CUSTOM: the saving's (Investment) id; left out for a built-in bucket. */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        private Long refId;
+        /** CUSTOM: the saving's name; left out for a built-in bucket. */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        private String name;
         private BigDecimal percent;
         /** This month's rule amount (percent × base); 0 for a bucket the rule does not ask for. */
         private BigDecimal target;
@@ -249,11 +255,11 @@ public class AdvisorResponse {
      */
     @Getter @Builder
     public static class SavingsRow {
-        /** DONATION | EMERGENCY | INVESTMENTS | GOAL */
+        /** DONATION | EMERGENCY | INVESTMENTS | CUSTOM (an own saving, carried like the three) | GOAL */
         private String bucket;
-        /** GOAL: the goal's (Investment) id; null for a bucket. */
+        /** GOAL / CUSTOM: the goal's or the saving's (Investment) id; null for a built-in bucket. */
         private Long refId;
-        /** GOAL: the goal's name; null for a bucket. */
+        /** GOAL / CUSTOM: its name; null for a built-in bucket. */
         private String name;
         /** The bucket's percentage; null for a GOAL, whose payment is a set amount. */
         private BigDecimal percent;
@@ -398,9 +404,9 @@ public class AdvisorResponse {
          * CLOSE_MONTH, CHECK_IN, SET_ASIDE, ADD_GOAL.
          */
         private String action;
-        /** PAY_SUBSCRIPTION: the subscription id. SET_ASIDE into a goal: the goal's id. */
+        /** PAY_SUBSCRIPTION: the subscription id. SET_ASIDE into a goal or an own saving: its id. */
         private Long refId;
-        /** SET_ASIDE: DONATION | EMERGENCY | INVESTMENTS | SAVINGS (a goal, see refId). */
+        /** SET_ASIDE: DONATION | EMERGENCY | INVESTMENTS | SAVINGS (a goal, see refId) | CUSTOM (an own saving, see refId; params.name). */
         private String bucket;
         private BigDecimal amount;
     }

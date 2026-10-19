@@ -33,12 +33,24 @@ public class LevelsResponse {
     private String firstMonth;
     /** Always five entries. */
     private List<Level> levels;
+    /** The owner's own savings, oldest first — a column each beside the three. Empty when none. */
+    private List<CustomSaving> customSavings;
 
     @Getter @Builder
     public static class Percents {
         private BigDecimal donation;
         private BigDecimal emergency;
         private BigDecimal investments;
+        /** Each own saving's percentage, by its id — every saving listed, 0 when not asked. */
+        private Map<Long, BigDecimal> custom;
+    }
+
+    @Getter @Builder
+    public static class CustomSaving {
+        private Long id;
+        private String name;
+        /** Whether money ever moved in or out of it, or it holds any: then it can be stopped, not deleted. */
+        private boolean hasMoney;
     }
 
     @Getter @Builder

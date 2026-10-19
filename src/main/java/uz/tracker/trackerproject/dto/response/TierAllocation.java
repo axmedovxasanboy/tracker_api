@@ -98,10 +98,17 @@ public class TierAllocation {
         private BigDecimal unlockThreshold;
     }
 
-    @Getter @Builder
+    @Getter @Builder(toBuilder = true)
     public static class AllocationLine {
-        /** Stable identifier for the bucket: DONATION / EMERGENCY / INVESTMENTS. */
+        /**
+         * Stable identifier for the bucket: DONATION / EMERGENCY / INVESTMENTS, or CUSTOM — one of
+         * the owner's own savings, named by {@link #refId} and {@link #label}.
+         */
         private String bucket;
+
+        /** CUSTOM only: the own saving's pot (its Investment id). Left out for the three built-in buckets. */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        private Long refId;
 
         /** Human label — e.g. "Donation". */
         private String label;

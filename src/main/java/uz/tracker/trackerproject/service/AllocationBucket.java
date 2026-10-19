@@ -28,6 +28,11 @@ public final class AllocationBucket {
     public static final String INVESTMENTS = "INVESTMENTS";
     public static final String SAVINGS = "SAVINGS";
     public static final String STOCKS = "STOCKS";
+    /**
+     * A put-in to one of the owner's own savings ({@code Investment.isCustomSaving}): counted for that
+     * saving alone — never in Investments, whose sum of INVESTMENT rows it would otherwise join.
+     */
+    public static final String CUSTOM = "CUSTOM";
 
     private AllocationBucket() { }
 
@@ -50,6 +55,16 @@ public final class AllocationBucket {
             case INVESTMENT -> savingsGoalTarget ? AllocationBucket.SAVINGS : AllocationBucket.INVESTMENTS;
             default -> null;
         };
+    }
+
+    /**
+     * The bucket a payment of {@code subType} into {@code holding} credits: an own saving's pot
+     * credits CUSTOM; anything else what {@link #forSubType} says, a goal telling SAVINGS from
+     * INVESTMENTS.
+     */
+    public static String forPayment(TransactionSubType subType, Investment holding) {
+        if (holding != null && holding.isCustomSaving() && subType == TransactionSubType.INVESTMENT) return CUSTOM;
+        return forSubType(subType, holding != null && Boolean.TRUE.equals(holding.getSavingsGoal()));
     }
 
     /**
