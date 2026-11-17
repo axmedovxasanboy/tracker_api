@@ -234,6 +234,18 @@ public class FinanceController {
         return ResponseEntity.ok(financeService.repayLoanTaken(id, req));
     }
 
+    @PostMapping("/loans-taken/{id}/installments")
+    public ResponseEntity<LoanTakenResponse> switchNasiyaToInstallments(
+            @PathVariable Long id, @RequestBody NasiyaInstallmentsRequest req) {
+        return ResponseEntity.ok(financeService.switchNasiyaToInstallments(id, req));
+    }
+
+    @PostMapping("/loans-taken/{id}/left")
+    public ResponseEntity<LoanTakenResponse> setNasiyaLeft(
+            @PathVariable Long id, @RequestBody NasiyaLeftRequest req) {
+        return ResponseEntity.ok(financeService.setNasiyaLeft(id, req));
+    }
+
     @PutMapping("/loans-taken/{id}/plan")
     public ResponseEntity<LoanTakenResponse> setLoanTakenPlan(
             @PathVariable Long id, @RequestBody java.util.Map<String, java.math.BigDecimal> body) {

@@ -591,7 +591,15 @@ public class TransactionService {
         switch (req.getSubType()) {
             case LOAN_RECEIVED -> loanTakenRepository.findByOriginatingTransactionId(tx.getId())
                     .ifPresent(l -> {
-                        l.setTotalAmount(req.getAmount());
+                        if (l.getPrincipalAmount() != null) {
+                            // A nasiya (or any loan with a principal) keeps its cost: the money
+                            // received follows the transaction, the total moves by as much.
+                            BigDecimal cost = nullToZero(l.getTotalAmount()).subtract(l.getPrincipalAmount());
+                            l.setPrincipalAmount(req.getAmount());
+                            l.setTotalAmount(req.getAmount().add(cost));
+                        } else {
+                            l.setTotalAmount(req.getAmount());
+                        }
                         // A new total moves where what was paid leaves the loan (paid off, or not any more).
                         if (nullToZero(l.getPaidAmount()).signum() > 0 || l.getStatus() == RecordStatus.PAID) {
                             l.setStatus(FinanceService.repaymentStatus(nullToZero(l.getPaidAmount()), l.getTotalAmount()));

@@ -34,6 +34,15 @@ public class LoanTakenResponse {
     private BigDecimal monthlyPayment;
     private BigDecimal plannedMonthlyPayment;
 
+    /** A nasiya loan (Batch 75); false for every other loan. */
+    private boolean nasiya;
+    /** The money that came into the wallet; null unless set (then it equals totalAmount). */
+    private BigDecimal principalAmount;
+    /** A nasiya's cost: max(0, total − principal) — its fee, later fee + penalty. Null unless nasiya. */
+    private BigDecimal extraCost;
+    /** The day a nasiya was switched to installments; null unless switched. */
+    private LocalDate installmentsSince;
+
     public static LoanTakenResponse from(LoanTaken l) {
         return LoanTakenResponse.builder()
                 .id(l.getId())
@@ -52,6 +61,17 @@ public class LoanTakenResponse {
                 .createdAt(l.getCreatedAt())
                 .monthlyPayment(l.getMonthlyPayment())
                 .plannedMonthlyPayment(l.getPlannedMonthlyPayment())
+                .nasiya(l.isNasiyaLoan())
+                .principalAmount(l.getPrincipalAmount())
+                .extraCost(l.isNasiyaLoan() ? extraCost(l) : null)
+                .installmentsSince(l.getInstallmentsSince())
                 .build();
+    }
+
+    private static BigDecimal extraCost(LoanTaken l) {
+        BigDecimal principal = l.receivedPrincipal();
+        if (principal == null || l.getTotalAmount() == null) return BigDecimal.ZERO;
+        BigDecimal cost = l.getTotalAmount().subtract(principal);
+        return cost.signum() > 0 ? cost : BigDecimal.ZERO;
     }
 }

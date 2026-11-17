@@ -106,6 +106,27 @@ public class LoanTaken {
     @Column(name = "originating_transaction_id")
     private Long originatingTransactionId;
 
+    /**
+     * A nasiya loan (Uzum Nasiya and the like, Batch 75): a service lends {@link #principalAmount}
+     * for a fixed term and is owed {@link #totalAmount} (principal + its fee) by {@link #dueDate}.
+     * Not paid by then, the owner switches it to installments ({@link #installmentsSince}), after
+     * which it is an ordinary MONTHLY loan. Null/false on every other loan.
+     */
+    @Column(name = "nasiya")
+    private Boolean nasiya;
+
+    /**
+     * The money that actually landed in the wallet — what the LOAN_RECEIVED transaction holds.
+     * Null = the same as {@link #totalAmount} (every loan before nasiya existed). The difference
+     * total − principal is the loan's cost (fee, later the penalty) and never moves wallet money.
+     */
+    @Column(name = "principal_amount", precision = 19, scale = 4)
+    private BigDecimal principalAmount;
+
+    /** The day the owner switched this nasiya to installments; null = not switched. */
+    @Column(name = "installments_since")
+    private LocalDate installmentsSince;
+
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
@@ -124,5 +145,19 @@ public class LoanTaken {
     public RepaymentType effectiveRepaymentType() {
         boolean hasPlan = plannedMonthlyPayment != null && plannedMonthlyPayment.signum() > 0;
         return hasPlan && repaymentType != RepaymentType.ASAP ? RepaymentType.MONTHLY : RepaymentType.ASAP;
+    }
+
+    public boolean isNasiyaLoan() {
+        return Boolean.TRUE.equals(nasiya);
+    }
+
+    /** A nasiya not switched to installments yet: owed in full by its deadline. */
+    public boolean isOpenNasiya() {
+        return isNasiyaLoan() && installmentsSince == null && dueDate != null;
+    }
+
+    /** The money that came into the wallet: the principal, else the total. */
+    public BigDecimal receivedPrincipal() {
+        return principalAmount != null ? principalAmount : totalAmount;
     }
 }

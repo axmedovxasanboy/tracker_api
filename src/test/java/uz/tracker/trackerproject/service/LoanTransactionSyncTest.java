@@ -4,6 +4,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 import uz.tracker.trackerproject.dto.request.BalanceTransferRequest;
+import uz.tracker.trackerproject.dto.request.LoanTakenRequest;
+import uz.tracker.trackerproject.dto.request.NasiyaInstallmentsRequest;
+import uz.tracker.trackerproject.dto.request.NasiyaLeftRequest;
+import uz.tracker.trackerproject.dto.response.LoanTakenResponse;
+import uz.tracker.trackerproject.enums.RepaymentType;
 import uz.tracker.trackerproject.dto.request.InvestmentContributeRequest;
 import uz.tracker.trackerproject.dto.request.MonthlyPaymentPayRequest;
 import uz.tracker.trackerproject.dto.request.RepaymentRequest;
@@ -664,5 +669,207 @@ class LoanTransactionSyncTest {
 
         assertThat(loan.getTotalAmount()).isEqualByComparingTo("600000");
         assertThat(loan.getStatus()).isEqualTo(RecordStatus.PAID);
+    }
+
+    // ── Nasiya (Batch 75): the wallet holds the principal, the total its fee on top ──
+
+    private static final LocalDate NOV_17 = LocalDate.of(2026, 11, 17);
+    private static final LocalDate DEC_17 = LocalDate.of(2026, 12, 17);
+
+    private static LoanTakenRequest nasiya(String principal, String total) {
+        LoanTakenRequest r = new LoanTakenRequest();
+        r.setLenderName("Uzum Nasiya");
+        r.setNasiya(true);
+        r.setPrincipalAmount(principal == null ? null : n(principal));
+        r.setTotalAmount(n(total));
+        r.setCurrency(Currency.UZS);
+        r.setBorrowedDate(NOV_17);
+        r.setDueDate(DEC_17);
+        r.setRepaymentType(RepaymentType.ASAP);
+        r.setMoveMoney(true);
+        return r;
+    }
+
+    /** A request as an edit sends it: the loan's own fields, nasiya keys left out (as the bot does). */
+    private static LoanTakenRequest editOf(LoanTaken l) {
+        LoanTakenRequest r = new LoanTakenRequest();
+        r.setLenderName(l.getLenderName());
+        r.setTotalAmount(l.getTotalAmount());
+        r.setCurrency(l.getCurrency());
+        r.setBorrowedDate(l.getBorrowedDate());
+        r.setDueDate(l.getDueDate());
+        r.setPlannedMonthlyPayment(l.getPlannedMonthlyPayment());
+        return r;
+    }
+
+    private Transaction mirrorOf(LoanTaken l) {
+        return transactions.get(l.getOriginatingTransactionId());
+    }
+
+    @Test
+    void aNasiyaBooksOnlyThePrincipalIntoTheWallet_andOwesThePrincipalPlusItsFee() {
+        LoanTakenRequest req = nasiya("6000000", "6300000");
+        req.setPlannedMonthlyPayment(n("500000"));          // a nasiya not switched has no plan
+        LoanTakenResponse r = finance.createLoanTaken(req);
+
+        LoanTaken l = loans.getFirst();
+        assertThat(mirrorOf(l).getAmount()).isEqualByComparingTo("6000000");
+        assertThat(mirrorOf(l).getType()).isEqualTo(TransactionType.INCOME);
+        assertThat(r.isNasiya()).isTrue();
+        assertThat(r.getPrincipalAmount()).isEqualByComparingTo("6000000");
+        assertThat(r.getTotalAmount()).isEqualByComparingTo("6300000");
+        assertThat(r.getRemainingAmount()).isEqualByComparingTo("6300000");
+        assertThat(r.getExtraCost()).isEqualByComparingTo("300000");
+        assertThat(r.getDueDate()).isEqualTo(DEC_17);
+        assertThat(r.getRepaymentType()).isEqualTo(RepaymentType.ASAP);
+        assertThat(r.getPlannedMonthlyPayment()).isNull();
+        assertThat(r.getInstallmentsSince()).isNull();
+    }
+
+    @Test
+    void aNasiyaNeedsItsDeadlineAndItsPrincipal_neverMoreThanTheTotal() {
+        LoanTakenRequest noDeadline = nasiya("6000000", "6300000");
+        noDeadline.setDueDate(null);
+        assertThatThrownBy(() -> finance.createLoanTaken(noDeadline)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> finance.createLoanTaken(nasiya(null, "6300000"))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> finance.createLoanTaken(nasiya("7000000", "6300000"))).isInstanceOf(IllegalArgumentException.class);
+        assertThat(loans).isEmpty();
+        assertThat(transactions).isEmpty();
+    }
+
+    @Test
+    void raisingANasiyasTotalNeverMovesWalletMoney_andAnEditWithoutTheNasiyaKeysKeepsThem() {
+        finance.createLoanTaken(nasiya("6000000", "6300000"));
+        LoanTaken l = loans.getFirst();
+
+        LoanTakenRequest more = editOf(l);
+        more.setTotalAmount(n("6500000"));
+        more.setDueDate(null);                                 // an edit that sends no deadline keeps it
+        LoanTakenResponse r = finance.updateLoanTaken(l.getId(), more);
+
+        assertThat(mirrorOf(l).getAmount()).isEqualByComparingTo("6000000");
+        assertThat(r.isNasiya()).isTrue();
+        assertThat(r.getPrincipalAmount()).isEqualByComparingTo("6000000");
+        assertThat(r.getExtraCost()).isEqualByComparingTo("500000");
+        assertThat(r.getDueDate()).isEqualTo(DEC_17);
+    }
+
+    @Test
+    void editingTheRowANasiyaCameFromMovesItsPrincipal_andKeepsItsCost() {
+        finance.createLoanTaken(nasiya("6000000", "6300000"));
+        LoanTaken l = loans.getFirst();
+        TransactionRequest less = edit(mirrorOf(l));
+        less.setAmount(n("5000000"));
+        service.update(l.getOriginatingTransactionId(), less);
+
+        assertThat(l.getPrincipalAmount()).isEqualByComparingTo("5000000");
+        assertThat(l.getTotalAmount()).isEqualByComparingTo("5300000");
+        assertThat(l.isNasiyaLoan()).isTrue();
+    }
+
+    @Test
+    void anOrdinaryLoanIsUnchanged_itsTotalIsTheWalletMoney() {
+        LoanTakenRequest plain = nasiya(null, "1000000");
+        plain.setNasiya(null);
+        plain.setDueDate(null);
+        LoanTakenResponse r = finance.createLoanTaken(plain);
+        LoanTaken l = loans.getFirst();
+        assertThat(r.isNasiya()).isFalse();
+        assertThat(r.getExtraCost()).isNull();
+        assertThat(r.getPrincipalAmount()).isNull();
+
+        LoanTakenRequest more = editOf(l);
+        more.setTotalAmount(n("1200000"));
+        finance.updateLoanTaken(l.getId(), more);
+        assertThat(mirrorOf(l).getAmount()).isEqualByComparingTo("1200000");
+    }
+
+    @Test
+    void switchingToInstallmentsMakesItAMonthlyLoanWithUzumsFigures_andTheWalletStays() {
+        finance.createLoanTaken(nasiya("6000000", "6300000"));
+        LoanTaken l = loans.getFirst();
+        finance.repayLoanTaken(l.getId(), pay("300000", LocalDate.of(2026, 12, 1)));
+        assertThatThrownBy(() -> finance.setLoanTakenPlan(l.getId(), n("500000")))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        NasiyaInstallmentsRequest req = new NasiyaInstallmentsRequest();
+        req.setLeft(n("9066000"));
+        req.setMonthlyPayment(n("755500"));
+        req.setFirstPaymentDate(LocalDate.of(2027, 1, 20));
+        LoanTakenResponse r = finance.switchNasiyaToInstallments(l.getId(), req);
+
+        assertThat(r.getTotalAmount()).isEqualByComparingTo("9366000");      // 300,000 paid + 9,066,000 left
+        assertThat(r.getRemainingAmount()).isEqualByComparingTo("9066000");
+        assertThat(r.getRepaymentType()).isEqualTo(RepaymentType.MONTHLY);
+        assertThat(r.getPlannedMonthlyPayment()).isEqualByComparingTo("755500");
+        assertThat(r.getPaymentStartDate()).isEqualTo(LocalDate.of(2027, 1, 20));
+        assertThat(r.getInstallmentsSince()).isNotNull();
+        assertThat(r.getExtraCost()).isEqualByComparingTo("3366000");
+        assertThat(r.getStatus()).isEqualTo(RecordStatus.PENDING);
+        assertThat(mirrorOf(l).getAmount()).isEqualByComparingTo("6000000");
+        assertThat(l.isOpenNasiya()).isFalse();
+
+        // Once only; and an edit of the switched loan keeps its monthly plan.
+        assertThatThrownBy(() -> finance.switchNasiyaToInstallments(l.getId(), req))
+                .isInstanceOf(IllegalArgumentException.class);
+        LoanTakenRequest keep = editOf(l);
+        keep.setRepaymentType(RepaymentType.MONTHLY);
+        finance.updateLoanTaken(l.getId(), keep);
+        assertThat(l.effectiveRepaymentType()).isEqualTo(RepaymentType.MONTHLY);
+        assertThat(l.getPlannedMonthlyPayment()).isEqualByComparingTo("755500");
+    }
+
+    @Test
+    void switchingIsRefusedForAnOrdinaryLoanAndForBadFigures() {
+        loan(1, "Akam", "1000000", "0");
+        NasiyaInstallmentsRequest ok = new NasiyaInstallmentsRequest();
+        ok.setLeft(n("900000"));
+        ok.setMonthlyPayment(n("100000"));
+        ok.setFirstPaymentDate(DEC_17);
+        assertThatThrownBy(() -> finance.switchNasiyaToInstallments(1L, ok)).isInstanceOf(IllegalArgumentException.class);
+
+        finance.createLoanTaken(nasiya("6000000", "6300000"));
+        Long id = loans.getLast().getId();
+        NasiyaInstallmentsRequest tooBig = new NasiyaInstallmentsRequest();
+        tooBig.setLeft(n("1000000"));
+        tooBig.setMonthlyPayment(n("2000000"));
+        tooBig.setFirstPaymentDate(DEC_17);
+        assertThatThrownBy(() -> finance.switchNasiyaToInstallments(id, tooBig)).isInstanceOf(IllegalArgumentException.class);
+        NasiyaInstallmentsRequest noDate = new NasiyaInstallmentsRequest();
+        noDate.setLeft(n("1000000"));
+        noDate.setMonthlyPayment(n("100000"));
+        assertThatThrownBy(() -> finance.switchNasiyaToInstallments(id, noDate)).isInstanceOf(IllegalArgumentException.class);
+        NasiyaInstallmentsRequest zero = new NasiyaInstallmentsRequest();
+        zero.setLeft(BigDecimal.ZERO);
+        zero.setMonthlyPayment(n("100000"));
+        zero.setFirstPaymentDate(DEC_17);
+        assertThatThrownBy(() -> finance.switchNasiyaToInstallments(id, zero)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(loans.getLast().getInstallmentsSince()).isNull();
+    }
+
+    @Test
+    void settingWhatIsLeftFollowsUzum_andZeroSettlesIt() {
+        finance.createLoanTaken(nasiya("6000000", "6300000"));
+        LoanTaken l = loans.getFirst();
+        finance.repayLoanTaken(l.getId(), pay("4000000", LocalDate.of(2026, 11, 25)));
+
+        NasiyaLeftRequest discount = new NasiyaLeftRequest();
+        discount.setLeft(n("2150000"));
+        LoanTakenResponse r = finance.setNasiyaLeft(l.getId(), discount);
+        assertThat(r.getTotalAmount()).isEqualByComparingTo("6150000");
+        assertThat(r.getRemainingAmount()).isEqualByComparingTo("2150000");
+        assertThat(r.getExtraCost()).isEqualByComparingTo("150000");
+        assertThat(r.getStatus()).isNotEqualTo(RecordStatus.PAID);
+
+        NasiyaLeftRequest none = new NasiyaLeftRequest();
+        none.setLeft(BigDecimal.ZERO);
+        assertThat(finance.setNasiyaLeft(l.getId(), none).getStatus()).isEqualTo(RecordStatus.PAID);
+        assertThat(mirrorOf(l).getAmount()).isEqualByComparingTo("6000000");
+
+        NasiyaLeftRequest negative = new NasiyaLeftRequest();
+        negative.setLeft(n("-1"));
+        assertThatThrownBy(() -> finance.setNasiyaLeft(l.getId(), negative)).isInstanceOf(IllegalArgumentException.class);
+        loan(9, "Akam", "1000000", "0");
+        assertThatThrownBy(() -> finance.setNasiyaLeft(9L, discount)).isInstanceOf(IllegalArgumentException.class);
     }
 }

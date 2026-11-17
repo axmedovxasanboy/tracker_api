@@ -712,6 +712,9 @@ public class DailyAdviceService {
      *       TODAY, money in hand, never overdue. Each later month's ask is projected on what is left
      *       once the month before is paid, and falls on that month's main payday (the 1st without
      *       a salary history).</li>
+     *   <li>An open nasiya (Batch 75): all of what is left on its deadline — overdue, today, once it
+     *       has passed; a deadline in a later month inside the window is that day's whole amount, with
+     *       nothing in the months before.</li>
      * </ul>
      * A repayment recorded for a later day this month is paid on its day, against its own loan or
      * debt (one naming neither goes to the first ASAP ask still owing).
@@ -737,7 +740,8 @@ public class DailyAdviceService {
                 BigDecimal covered = unlinked.min(owes);
                 unlinked = unlinked.subtract(covered);
                 owes = owes.subtract(covered);
-                dueOn = today;
+                // An open nasiya falls due on its deadline (overdue — today — once it has passed).
+                dueOn = o.nasiya() && o.dueDate() != null ? o.dueDate() : today;
             } else {
                 BigDecimal covered = planPaid.min(o.ask());
                 planPaid = planPaid.subtract(covered);
@@ -768,12 +772,20 @@ public class DailyAdviceService {
                 remaining = remaining.subtract(a.owed);
             }
             for (YearMonth ym = current.plusMonths(1); remaining.signum() > 0; ym = ym.plusMonths(1)) {
-                LocalDate date = o.asap()
+                boolean nasiya = o.nasiya() && o.dueDate() != null;
+                LocalDate date = nasiya ? o.dueDate()
+                        : o.asap()
                         ? (pattern == null ? ym.atDay(1) : dayIn(ym, pattern.mainDay()))
                         : dayIn(ym, startDay(o.paymentStartDate()));
                 if (date.isAfter(to)) break;
                 BigDecimal ask;
-                if (o.asap()) {
+                if (nasiya) {
+                    // All of what is left on the deadline, in its own month; nothing before it.
+                    YearMonth deadline = YearMonth.from(o.dueDate());
+                    if (ym.isBefore(deadline)) continue;
+                    if (ym.isAfter(deadline)) break;
+                    ask = remaining;
+                } else if (o.asap()) {
                     if (!OverviewService.borrowedBy(o.borrowedDate(), ym)) continue;
                     ask = OverviewService.asapAsk(remaining, income.apply(ym));   // that month's 70% line
                 } else {

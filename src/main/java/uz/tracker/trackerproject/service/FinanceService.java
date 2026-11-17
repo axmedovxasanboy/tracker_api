@@ -117,6 +117,9 @@ public class FinanceService {
     public LoanTakenResponse setLoanTakenPlan(Long id, BigDecimal amount) {
         LoanTaken l = loanTakenRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("LoanTaken", id));
+        if (l.isNasiyaLoan() && l.getInstallmentsSince() == null) {
+            throw new IllegalArgumentException("A nasiya is paid by its deadline — switch it to installments instead.");
+        }
         applyRepayment(l, null, amount);
         return LoanTakenResponse.from(loanTakenRepository.save(l));
     }
@@ -245,7 +248,7 @@ public class FinanceService {
             // Into the wallet in the same step: the LOAN_RECEIVED transaction the record then
             // originates from, as if it had been recorded first (TransactionService's path).
             Transaction tx = mirrorTransaction(TransactionType.INCOME, TransactionSubType.LOAN_RECEIVED,
-                    l.getTotalAmount(), l.getCurrency(), l.getBorrowedDate(), req.getCardId(), null, l.getLenderName());
+                    l.receivedPrincipal(), l.getCurrency(), l.getBorrowedDate(), req.getCardId(), null, l.getLenderName());
             l.setOriginatingTransactionId(tx.getId());
             l = loanTakenRepository.save(l);
         }
@@ -265,6 +268,7 @@ public class FinanceService {
         l.setBorrowedDate(req.getBorrowedDate());
         l.setDueDate(req.getDueDate());
         applyRepayment(l, req.getRepaymentType(), req.getPlannedMonthlyPayment());
+        applyNasiya(l, req);
         l.setPaymentStartDate(resolvePaymentStart(req.getPaymentStartDate(), req.getBorrowedDate()));
         l.setStatus(req.getStatus() != null ? req.getStatus() : RecordStatus.PENDING);
         l.setDescription(req.getDescription());
@@ -289,8 +293,10 @@ public class FinanceService {
         if (req.getPaidAmount() != null) l.setPaidAmount(req.getPaidAmount());
         l.setCurrency(req.getCurrency());
         l.setBorrowedDate(req.getBorrowedDate());
-        l.setDueDate(req.getDueDate());
+        // A nasiya's deadline is kept when an edit sends none.
+        if (req.getDueDate() != null || !(l.isNasiyaLoan() && req.getNasiya() == null)) l.setDueDate(req.getDueDate());
         applyRepayment(l, req.getRepaymentType(), req.getPlannedMonthlyPayment());
+        applyNasiya(l, req);
         if (req.getPaymentStartDate() != null) {
             l.setPaymentStartDate(req.getPaymentStartDate().withDayOfMonth(1));
         }
@@ -300,7 +306,7 @@ public class FinanceService {
             l.setMonthlyPayment(deriveMonthlyContribution(
                     l.getTotalAmount(), l.getPaidAmount(), l.getDueDate()));
         }
-        syncMirror(l.getOriginatingTransactionId(), l.getTotalAmount(), l.getBorrowedDate(), true);
+        syncMirror(l.getOriginatingTransactionId(), l.receivedPrincipal(), l.getBorrowedDate(), true);
         return LoanTakenResponse.from(loanTakenRepository.save(l));
     }
 
@@ -1552,6 +1558,80 @@ public class FinanceService {
         }
         l.setRepaymentType(type);
         l.setPlannedMonthlyPayment(type == RepaymentType.MONTHLY ? plan : null);
+    }
+
+    /**
+     * A borrowed loan's nasiya fields (Batch 75): {@code nasiya} and {@code principalAmount}, each kept
+     * when the request sends null (the bot never sends them). A nasiya needs its deadline and its
+     * principal (more than 0, at most the total). One not switched to installments is owed in full by
+     * its deadline: ASAP, never a plan — a switched one keeps the MONTHLY plan sent.
+     */
+    static void applyNasiya(LoanTaken l, LoanTakenRequest req) {
+        if (req.getNasiya() != null) l.setNasiya(req.getNasiya());
+        if (req.getPrincipalAmount() != null) l.setPrincipalAmount(req.getPrincipalAmount());
+        if (!l.isNasiyaLoan()) return;
+        if (l.getDueDate() == null) {
+            throw new IllegalArgumentException("A nasiya needs its deadline (dueDate).");
+        }
+        BigDecimal principal = l.getPrincipalAmount();
+        if (principal == null || principal.signum() <= 0) {
+            throw new IllegalArgumentException("A nasiya needs the money you received (principalAmount).");
+        }
+        if (l.getTotalAmount() != null && principal.compareTo(l.getTotalAmount()) > 0) {
+            throw new IllegalArgumentException("The money you received cannot be more than the total to pay.");
+        }
+        if (l.getInstallmentsSince() == null) {
+            l.setRepaymentType(RepaymentType.ASAP);
+            l.setPlannedMonthlyPayment(null);
+        }
+    }
+
+    /**
+     * "Switch to installments" (Batch 75): an open nasiya past — or before — its deadline becomes an
+     * ordinary MONTHLY loan with Uzum's figures: {@code left} still to pay, {@code monthlyPayment}
+     * from {@code firstPaymentDate} (its day is each installment's day). The total grows by the
+     * penalty; the wallet money never moves.
+     */
+    @Transactional
+    public LoanTakenResponse switchNasiyaToInstallments(Long id, NasiyaInstallmentsRequest req) {
+        LoanTaken l = loanTakenRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("LoanTaken", id));
+        if (!l.isNasiyaLoan()) throw new IllegalArgumentException("Only a nasiya can be switched to installments.");
+        if (l.getInstallmentsSince() != null) throw new IllegalArgumentException("This nasiya is already paid in installments.");
+        BigDecimal paid = nz(l.getPaidAmount());
+        if (l.getStatus() == RecordStatus.PAID || nz(l.getTotalAmount()).compareTo(paid) <= 0) {
+            throw new IllegalArgumentException("This nasiya is already paid off.");
+        }
+        BigDecimal left = req.getLeft();
+        BigDecimal monthly = req.getMonthlyPayment();
+        if (left == null || left.signum() <= 0) throw new IllegalArgumentException("Enter what is still left to pay.");
+        if (monthly == null || monthly.signum() <= 0) throw new IllegalArgumentException("Enter the monthly payment.");
+        if (monthly.compareTo(left) > 0) throw new IllegalArgumentException("The monthly payment cannot be more than what is left.");
+        if (req.getFirstPaymentDate() == null) throw new IllegalArgumentException("Enter the first payment date.");
+        l.setTotalAmount(paid.add(left));
+        l.setRepaymentType(RepaymentType.MONTHLY);
+        l.setPlannedMonthlyPayment(monthly);
+        l.setPaymentStartDate(req.getFirstPaymentDate());
+        l.setInstallmentsSince(LocalDate.now(LevelScheduler.OWNER_ZONE));
+        l.setStatus(RecordStatus.PENDING);
+        return LoanTakenResponse.from(loanTakenRepository.save(l));
+    }
+
+    /**
+     * "Uzum shows a different amount left" (Batch 75): a nasiya's total becomes what is paid plus
+     * {@code left} — an early-repayment discount, a corrected fee. 0 settles it. The wallet money
+     * never moves.
+     */
+    @Transactional
+    public LoanTakenResponse setNasiyaLeft(Long id, NasiyaLeftRequest req) {
+        LoanTaken l = loanTakenRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("LoanTaken", id));
+        if (!l.isNasiyaLoan()) throw new IllegalArgumentException("Only a nasiya's amount left can be set this way.");
+        BigDecimal left = req.getLeft();
+        if (left == null || left.signum() < 0) throw new IllegalArgumentException("Enter what is left to pay (0 or more).");
+        BigDecimal paid = nz(l.getPaidAmount());
+        l.setTotalAmount(paid.add(left));
+        l.setStatus(left.signum() == 0 ? RecordStatus.PAID
+                : l.getStatus() == RecordStatus.PAID ? RecordStatus.PENDING : l.getStatus());
+        return LoanTakenResponse.from(loanTakenRepository.save(l));
     }
 
     /**

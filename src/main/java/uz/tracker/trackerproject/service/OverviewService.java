@@ -928,9 +928,18 @@ public class OverviewService {
      *               its "already paid" marks for the month
      * @param left   what is still owed now
      * @param plan   a MONTHLY loan's monthly payment; null for ASAP
+     * @param dueDate an open nasiya's deadline (Batch 75); null for every other loan and debt
+     * @param nasiya  an open nasiya — owed in full by {@code dueDate} ({@link #nasiyaAsk}), never the
+     *                ASAP 34% / 70% rule
      */
     record DebtAsk(String kind, Long id, String name, RepaymentType type, BigDecimal ask, BigDecimal repaid,
-                   BigDecimal left, BigDecimal plan, LocalDate paymentStartDate, LocalDate borrowedDate) {
+                   BigDecimal left, BigDecimal plan, LocalDate paymentStartDate, LocalDate borrowedDate,
+                   LocalDate dueDate, boolean nasiya) {
+        DebtAsk(String kind, Long id, String name, RepaymentType type, BigDecimal ask, BigDecimal repaid,
+                BigDecimal left, BigDecimal plan, LocalDate paymentStartDate, LocalDate borrowedDate) {
+            this(kind, id, name, type, ask, repaid, left, plan, paymentStartDate, borrowedDate, null, false);
+        }
+
         boolean asap() {
             return type == RepaymentType.ASAP;
         }
@@ -951,6 +960,16 @@ public class OverviewService {
         BigDecimal all = nullToZero(stableIncome).multiply(ASAP_ALL_SHARE);
         if (leftAtStart.compareTo(all) <= 0) return leftAtStart;
         return leftAtStart.multiply(PERSONAL_LOAN_PAYDOWN_RATE).setScale(0, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * An open nasiya's ask in {@code month} (Batch 75): everything left at the month's start once the
+     * deadline's month has come (or passed), nothing in a month before it. Never the ASAP 34% / 70%
+     * rule — Uzum wants it all by the deadline. Shared by the Plan's asks and the rule on the 1st.
+     */
+    static BigDecimal nasiyaAsk(BigDecimal leftAtStart, LocalDate dueDate, YearMonth month) {
+        if (leftAtStart == null || leftAtStart.signum() <= 0) return BigDecimal.ZERO;
+        return dueDate == null || !YearMonth.from(dueDate).isAfter(month) ? leftAtStart : BigDecimal.ZERO;
     }
 
     /** Whether money borrowed on {@code borrowedDate} is owed in {@code month}: from its own month on. */
@@ -976,14 +995,17 @@ public class OverviewService {
             List<Repaid> repaid = repaid(transactionRepository.findByRepaidLoanTakenIdOrderByTransactionDateDesc(l.getId()),
                     markPaidRepository.findByKindAndRefId("PERSONAL_LOAN", l.getId()));
             BigDecimal ask;
+            boolean nasiya = type != RepaymentType.MONTHLY && l.isOpenNasiya();
             if (type == RepaymentType.MONTHLY) {
                 ask = hasStartedBy(l.getPaymentStartDate(), month) ? l.getPlannedMonthlyPayment().min(left) : BigDecimal.ZERO;
+            } else if (nasiya) {
+                ask = nasiyaAsk(left.add(repaidSince(repaid, start)), l.getDueDate(), month);
             } else {
                 ask = borrowedBy(l.getBorrowedDate(), month) ? asapAsk(left.add(repaidSince(repaid, start)), stable) : BigDecimal.ZERO;
             }
             asks.add(new DebtAsk(LOAN_ASK, l.getId(), l.getLenderName(), type, ask, repaidIn(repaid, start, end), left,
                     type == RepaymentType.MONTHLY ? l.getPlannedMonthlyPayment() : null,
-                    l.getPaymentStartDate(), l.getBorrowedDate()));
+                    l.getPaymentStartDate(), l.getBorrowedDate(), nasiya ? l.getDueDate() : null, nasiya));
         }
         for (Debt d : debtRepository.findAll()) {
             BigDecimal left = nullToZero(d.getTotalAmount()).subtract(nullToZero(d.getPaidAmount()));
@@ -2013,6 +2035,8 @@ public class OverviewService {
                 BigDecimal ask = hasStartedBy(l.getPaymentStartDate(), month) ? l.getPlannedMonthlyPayment().min(left) : BigDecimal.ZERO;
                 all = all.add(ask);
                 monthly = monthly.add(ask);
+            } else if (l.isOpenNasiya()) {
+                all = all.add(nasiyaAsk(left, l.getDueDate(), month));
             } else {
                 all = all.add(asapAsk(left, income));
             }

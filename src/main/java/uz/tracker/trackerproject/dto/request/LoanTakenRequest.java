@@ -66,4 +66,16 @@ public class LoanTakenRequest {
 
     /** The wallet for {@link #moveMoney}: a UZS card; null = cash. */
     private Long cardId;
+
+    /**
+     * True: a nasiya loan (Batch 75) — {@link #dueDate} and {@link #principalAmount} are then
+     * required. Null on an edit keeps the stored value (the bot never sends it).
+     */
+    private Boolean nasiya;
+
+    /**
+     * The money that landed in the wallet (≤ {@link #totalAmount}); the rest of the total is the
+     * loan's cost. Null on an edit keeps the stored value; null on create = the total.
+     */
+    private BigDecimal principalAmount;
 }
