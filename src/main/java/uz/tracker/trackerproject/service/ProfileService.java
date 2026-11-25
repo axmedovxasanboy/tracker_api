@@ -133,6 +133,7 @@ public class ProfileService {
                 .level5Since(since == null ? null : since.toString())
                 .road(overviewService.road(month, date, level, baseLevel))
                 .ruleFrom(level == null ? null : overviewService.ruleBook().version(level, month).from().toString())
+                .ruleRecalculatedAt(recalculatedAt(month))
                 .stableIncome(stable)
                 .monthlyBills(nz(tier.getMandatorySubscriptions()))
                 .leftAfterBills(leftAfterBills)
@@ -368,6 +369,12 @@ public class ProfileService {
 
     private static boolean isUzs(Currency c) {
         return c == null || c == Currency.UZS;
+    }
+
+    /** When the owner last recalculated {@code month}'s rule, ISO local date-time; null when never. */
+    private String recalculatedAt(YearMonth month) {
+        java.time.LocalDateTime at = overviewService.ruleRecalculatedAt(month);
+        return at == null ? null : at.format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME);
     }
 
     /**

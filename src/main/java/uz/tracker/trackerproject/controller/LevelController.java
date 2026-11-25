@@ -7,7 +7,9 @@ import uz.tracker.trackerproject.dto.request.CustomSavingRequest;
 import uz.tracker.trackerproject.dto.request.LevelRulesRequest;
 import uz.tracker.trackerproject.dto.response.LevelNoticeResponse;
 import uz.tracker.trackerproject.dto.response.LevelsResponse;
+import uz.tracker.trackerproject.dto.response.RecalcResponse;
 import uz.tracker.trackerproject.service.LevelService;
+import uz.tracker.trackerproject.service.RuleRecalcService;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
@@ -23,6 +25,7 @@ import java.time.format.DateTimeParseException;
 public class LevelController {
 
     private final LevelService service;
+    private final RuleRecalcService recalc;
 
     @GetMapping
     public ResponseEntity<LevelsResponse> levels(@RequestParam(required = false) String date) {
@@ -41,6 +44,24 @@ public class LevelController {
     public ResponseEntity<LevelsResponse> deleteRules(@PathVariable String level, @PathVariable String month,
                                                       @RequestParam(required = false) String date) {
         return ResponseEntity.ok(service.deleteRules(level, month, parseDate(date)));
+    }
+
+    // ── Recalculate this month's savings rule from today's data (Batch 76) ─────
+
+    /** This month's rule as it stands beside the one today's data gives; 400 without an income. */
+    @GetMapping("/recalculate")
+    public ResponseEntity<RecalcResponse> recalculatePreview(@RequestParam(required = false) String date) {
+        LocalDate day = ownerDate(date);
+        service.refreshQuietly(day);
+        return ResponseEntity.ok(recalc.preview(day));
+    }
+
+    /** Store today's rule as this month's (nothing is written when it is the same). */
+    @PostMapping("/recalculate")
+    public ResponseEntity<RecalcResponse> recalculate(@RequestParam(required = false) String date) {
+        LocalDate day = ownerDate(date);
+        service.refreshQuietly(day);
+        return ResponseEntity.ok(recalc.apply(day));
     }
 
     // ── The owner's own savings, beside the three ─────────────────────────────
@@ -80,6 +101,11 @@ public class LevelController {
     public ResponseEntity<Void> seen(@PathVariable Long id, @RequestParam(required = false) String client) {
         service.seen(id, client);
         return ResponseEntity.noContent().build();
+    }
+
+    /** {@link #parseDate}, defaulting to the owner's today (Asia/Tashkent) rather than the server's. */
+    private static LocalDate ownerDate(String date) {
+        return date == null || date.isBlank() ? RuleRecalcService.ownerToday() : parseDate(date);
     }
 
     private static LocalDate parseDate(String date) {

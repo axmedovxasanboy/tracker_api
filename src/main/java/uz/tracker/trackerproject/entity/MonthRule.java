@@ -39,6 +39,13 @@ public class MonthRule {
     @Column(nullable = false, length = 32)
     private String situation;
 
+    /**
+     * When the owner pressed "Recalculate" and the rule was re-decided from that day's data (Batch 76,
+     * the one deliberate exception to "never moves"); null for a rule its first day fixed.
+     */
+    @Column(name = "recalculated_at")
+    private LocalDateTime recalculatedAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

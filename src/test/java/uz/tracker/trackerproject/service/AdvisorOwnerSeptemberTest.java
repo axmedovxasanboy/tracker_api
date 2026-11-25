@@ -481,7 +481,7 @@ class AdvisorOwnerSeptemberTest {
         org.skyscreamer.jsonassert.JSONAssert.assertEquals("""
                 {"username":"owner","month":"2026-09","missingStableIncome":false,
                  "level":1,"aboveCeiling":false,"levelFrom":0,"nextLevelAt":15000000,
-                 "baseLevel":1,"level5Since":null,"road":null,"ruleFrom":"2026-09",
+                 "baseLevel":1,"level5Since":null,"road":null,"ruleFrom":"2026-09","ruleRecalculatedAt":null,
                  "stableIncome":7000000,"monthlyBills":5300000,"leftAfterBills":1700000,
                  "loanPayments":400000,"leftForSavings":1300000,"bonusThisMonth":16380000,"savingsBase":23380000,
                  "baseParts":{"salaryReceived":7889000,"stableIncome":7000000,"usesStableIncome":true,

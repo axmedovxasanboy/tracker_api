@@ -44,6 +44,11 @@ public class ProfileResponse {
     private LevelRoad road;
     /** 'YYYY-MM': the {@code from} of the level's rules version in force this month. */
     private String ruleFrom;
+    /**
+     * ISO local date-time (Asia/Tashkent) when the owner last recalculated this month's rule (Batch 76,
+     * POST /levels/recalculate); null when the rule is the one its 1st fixed.
+     */
+    private String ruleRecalculatedAt;
 
     private BigDecimal stableIncome;
     /** The active monthly bills the level is measured after. */

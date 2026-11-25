@@ -1989,6 +1989,13 @@ public class OverviewService {
         return month.equals(ownerMonth()) ? ruleAtStart(month) : null;
     }
 
+    /** When the owner last recalculated {@code month}'s rule (Batch 76); null when never, or no row. */
+    java.time.LocalDateTime ruleRecalculatedAt(YearMonth month) {
+        if (monthRuleRepository == null) return null;
+        return monthRuleRepository.findByMonth(month.atDay(1))
+                .map(uz.tracker.trackerproject.entity.MonthRule::getRecalculatedAt).orElse(null);
+    }
+
     /** Every stored month's rule; empty where the service is built by hand. */
     Map<YearMonth, FixedRule> fixedRules() {
         Map<YearMonth, FixedRule> out = new java.util.HashMap<>();
@@ -2009,11 +2016,29 @@ public class OverviewService {
      * nothing until the next month's first day. Null without an income that month.
      */
     FixedRule ruleAtStart(YearMonth month) {
+        return ruleAsOf(month, month.atDay(1));
+    }
+
+    /**
+     * What {@code month}'s rule would be from today's data (Batch 76 — the owner's "Recalculate"
+     * button): every bank loan taken and all money borrowed or owed up to and including {@code today},
+     * with what is left of it now — one paid off is gone. Null without an income that month.
+     */
+    FixedRule ruleNow(YearMonth month, LocalDate today) {
+        return ruleAsOf(month, today.plusDays(1));
+    }
+
+    /**
+     * {@code month}'s rule with {@code cut} as the line: bank loans taken and money borrowed or owed
+     * BEFORE {@code cut} count, with what was left on its morning (left now + repaid since). The 1st
+     * is {@link #ruleAtStart}; tomorrow is {@link #ruleNow}. Null without an income that month.
+     */
+    FixedRule ruleAsOf(YearMonth month, LocalDate cut) {
         BigDecimal income = stableIncomeFor(month);
         if (income == null || income.signum() <= 0) return null;
         BigDecimal bills = sumActiveSubscriptionsUzs();
         int level = levelOf(month, income.subtract(bills), levelChanges());
-        LocalDate start = month.atDay(1);
+        LocalDate start = cut;
 
         BigDecimal bank = BigDecimal.ZERO;
         for (BankLoan b : bankLoanRepository.findAll()) {
