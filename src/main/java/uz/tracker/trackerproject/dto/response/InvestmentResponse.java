@@ -11,7 +11,7 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
-@Getter @Builder
+@Getter @Builder(toBuilder = true)
 public class InvestmentResponse {
 
     private Long id;
@@ -59,6 +59,11 @@ public class InvestmentResponse {
     /** One of the owner's own savings (made on Savings rules), not an investment. */
     private boolean customSaving;
     private LocalDateTime createdAt;
+    /**
+     * The latest day money moved on it: its linked put-ins / take-outs, its moves between holdings, and
+     * its purchase date when it was funded from a wallet. Filled by the investments list only (null elsewhere).
+     */
+    private LocalDate lastMovedAt;
 
     public static InvestmentResponse from(Investment i) {
         BigDecimal value = i.getCurrentValue() != null ? i.getCurrentValue() : i.getInvestedAmount();

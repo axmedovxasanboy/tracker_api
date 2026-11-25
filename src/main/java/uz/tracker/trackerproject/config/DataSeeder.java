@@ -12,6 +12,7 @@ import uz.tracker.trackerproject.entity.Category;
 import uz.tracker.trackerproject.enums.CardType;
 import uz.tracker.trackerproject.enums.CategoryType;
 import uz.tracker.trackerproject.enums.Currency;
+import uz.tracker.trackerproject.enums.InvestmentType;
 import uz.tracker.trackerproject.enums.TransactionSubType;
 import uz.tracker.trackerproject.repository.CardRepository;
 import uz.tracker.trackerproject.repository.CashBalanceRepository;
@@ -77,6 +78,9 @@ public class DataSeeder implements CommandLineRunner {
 
         // Legacy STOCKS/CRYPTO investment types were removed — migrate old rows to OTHER first.
         migrateLegacyInvestmentTypes();
+        // investments.type gained BUSINESS and ISLAMIC_BANK (Batch 78): rebuild its CHECK from today's
+        // enum, after the legacy rows above are moved off the removed values.
+        rebuildInvestmentTypeCheckConstraint();
 
         // Freeze which allocation bucket each existing bucket-funding transaction credits, so
         // editing a holding can no longer re-bucket money that has already been spent — and, for
@@ -565,6 +569,28 @@ public class DataSeeder implements CommandLineRunner {
                     "UPDATE investments SET type = 'OTHER' WHERE type IN ('STOCKS','CRYPTO')").executeUpdate();
         } catch (Exception ignored) {
             // schema not yet created / non-Postgres — safe to skip.
+        }
+    }
+
+    /**
+     * investments.type carries Hibernate's CHECK listing the InvestmentType members of the day the
+     * table was made; `ddl-auto=update` never rebuilds it, so BUSINESS / ISLAMIC_BANK (Batch 78) would
+     * be refused at the DB level. Rebuilt from today's enum. Idempotent; non-fatal before the table exists.
+     * (No other table stores an InvestmentType: TransactionRequest.investmentType is request-only.)
+     */
+    private void rebuildInvestmentTypeCheckConstraint() {
+        String inList = Arrays.stream(InvestmentType.values())
+                .map(v -> "'" + v.name() + "'")
+                .collect(Collectors.joining(", "));
+        try {
+            entityManager.createNativeQuery(
+                    "ALTER TABLE investments DROP CONSTRAINT IF EXISTS investments_type_check").executeUpdate();
+            entityManager.createNativeQuery(
+                    "ALTER TABLE investments ADD CONSTRAINT investments_type_check " +
+                            "CHECK (type IS NULL OR type IN (" + inList + "))").executeUpdate();
+        } catch (Exception ignored) {
+            // Table not created yet, or a non-Postgres engine — the @Enumerated(STRING) mapping still
+            // stops bogus values being written through JPA.
         }
     }
 

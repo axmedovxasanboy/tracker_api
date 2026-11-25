@@ -237,4 +237,11 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long>,
     /** The day of the earliest transaction; null when there is none. */
     @Query("SELECT MIN(t.transactionDate) FROM Transaction t")
     java.time.LocalDate findEarliestTransactionDate();
+
+    /** Rows of [investmentId, latest transaction date] for every holding with a linked transaction. */
+    @Query("""
+            SELECT t.investmentId, MAX(t.transactionDate) FROM Transaction t
+            WHERE t.investmentId IS NOT NULL GROUP BY t.investmentId
+            """)
+    List<Object[]> latestDateByInvestment();
 }

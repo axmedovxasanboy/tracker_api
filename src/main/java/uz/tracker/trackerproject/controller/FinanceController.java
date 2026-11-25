@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.*;
 import uz.tracker.trackerproject.dto.request.*;
 import uz.tracker.trackerproject.dto.response.*;
 import uz.tracker.trackerproject.service.FinanceService;
+import uz.tracker.trackerproject.service.InvestmentTransferService;
 
 import java.util.List;
 
@@ -17,6 +18,7 @@ import java.util.List;
 public class FinanceController {
 
     private final FinanceService financeService;
+    private final InvestmentTransferService investmentTransferService;
 
     // ---- Debts ----
 
@@ -219,6 +221,30 @@ public class FinanceController {
     public ResponseEntity<InvestmentResponse> updateInvestmentValue(
             @PathVariable Long id, @Valid @RequestBody InvestmentValueRequest req) {
         return ResponseEntity.ok(financeService.updateInvestmentValue(id, req));
+    }
+
+    // ---- Moves between investments (Batch 78) ----
+
+    /** Move money from one investment to another — no transaction; totals across holdings stay the same. */
+    @PostMapping("/investments/transfer")
+    public ResponseEntity<InvestmentTransferResponse> transferBetweenInvestments(
+            @Valid @RequestBody InvestmentTransferRequest req) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(investmentTransferService.transfer(req));
+    }
+
+    /** Newest first; {@code investmentId} = only the moves it is on; {@code limit} = at most that many. */
+    @GetMapping("/investments/transfers")
+    public ResponseEntity<List<InvestmentTransferResponse>> getInvestmentTransfers(
+            @RequestParam(required = false) Long investmentId,
+            @RequestParam(required = false) Integer limit) {
+        return ResponseEntity.ok(investmentTransferService.list(investmentId, limit));
+    }
+
+    /** Undo a move: exactly reverses it. */
+    @DeleteMapping("/investments/transfers/{id}")
+    public ResponseEntity<Void> undoInvestmentTransfer(@PathVariable Long id) {
+        investmentTransferService.undo(id);
+        return ResponseEntity.noContent().build();
     }
 
     @GetMapping("/investments/{id}/contributions")

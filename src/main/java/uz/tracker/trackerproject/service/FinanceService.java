@@ -43,6 +43,13 @@ public class FinanceService {
     private final SettingsService settingsService;
     private final CounterpartyService counterpartyService;
 
+    /**
+     * Moves between holdings (Batch 78): a deleted holding's side is set to null, and the list shows
+     * each holding's latest move. Field-injected so the constructor (and every test building it) stays.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private InvestmentTransferRepository investmentTransferRepository;
+
     /** Targets that support the "already paid" (no-transaction) mark. */
     private static final Set<String> MARK_KINDS =
             Set.of("SUBSCRIPTION", "BANK", "PERSONAL_LOAN", "DEBT", "BUCKET");
@@ -657,14 +664,40 @@ public class FinanceService {
      */
     @Transactional(readOnly = true)
     public List<InvestmentResponse> getAllInvestments(String month) {
+        List<Investment> rows;
         if (month == null || month.isBlank()) {
-            return investmentRepository.findAllByOrderByPurchaseDateDesc().stream()
-                    .map(InvestmentResponse::from).toList();
+            rows = investmentRepository.findAllByOrderByPurchaseDateDesc();
+        } else {
+            YearMonth ym = parseMonth(month);
+            rows = investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(ym.atDay(1), ym.atEndOfMonth());
         }
-        YearMonth ym = parseMonth(month);
-        return investmentRepository
-                .findByPurchaseDateBetweenOrderByPurchaseDateDesc(ym.atDay(1), ym.atEndOfMonth())
-                .stream().map(InvestmentResponse::from).toList();
+        java.util.Map<Long, LocalDate> last = latestMovementDates();
+        return rows.stream().map(i -> {
+            LocalDate d = last.get(i.getId());
+            // Funded from a wallet (its own mirror transaction or a Transactions-page entry): the
+            // purchase date is a movement too, even when that transaction is not linked by id.
+            if (i.getOriginatingTransactionId() != null && i.getPurchaseDate() != null
+                    && (d == null || i.getPurchaseDate().isAfter(d))) d = i.getPurchaseDate();
+            return InvestmentResponse.from(i).toBuilder().lastMovedAt(d).build();
+        }).toList();
+    }
+
+    /** Holding id → the latest day of its linked transactions and of its moves between holdings (Batch 78). */
+    private java.util.Map<Long, LocalDate> latestMovementDates() {
+        java.util.Map<Long, LocalDate> out = new java.util.HashMap<>();
+        java.util.function.Consumer<List<Object[]>> merge = rows -> {
+            if (rows == null) return;
+            for (Object[] r : rows) {
+                if (r == null || r.length < 2 || r[0] == null || r[1] == null) continue;
+                out.merge(((Number) r[0]).longValue(), (LocalDate) r[1], (a, b) -> a.isAfter(b) ? a : b);
+            }
+        };
+        merge.accept(transactionRepository.latestDateByInvestment());
+        if (investmentTransferRepository != null) {
+            merge.accept(investmentTransferRepository.latestMoveFrom());
+            merge.accept(investmentTransferRepository.latestMoveTo());
+        }
+        return out;
     }
 
     @Transactional
@@ -757,6 +790,11 @@ public class FinanceService {
                 monthCloseService.assertMonthOpen(tx.getTransactionDate());
                 transactionRepository.delete(tx);
             });
+        }
+        // Its moves between holdings stay listed on the other side, under the stored name (Batch 78).
+        if (investmentTransferRepository != null) {
+            investmentTransferRepository.detachFrom(id);
+            investmentTransferRepository.detachTo(id);
         }
         investmentRepository.delete(i);
     }

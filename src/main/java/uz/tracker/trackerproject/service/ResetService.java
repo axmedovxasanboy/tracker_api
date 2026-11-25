@@ -39,7 +39,7 @@ public class ResetService {
     private static final String TRUNCATE_ALL =
             "TRUNCATE TABLE " +
                     "transactions, monthly_payments, loans_taken, loans_given, debts, " +
-                    "donations, investments, emergencies, bank_loans, categories, cards, " +
+                    "donations, investments, investment_transfers, emergencies, bank_loans, categories, cards, " +
                     "cash_balances, level_configs, level_allocation_rules, " +
                     "month_close_wallets, month_closes, wallet_check_in_lines, wallet_check_ins, " +
                     "mark_paids, counterparties, position_snapshots, stable_income_entries, level_rule_situations, " +
