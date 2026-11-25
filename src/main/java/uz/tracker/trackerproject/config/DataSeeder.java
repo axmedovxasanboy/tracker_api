@@ -84,6 +84,8 @@ public class DataSeeder implements CommandLineRunner {
         // The owner's holdings from before the two new types get theirs (Batch 79): IMAN / Asaxiy →
         // BUSINESS, Open Bank → ISLAMIC_BANK. After the rebuild above, which first allows the values.
         typeOwnersExistingHoldings();
+        // Open Bank accounts (any spelling, made any day) → Islamic bank, provider filled (Batch 80).
+        typeOpenBankHoldings();
 
         // Freeze which allocation bucket each existing bucket-funding transaction credits, so
         // editing a holding can no longer re-bucket money that has already been spent — and, for
@@ -608,6 +610,42 @@ public class DataSeeder implements CommandLineRunner {
      * second guard only rows created before {@link #TYPE_BACKFILL_BEFORE} are touched. Open Bank first,
      * then the business names (they never overlap). Non-fatal like the other migrations.
      */
+    /**
+     * The owner's Open Bank accounts (Batch 80): the first back-fill missed them — made after its date
+     * cut, or spelt another way — and with no provider they fell into "Other" on the Investments page.
+     * Any account whose name or provider says Open Bank (open bank / openbank / open-bank / open_bank /
+     * "опен банк", any case and spacing) becomes ISLAMIC_BANK unless already BUSINESS or ISLAMIC_BANK,
+     * and gets the provider "Open Bank" when it has none, so it groups by itself. Run once
+     * ({@link #OPEN_BANK_MARKER}); no date cut — the marker alone keeps it from undoing later edits.
+     */
+    static final String OPEN_BANK_MATCH =
+            "(name ~* 'open[-\\s_.]*bank' OR broker ~* 'open[-\\s_.]*bank' "
+                    + "OR name ~* 'опен[-\\s_.]*банк' OR broker ~* 'опен[-\\s_.]*банк' "
+                    + "OR replace(name, chr(160), ' ') ~* 'open +bank' OR replace(broker, chr(160), ' ') ~* 'open +bank')";
+    static final String OPEN_BANK_TYPE_SQL =
+            "UPDATE investments SET type = 'ISLAMIC_BANK' WHERE type NOT IN ('BUSINESS','ISLAMIC_BANK') AND " + OPEN_BANK_MATCH;
+    static final String OPEN_BANK_BROKER_SQL =
+            "UPDATE investments SET broker = 'Open Bank' WHERE (broker IS NULL OR btrim(broker) = '') AND " + OPEN_BANK_MATCH;
+    static final String OPEN_BANK_MARKER = "investment-open-bank-2026-11-25";
+
+    private void typeOpenBankHoldings() {
+        try {
+            entityManager.createNativeQuery(
+                    "CREATE TABLE IF NOT EXISTS seed_markers (name VARCHAR(100) PRIMARY KEY, done_at TIMESTAMP NOT NULL)")
+                    .executeUpdate();
+            Number done = (Number) entityManager.createNativeQuery(
+                    "SELECT COUNT(*) FROM seed_markers WHERE name = '" + OPEN_BANK_MARKER + "'").getSingleResult();
+            if (done != null && done.longValue() > 0) return;
+            entityManager.createNativeQuery(OPEN_BANK_TYPE_SQL).executeUpdate();
+            entityManager.createNativeQuery(OPEN_BANK_BROKER_SQL).executeUpdate();
+            entityManager.createNativeQuery(
+                    "INSERT INTO seed_markers (name, done_at) VALUES ('" + OPEN_BANK_MARKER + "', NOW())")
+                    .executeUpdate();
+        } catch (Exception ignored) {
+            // Table not created yet, or a non-Postgres engine — nothing to back-fill.
+        }
+    }
+
     private void typeOwnersExistingHoldings() {
         try {
             entityManager.createNativeQuery(
