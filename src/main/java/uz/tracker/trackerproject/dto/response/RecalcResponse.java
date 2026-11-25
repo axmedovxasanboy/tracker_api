@@ -34,6 +34,72 @@ public class RecalcResponse {
         private List<Own> own;
         /** The three plus every own saving. */
         private BigDecimal total;
+        /** Why the rule came out this way (RECALC-SPEC §4, Batch 77): every figure it was decided with. */
+        private Why why;
+    }
+
+    /** The figures a rule was decided with — the same code path that decides it (OverviewService.traceAsOf). */
+    @Getter @Builder
+    public static class Why {
+        /** MONTH_START | RECALCULATED | TODAY. */
+        private String basis;
+        /** 'YYYY-MM-DD': the day whose data decided it. */
+        private String asOf;
+        /** The trace reproduces the rule shown (false on {@code current} when data changed since). */
+        private boolean exact;
+        private BigDecimal income;
+        private BigDecimal bills;
+        private BigDecimal leftAfterBills;
+        /** The band of left-after-bills for this level; both null on Level 5, levelTo null at the top base level. */
+        private BigDecimal levelFrom;
+        private BigDecimal levelTo;
+        /** 'YYYY-MM' when a Level 5 period gives the level; else null. */
+        private String level5Since;
+        private List<BankLoanLine> bankLoans;
+        private BigDecimal bankMonthly;
+        private List<LoanLine> loans;
+        /** Every ask in {@link #loans} — what the split base subtracts. */
+        private BigDecimal asksTotal;
+        /** The MONTHLY loans' asks. */
+        private BigDecimal monthlyAsks;
+        /** 10% of the income. */
+        private BigDecimal smallMonthlyLimit;
+        /** monthlyAsks > 0 and ≤ the limit → they do not count as money owed for the rule. */
+        private boolean smallMonthlyIgnored;
+        private BigDecimal peopleDebtForRule;
+        /** (bankMonthly + asksTotal) ÷ income × 100, one decimal. */
+        private BigDecimal debtShare;
+        private BigDecimal heavyLine;
+        /** What is left after bills and loans — what the tight / comfortable split reads. */
+        private BigDecimal leftAfterLoans;
+        private BigDecimal cutoff;
+        private boolean hasBank;
+        private boolean hasPeopleDebt;
+    }
+
+    @Getter @Builder
+    public static class BankLoanLine {
+        private Long id;
+        private String name;
+        private BigDecimal monthly;
+    }
+
+    @Getter @Builder
+    public static class LoanLine {
+        /** LOAN (borrowed money) | DEBT. */
+        private String kind;
+        private Long id;
+        private String name;
+        /** MONTHLY | ASAP | NASIYA (an open nasiya). */
+        private String type;
+        /** What was left at the cut (left now for AFTER_CUT). */
+        private BigDecimal left;
+        /** This month's ask the rule counted; 0 when it counted none. */
+        private BigDecimal ask;
+        /** null = counted as is; NOT_STARTED | NASIYA_LATER | SMALL_MONTHLY | AFTER_CUT. */
+        private String note;
+        /** An open nasiya's deadline ('YYYY-MM-DD'); null otherwise. */
+        private String dueDate;
     }
 
     @Getter @Builder

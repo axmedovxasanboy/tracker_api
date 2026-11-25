@@ -2034,50 +2034,153 @@ public class OverviewService {
      * is {@link #ruleAtStart}; tomorrow is {@link #ruleNow}. Null without an income that month.
      */
     FixedRule ruleAsOf(YearMonth month, LocalDate cut) {
+        RuleTrace trace = traceAsOf(month, cut);
+        return trace == null ? null : trace.rule();
+    }
+
+    // ── Why the rule came out this way (RECALC-SPEC §4, Batch 77) ─────────────
+
+    /** A bank loan the rule counted, with its monthly installment. */
+    record TraceBank(Long id, String name, BigDecimal monthly) {}
+
+    /**
+     * One borrowed loan (LOAN) or debt (DEBT) as the rule saw it at the cut.
+     *
+     * @param type MONTHLY | ASAP | NASIYA (an open nasiya)
+     * @param note null = counted as is; NOT_STARTED | NASIYA_LATER | SMALL_MONTHLY | AFTER_CUT
+     */
+    record TraceLoan(String kind, Long id, String name, String type, BigDecimal left, BigDecimal ask,
+                     String note, LocalDate dueDate) {}
+
+    static final String NOTE_NOT_STARTED = "NOT_STARTED";
+    static final String NOTE_NASIYA_LATER = "NASIYA_LATER";
+    static final String NOTE_SMALL_MONTHLY = "SMALL_MONTHLY";
+    static final String NOTE_AFTER_CUT = "AFTER_CUT";
+
+    /**
+     * Every figure {@link #ruleAsOf} decides a month's rule with, and the rule itself — one code path,
+     * so the "why" a page shows can never drift from the rule it explains. Read-only.
+     */
+    record RuleTrace(FixedRule rule, BigDecimal income, BigDecimal bills, BigDecimal leftAfterBills,
+                     BigDecimal levelFrom, BigDecimal levelTo, YearMonth level5Since,
+                     List<TraceBank> bankLoans, BigDecimal bankMonthly, List<TraceLoan> loans,
+                     BigDecimal asksTotal, BigDecimal monthlyAsks, BigDecimal smallMonthlyLimit,
+                     boolean smallMonthlyIgnored, BigDecimal peopleDebtForRule, BigDecimal debtRatio,
+                     BigDecimal leftAfterLoans, BigDecimal cutoff, boolean hasBank, boolean hasPeopleDebt) {}
+
+    /** The heavy-debt line of {@link SavingsRules#pick}, in percent, for the trace. */
+    static final BigDecimal HEAVY_LINE_PERCENT = new BigDecimal("70");
+
+    /**
+     * {@link #ruleAsOf} with every figure it used. Bank loans taken and money borrowed or owed BEFORE
+     * {@code cut} count, with what was left on its morning (left now + repaid since); money borrowed on
+     * or after the cut is listed with ask 0 (AFTER_CUT). Null without an income that month.
+     */
+    RuleTrace traceAsOf(YearMonth month, LocalDate cut) {
         BigDecimal income = stableIncomeFor(month);
         if (income == null || income.signum() <= 0) return null;
         BigDecimal bills = sumActiveSubscriptionsUzs();
-        int level = levelOf(month, income.subtract(bills), levelChanges());
+        BigDecimal leftAfterBills = income.subtract(bills);
+        List<uz.tracker.trackerproject.entity.LevelChange> changes = levelChanges();
+        int level = levelOf(month, leftAfterBills, changes);
+        YearMonth level5 = level5Since(month, changes);
         LocalDate start = cut;
 
         BigDecimal bank = BigDecimal.ZERO;
+        List<TraceBank> banks = new ArrayList<>();
         for (BankLoan b : bankLoanRepository.findAll()) {
             if (b.getMonthlyPayment() == null || b.getMonthlyPayment().signum() <= 0) continue;
             if (b.getTakenDate() != null && !b.getTakenDate().isBefore(start)) continue;   // taken this month
             if (!bankLoanRunsIn(b, month)) continue;
             bank = bank.add(b.getMonthlyPayment());
+            banks.add(new TraceBank(b.getId(), DailyAdviceService.bankName(b), b.getMonthlyPayment()));
         }
 
         BigDecimal all = BigDecimal.ZERO;
         BigDecimal monthly = BigDecimal.ZERO;
+        List<TraceLoan> loans = new ArrayList<>();
         for (LoanTaken l : loanTakenRepository.findAll()) {
-            if (!isUzs(l.getCurrency()) || !borrowedBefore(l.getBorrowedDate(), start)) continue;
+            if (!isUzs(l.getCurrency())) continue;
+            boolean nasiya = l.effectiveRepaymentType() != RepaymentType.MONTHLY && l.isOpenNasiya();
+            String type = l.effectiveRepaymentType() == RepaymentType.MONTHLY ? "MONTHLY" : nasiya ? "NASIYA" : "ASAP";
+            if (!borrowedBefore(l.getBorrowedDate(), start)) {
+                BigDecimal leftNow = l.getStatus() == RecordStatus.PAID ? BigDecimal.ZERO
+                        : clampZero(nullToZero(l.getTotalAmount()).subtract(nullToZero(l.getPaidAmount())));
+                if (leftNow.signum() > 0) {
+                    loans.add(new TraceLoan(LOAN_ASK, l.getId(), l.getLenderName(), type, leftNow, BigDecimal.ZERO,
+                            NOTE_AFTER_CUT, nasiya ? l.getDueDate() : null));
+                }
+                continue;
+            }
             List<Repaid> repaid = repaid(transactionRepository.findByRepaidLoanTakenIdOrderByTransactionDateDesc(l.getId()),
                     markPaidRepository.findByKindAndRefId("PERSONAL_LOAN", l.getId()));
             BigDecimal left = leftAtStart(l.getTotalAmount(), l.getPaidAmount(), l.getStatus(), repaid, start);
             if (left.signum() <= 0) continue;
+            BigDecimal ask;
+            String note = null;
             if (l.effectiveRepaymentType() == RepaymentType.MONTHLY) {
-                BigDecimal ask = hasStartedBy(l.getPaymentStartDate(), month) ? l.getPlannedMonthlyPayment().min(left) : BigDecimal.ZERO;
+                ask = hasStartedBy(l.getPaymentStartDate(), month) ? l.getPlannedMonthlyPayment().min(left) : BigDecimal.ZERO;
                 all = all.add(ask);
                 monthly = monthly.add(ask);
+                if (ask.signum() <= 0) note = NOTE_NOT_STARTED;
             } else if (l.isOpenNasiya()) {
-                all = all.add(nasiyaAsk(left, l.getDueDate(), month));
+                ask = nasiyaAsk(left, l.getDueDate(), month);
+                all = all.add(ask);
+                if (ask.signum() <= 0) note = NOTE_NASIYA_LATER;
             } else {
-                all = all.add(asapAsk(left, income));
+                ask = asapAsk(left, income);
+                all = all.add(ask);
             }
+            loans.add(new TraceLoan(LOAN_ASK, l.getId(), l.getLenderName(), type, left, ask, note,
+                    nasiya ? l.getDueDate() : null));
         }
         for (Debt d : debtRepository.findAll()) {
-            if (!isUzs(d.getCurrency()) || !borrowedBefore(d.getBorrowedDate(), start)) continue;
+            if (!isUzs(d.getCurrency())) continue;
+            if (!borrowedBefore(d.getBorrowedDate(), start)) {
+                BigDecimal leftNow = d.getStatus() == RecordStatus.PAID ? BigDecimal.ZERO
+                        : clampZero(nullToZero(d.getTotalAmount()).subtract(nullToZero(d.getPaidAmount())));
+                if (leftNow.signum() > 0) {
+                    loans.add(new TraceLoan(DEBT_ASK, d.getId(), d.getCreditorName(), "ASAP", leftNow, BigDecimal.ZERO,
+                            NOTE_AFTER_CUT, null));
+                }
+                continue;
+            }
             List<Repaid> repaid = repaid(transactionRepository.findByRepaidDebtIdOrderByTransactionDateDesc(d.getId()),
                     markPaidRepository.findByKindAndRefId("DEBT", d.getId()));
             BigDecimal left = leftAtStart(d.getTotalAmount(), d.getPaidAmount(), d.getStatus(), repaid, start);
-            if (left.signum() > 0) all = all.add(asapAsk(left, income));
+            if (left.signum() <= 0) continue;
+            BigDecimal ask = asapAsk(left, income);
+            all = all.add(ask);
+            loans.add(new TraceLoan(DEBT_ASK, d.getId(), d.getCreditorName(), "ASAP", left, ask, null, null));
         }
 
         BigDecimal ratio = bank.add(all).divide(income, MC);
+        BigDecimal ruleDebt = ruleDebtUzs(all, monthly, income);
+        BigDecimal cutoff = ruleBook().version(level, month).cutoff();
         SavingsRules.Pick pick = SavingsRules.pick(income, bills, bank, BigDecimal.ZERO, all,
-                ruleDebtUzs(all, monthly, income), ratio, ruleBook().version(level, month).cutoff());
-        return new FixedRule(level, pick.situation());
+                ruleDebt, ratio, cutoff);
+
+        BigDecimal limit = monthlyLoanLimitUzs(income);
+        boolean smallIgnored = monthly.signum() > 0 && monthly.compareTo(limit) <= 0;
+        if (smallIgnored) {
+            loans.replaceAll(t -> "MONTHLY".equals(t.type()) && t.note() == null && t.ask().signum() > 0
+                    ? new TraceLoan(t.kind(), t.id(), t.name(), t.type(), t.left(), t.ask(), NOTE_SMALL_MONTHLY, t.dueDate())
+                    : t);
+        }
+        // Counted first (ask > 0), larger asks first; the rest after, larger left first.
+        loans.sort(Comparator.comparing((TraceLoan t) -> t.ask().signum() > 0 ? 0 : 1)
+                .thenComparing(TraceLoan::ask, Comparator.reverseOrder())
+                .thenComparing(TraceLoan::left, Comparator.reverseOrder()));
+
+        BigDecimal levelFrom = null;
+        BigDecimal levelTo = null;
+        if (level5 == null) {
+            levelFrom = level <= 1 ? BigDecimal.ZERO : LEVEL_BREAKPOINTS_UZS[level - 2];
+            levelTo = level <= LEVEL_BREAKPOINTS_UZS.length && level < TOP_BASE_LEVEL ? LEVEL_BREAKPOINTS_UZS[level - 1] : null;
+        }
+        return new RuleTrace(new FixedRule(level, pick.situation()), income, bills, leftAfterBills,
+                levelFrom, levelTo, level5, banks, bank, loans, all, monthly, limit, smallIgnored, ruleDebt,
+                ratio, pick.calcBase(), cutoff, pick.hasLoan(), pick.hasDebt());
     }
 
     /** Borrowed before {@code start} — a row without a date always counts, as everywhere else. */

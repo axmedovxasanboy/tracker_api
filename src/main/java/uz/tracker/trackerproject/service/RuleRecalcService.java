@@ -47,7 +47,7 @@ public class RuleRecalcService {
         OverviewService.FixedRule current = currentRule(month);
         OverviewService.FixedRule now = overviewService.ruleNow(month, date);
         if (current == null || now == null) throw new IllegalArgumentException(NO_INCOME);
-        return response(month, current, now, overviewService.ruleRecalculatedAt(month));
+        return response(month, date, current, now, overviewService.ruleRecalculatedAt(month));
     }
 
     @Transactional
@@ -69,7 +69,7 @@ public class RuleRecalcService {
             row.setRecalculatedAt(at);
             rules.save(row);
         }
-        return response(month, now, now, at);
+        return response(month, date, now, now, at);
     }
 
     /**
@@ -92,21 +92,66 @@ public class RuleRecalcService {
         return a.level() == b.level() && Objects.equals(a.situation(), b.situation());
     }
 
-    private RecalcResponse response(YearMonth month, OverviewService.FixedRule current,
+    private RecalcResponse response(YearMonth month, LocalDate date, OverviewService.FixedRule current,
                                     OverviewService.FixedRule now, LocalDateTime at) {
         SavingsRules.Book book = overviewService.ruleBook();
         List<Investment> own = overviewService.customSavings();
+        // `current` was decided on the 1st — or, once recalculated, with that day's data.
+        LocalDate currentAsOf = at != null ? at.toLocalDate() : month.atDay(1);
+        LocalDate currentCut = at != null ? currentAsOf.plusDays(1) : month.atDay(1);
+        String currentBasis = at != null ? BASIS_RECALCULATED : BASIS_MONTH_START;
+        RecalcResponse.Rule cur = rule(book, month, current, own,
+                why(overviewService.traceAsOf(month, currentCut), current, currentBasis, currentAsOf));
+        RecalcResponse.Rule today = rule(book, month, now, own,
+                why(overviewService.traceAsOf(month, date.plusDays(1)), now, BASIS_TODAY, date));
         return RecalcResponse.builder()
                 .month(month.toString())
-                .current(rule(book, month, current, own))
-                .recalculated(rule(book, month, now, own))
+                .current(cur)
+                .recalculated(today)
                 .changed(!same(current, now))
                 .recalculatedAt(at == null ? null : at.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME))
                 .build();
     }
 
+    static final String BASIS_MONTH_START = "MONTH_START";
+    static final String BASIS_RECALCULATED = "RECALCULATED";
+    static final String BASIS_TODAY = "TODAY";
+
+    /** The trace as the page's "why"; exact = it reproduces {@code shown}. Null without a trace. */
+    static RecalcResponse.Why why(OverviewService.RuleTrace t, OverviewService.FixedRule shown,
+                                  String basis, LocalDate asOf) {
+        if (t == null) return null;
+        List<RecalcResponse.BankLoanLine> banks = t.bankLoans().stream()
+                .map(b -> RecalcResponse.BankLoanLine.builder().id(b.id()).name(b.name()).monthly(b.monthly()).build())
+                .toList();
+        List<RecalcResponse.LoanLine> loans = t.loans().stream()
+                .map(l -> RecalcResponse.LoanLine.builder().kind(l.kind()).id(l.id()).name(l.name()).type(l.type())
+                        .left(l.left()).ask(l.ask()).note(l.note())
+                        .dueDate(l.dueDate() == null ? null : l.dueDate().toString()).build())
+                .toList();
+        return RecalcResponse.Why.builder()
+                .basis(basis)
+                .asOf(asOf.toString())
+                .exact(same(t.rule(), shown))
+                .income(t.income()).bills(t.bills()).leftAfterBills(t.leftAfterBills())
+                .levelFrom(t.levelFrom()).levelTo(t.levelTo())
+                .level5Since(t.level5Since() == null ? null : t.level5Since().toString())
+                .bankLoans(banks).bankMonthly(t.bankMonthly())
+                .loans(loans)
+                .asksTotal(t.asksTotal()).monthlyAsks(t.monthlyAsks())
+                .smallMonthlyLimit(t.smallMonthlyLimit()).smallMonthlyIgnored(t.smallMonthlyIgnored())
+                .peopleDebtForRule(t.peopleDebtForRule())
+                .debtShare(t.debtRatio().multiply(new BigDecimal("100")).setScale(1, java.math.RoundingMode.HALF_UP))
+                .heavyLine(OverviewService.HEAVY_LINE_PERCENT)
+                .leftAfterLoans(t.leftAfterLoans())
+                .cutoff(t.cutoff())
+                .hasBank(t.hasBank()).hasPeopleDebt(t.hasPeopleDebt())
+                .build();
+    }
+
     private static RecalcResponse.Rule rule(SavingsRules.Book book, YearMonth month,
-                                            OverviewService.FixedRule r, List<Investment> own) {
+                                            OverviewService.FixedRule r, List<Investment> own,
+                                            RecalcResponse.Why why) {
         SavingsRules.Version v = book.version(r.level(), month);
         SavingsRules.Percents p = v.percents(r.situation());
         BigDecimal donation = nz(p == null ? null : p.donation());
@@ -127,6 +172,7 @@ public class RuleRecalcService {
                         .donation(donation).emergency(emergency).investments(investments).build())
                 .own(lines)
                 .total(total)
+                .why(why)
                 .build();
     }
 
