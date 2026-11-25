@@ -64,6 +64,10 @@ public class InvestmentResponse {
      * its purchase date when it was funded from a wallet. Filled by the investments list only (null elsewhere).
      */
     private LocalDate lastMovedAt;
+    /** The investment goal this account saves for (Batch 79); null when none. */
+    private Long investmentGoalId;
+    /** That goal's name; filled by the list (GET /investments) and an edit, null otherwise or when none. */
+    private String investmentGoalName;
 
     public static InvestmentResponse from(Investment i) {
         BigDecimal value = i.getCurrentValue() != null ? i.getCurrentValue() : i.getInvestedAmount();
@@ -99,6 +103,7 @@ public class InvestmentResponse {
                                 .divide(i.getInvestedAmount(), 1, RoundingMode.HALF_UP))
                 .openingBalance(Boolean.TRUE.equals(i.getOpeningBalance()))
                 .customSaving(i.isCustomSaving())
+                .investmentGoalId(i.getInvestmentGoalId())
                 .createdAt(i.getCreatedAt())
                 .build();
     }

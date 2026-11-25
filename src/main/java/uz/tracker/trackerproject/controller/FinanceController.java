@@ -19,6 +19,7 @@ public class FinanceController {
 
     private final FinanceService financeService;
     private final InvestmentTransferService investmentTransferService;
+    private final uz.tracker.trackerproject.service.InvestmentGoalService investmentGoalService;
 
     // ---- Debts ----
 
@@ -221,6 +222,34 @@ public class FinanceController {
     public ResponseEntity<InvestmentResponse> updateInvestmentValue(
             @PathVariable Long id, @Valid @RequestBody InvestmentValueRequest req) {
         return ResponseEntity.ok(financeService.updateInvestmentValue(id, req));
+    }
+
+    // ---- Investment goals (Batch 79) ----
+
+    /** Every investment goal with what its accounts hold now, oldest first. */
+    @GetMapping("/investment-goals")
+    public ResponseEntity<List<uz.tracker.trackerproject.dto.response.InvestmentGoalResponse>> getInvestmentGoals() {
+        return ResponseEntity.ok(investmentGoalService.list());
+    }
+
+    @PostMapping("/investment-goals")
+    public ResponseEntity<uz.tracker.trackerproject.dto.response.InvestmentGoalResponse> createInvestmentGoal(
+            @Valid @RequestBody uz.tracker.trackerproject.dto.request.InvestmentGoalRequest req) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(investmentGoalService.create(req));
+    }
+
+    /** The linked accounts become exactly {@code investmentIds}; one linked to another goal moves here. */
+    @PutMapping("/investment-goals/{id}")
+    public ResponseEntity<uz.tracker.trackerproject.dto.response.InvestmentGoalResponse> updateInvestmentGoal(
+            @PathVariable Long id, @Valid @RequestBody uz.tracker.trackerproject.dto.request.InvestmentGoalRequest req) {
+        return ResponseEntity.ok(investmentGoalService.update(id, req));
+    }
+
+    /** The goal goes; its accounts and their money stay. */
+    @DeleteMapping("/investment-goals/{id}")
+    public ResponseEntity<Void> deleteInvestmentGoal(@PathVariable Long id) {
+        investmentGoalService.delete(id);
+        return ResponseEntity.noContent().build();
     }
 
     // ---- Moves between investments (Batch 78) ----

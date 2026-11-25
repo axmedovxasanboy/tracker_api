@@ -50,6 +50,10 @@ public class FinanceService {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private InvestmentTransferRepository investmentTransferRepository;
 
+    /** Investment goals (Batch 79): the list and an edit name each account's goal. Field-injected like the above. */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private uz.tracker.trackerproject.repository.InvestmentGoalRepository investmentGoalRepository;
+
     /** Targets that support the "already paid" (no-transaction) mark. */
     private static final Set<String> MARK_KINDS =
             Set.of("SUBSCRIPTION", "BANK", "PERSONAL_LOAN", "DEBT", "BUCKET");
@@ -672,14 +676,27 @@ public class FinanceService {
             rows = investmentRepository.findByPurchaseDateBetweenOrderByPurchaseDateDesc(ym.atDay(1), ym.atEndOfMonth());
         }
         java.util.Map<Long, LocalDate> last = latestMovementDates();
+        java.util.Map<Long, String> goals = goalNames();
         return rows.stream().map(i -> {
             LocalDate d = last.get(i.getId());
             // Funded from a wallet (its own mirror transaction or a Transactions-page entry): the
             // purchase date is a movement too, even when that transaction is not linked by id.
             if (i.getOriginatingTransactionId() != null && i.getPurchaseDate() != null
                     && (d == null || i.getPurchaseDate().isAfter(d))) d = i.getPurchaseDate();
-            return InvestmentResponse.from(i).toBuilder().lastMovedAt(d).build();
+            return InvestmentResponse.from(i).toBuilder().lastMovedAt(d)
+                    .investmentGoalName(i.getInvestmentGoalId() == null ? null : goals.get(i.getInvestmentGoalId()))
+                    .build();
         }).toList();
+    }
+
+    /** Investment goal id → name (Batch 79); empty when there are none. */
+    private java.util.Map<Long, String> goalNames() {
+        java.util.Map<Long, String> out = new java.util.HashMap<>();
+        if (investmentGoalRepository == null) return out;
+        List<uz.tracker.trackerproject.entity.InvestmentGoal> all = investmentGoalRepository.findAll();
+        if (all == null) return out;
+        for (var g : all) out.put(g.getId(), g.getName());
+        return out;
     }
 
     /** Holding id → the latest day of its linked transactions and of its moves between holdings (Batch 78). */
@@ -763,7 +780,12 @@ public class FinanceService {
     public InvestmentResponse updateInvestment(Long id, InvestmentRequest req) {
         Investment i = investmentRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("Investment", id));
         applyInvestment(i, req);
-        return InvestmentResponse.from(investmentRepository.save(i));
+        Investment saved = investmentRepository.save(i);
+        InvestmentResponse r = InvestmentResponse.from(saved);
+        if (saved.getInvestmentGoalId() != null) {
+            r = r.toBuilder().investmentGoalName(goalNames().get(saved.getInvestmentGoalId())).build();
+        }
+        return r;
     }
 
     @Transactional
@@ -914,6 +936,11 @@ public class FinanceService {
         // currentValue is optional: null = "tracks investedAmount" (the response mapper falls back).
         i.setCurrentValue(req.getCurrentValue());
         i.setOpeningBalance(Boolean.TRUE.equals(req.getOpeningBalance()));
+        // Only a plain investment saves for an investment goal (Batch 79): one made the emergency
+        // fund, a savings goal or an own saving drops its link. The request never carries the link.
+        if (Boolean.TRUE.equals(i.getEmergencyFund()) || Boolean.TRUE.equals(i.getSavingsGoal()) || i.isCustomSaving()) {
+            i.setInvestmentGoalId(null);
+        }
     }
 
     /**

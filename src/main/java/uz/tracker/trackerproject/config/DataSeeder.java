@@ -81,6 +81,9 @@ public class DataSeeder implements CommandLineRunner {
         // investments.type gained BUSINESS and ISLAMIC_BANK (Batch 78): rebuild its CHECK from today's
         // enum, after the legacy rows above are moved off the removed values.
         rebuildInvestmentTypeCheckConstraint();
+        // The owner's holdings from before the two new types get theirs (Batch 79): IMAN / Asaxiy →
+        // BUSINESS, Open Bank → ISLAMIC_BANK. After the rebuild above, which first allows the values.
+        typeOwnersExistingHoldings();
 
         // Freeze which allocation bucket each existing bucket-funding transaction credits, so
         // editing a holding can no longer re-bucket money that has already been spent — and, for
@@ -566,9 +569,60 @@ public class DataSeeder implements CommandLineRunner {
     private void migrateLegacyInvestmentTypes() {
         try {
             entityManager.createNativeQuery(
-                    "UPDATE investments SET type = 'OTHER' WHERE type IN ('STOCKS','CRYPTO')").executeUpdate();
+                    "UPDATE investments SET type = 'OTHER' WHERE type IN ('STOCKS','CRYPTO','BONDS','MUTUAL_FUND')").executeUpdate();
         } catch (Exception ignored) {
             // schema not yet created / non-Postgres — safe to skip.
+        }
+    }
+
+    /** Holdings made before this cut are the owner's existing data; later ones are never touched. */
+    static final String TYPE_BACKFILL_BEFORE = "2026-11-26 00:00:00";
+
+    /** BUSINESS for a name or broker naming IMAN (whole word) or Asaxiy (Batch 79). */
+    static final String TYPE_BUSINESS_SQL =
+            "UPDATE investments SET type = 'BUSINESS' "
+                    + "WHERE type NOT IN ('BUSINESS','ISLAMIC_BANK') "
+                    + "AND created_at < TIMESTAMP '" + TYPE_BACKFILL_BEFORE + "' "
+                    + "AND (name ~* '\\miman\\M' OR broker ~* '\\miman\\M' "
+                    + "OR name ILIKE '%asaxiy%' OR broker ILIKE '%asaxiy%')";
+
+    /** ISLAMIC_BANK for a name or broker naming Open Bank (Batch 79). */
+    static final String TYPE_ISLAMIC_BANK_SQL =
+            "UPDATE investments SET type = 'ISLAMIC_BANK' "
+                    + "WHERE type NOT IN ('BUSINESS','ISLAMIC_BANK') "
+                    + "AND created_at < TIMESTAMP '" + TYPE_BACKFILL_BEFORE + "' "
+                    + "AND (name ILIKE '%open bank%' OR broker ILIKE '%open bank%' "
+                    + "OR name ILIKE '%openbank%' OR broker ILIKE '%openbank%' "
+                    + "OR name ILIKE '%open-bank%' OR broker ILIKE '%open-bank%')";
+
+    /** The run-once marker for {@link #typeOwnersExistingHoldings} in {@code seed_markers}. */
+    static final String TYPE_BACKFILL_MARKER = "investment-types-2026-11-25";
+
+    /**
+     * The owner's existing holdings get the Batch 78 types: IMAN and Asaxiy are businesses, Open Bank an
+     * Islamic bank (owner, 2026-11-25). Matched on name or broker, case-insensitively, IMAN as a whole
+     * word (so "Imanov" never matches), any flags; rows already BUSINESS / ISLAMIC_BANK are left alone.
+     *
+     * <p>Runs ONCE, so it never undoes the owner's own later retyping: there is no key/value store for
+     * such markers, so a one-column {@code seed_markers} table (raw SQL, no entity) records it; and as a
+     * second guard only rows created before {@link #TYPE_BACKFILL_BEFORE} are touched. Open Bank first,
+     * then the business names (they never overlap). Non-fatal like the other migrations.
+     */
+    private void typeOwnersExistingHoldings() {
+        try {
+            entityManager.createNativeQuery(
+                    "CREATE TABLE IF NOT EXISTS seed_markers (name VARCHAR(100) PRIMARY KEY, done_at TIMESTAMP NOT NULL)")
+                    .executeUpdate();
+            Number done = (Number) entityManager.createNativeQuery(
+                    "SELECT COUNT(*) FROM seed_markers WHERE name = '" + TYPE_BACKFILL_MARKER + "'").getSingleResult();
+            if (done != null && done.longValue() > 0) return;
+            entityManager.createNativeQuery(TYPE_ISLAMIC_BANK_SQL).executeUpdate();
+            entityManager.createNativeQuery(TYPE_BUSINESS_SQL).executeUpdate();
+            entityManager.createNativeQuery(
+                    "INSERT INTO seed_markers (name, done_at) VALUES ('" + TYPE_BACKFILL_MARKER + "', NOW())")
+                    .executeUpdate();
+        } catch (Exception ignored) {
+            // Table not created yet, or a non-Postgres engine — nothing to back-fill.
         }
     }
 

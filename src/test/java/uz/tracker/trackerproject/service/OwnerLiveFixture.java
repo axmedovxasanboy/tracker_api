@@ -261,9 +261,9 @@ final class OwnerLiveFixture {
         ledger.billPaid(sep(5), "1100000", 4).setCategory(education);
 
         // ── Holdings: IMAN with four top-ups, Asaxiy with none, IMAN (Emergency) with two ──
-        holding(2, "IMAN", InvestmentType.MUTUAL_FUND, "17300000", "17610147", LocalDate.of(2025, 3, 1), false);
+        holding(2, "IMAN", InvestmentType.OTHER, "17300000", "17610147", LocalDate.of(2025, 3, 1), false);
         holding(1, "Asaxiy", InvestmentType.OTHER, "2000000", "2005827", LocalDate.of(2026, 6, 1), true);
-        holding(3, "IMAN (Emergency)", InvestmentType.MUTUAL_FUND, "1400000", "1413254", LocalDate.of(2026, 5, 1), true)
+        holding(3, "IMAN (Emergency)", InvestmentType.OTHER, "1400000", "1413254", LocalDate.of(2026, 5, 1), true)
                 .setEmergencyFund(true);
         save(sep(15), TransactionSubType.INVESTMENT, AllocationBucket.INVESTMENTS, "100000", 2L, investment, "IMAN");
         save(sep(21), TransactionSubType.INVESTMENT, AllocationBucket.INVESTMENTS, "1500000", 2L, investment, "IMAN");

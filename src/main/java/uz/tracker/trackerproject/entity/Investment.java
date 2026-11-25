@@ -146,6 +146,15 @@ public class Investment {
         return Boolean.TRUE.equals(customSaving);
     }
 
+    /**
+     * The investment goal this account saves for (Investments page, Batch 79; {@link InvestmentGoal}).
+     * Null = none. Only a plain investment carries one, and only the goal endpoints change it — an
+     * investment edit keeps it (the bot echoes a holding's fields without it), except that a holding
+     * made the emergency fund, a savings goal or an own saving drops it.
+     */
+    @Column(name = "investment_goal_id")
+    private Long investmentGoalId;
+
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
