@@ -155,6 +155,16 @@ public class Investment {
     @Column(name = "investment_goal_id")
     private Long investmentGoalId;
 
+    /**
+     * This account's share of the month's Investments money (Investments page → "This month's split",
+     * Batch 81): a weight, share = weight ÷ the plain accounts' total. All null = an equal split; once
+     * any plain account has one, a null counts 0 (a new account starts at nothing). Only the split
+     * endpoints set it; an investment edit keeps it, except that a holding which stops being a plain
+     * investment drops it.
+     */
+    @Column(name = "split_weight", precision = 19, scale = 4)
+    private BigDecimal splitWeight;
+
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

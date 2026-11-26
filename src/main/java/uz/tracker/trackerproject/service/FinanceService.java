@@ -940,6 +940,8 @@ public class FinanceService {
         // fund, a savings goal or an own saving drops its link. The request never carries the link.
         if (Boolean.TRUE.equals(i.getEmergencyFund()) || Boolean.TRUE.equals(i.getSavingsGoal()) || i.isCustomSaving()) {
             i.setInvestmentGoalId(null);
+            // …and its share of the month's Investments split (Batch 81).
+            i.setSplitWeight(null);
         }
     }
 

@@ -20,6 +20,7 @@ public class FinanceController {
     private final FinanceService financeService;
     private final InvestmentTransferService investmentTransferService;
     private final uz.tracker.trackerproject.service.InvestmentGoalService investmentGoalService;
+    private final uz.tracker.trackerproject.service.InvestmentSplitService investmentSplitService;
 
     // ---- Debts ----
 
@@ -250,6 +251,28 @@ public class FinanceController {
     public ResponseEntity<Void> deleteInvestmentGoal(@PathVariable Long id) {
         investmentGoalService.delete(id);
         return ResponseEntity.noContent().build();
+    }
+
+    // ---- This month's split of the Investments money across the accounts (Batch 81) ----
+
+    /** Which account each part of the month's Investments figure goes to; {@code month} = YYYY-MM, default this month. */
+    @GetMapping("/investments/split")
+    public ResponseEntity<uz.tracker.trackerproject.dto.response.InvestmentSplitResponse> getInvestmentSplit(
+            @RequestParam(required = false) String month) {
+        return ResponseEntity.ok(investmentSplitService.get(month));
+    }
+
+    /** The owner's shares: the typed amounts become weights; an account left out gets 0. */
+    @PutMapping("/investments/split")
+    public ResponseEntity<uz.tracker.trackerproject.dto.response.InvestmentSplitResponse> putInvestmentSplit(
+            @RequestBody uz.tracker.trackerproject.dto.request.InvestmentSplitRequest req) {
+        return ResponseEntity.ok(investmentSplitService.put(req));
+    }
+
+    /** Back to an equal split. */
+    @DeleteMapping("/investments/split")
+    public ResponseEntity<uz.tracker.trackerproject.dto.response.InvestmentSplitResponse> resetInvestmentSplit() {
+        return ResponseEntity.ok(investmentSplitService.reset());
     }
 
     // ---- Moves between investments (Batch 78) ----

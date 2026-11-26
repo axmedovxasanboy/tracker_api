@@ -133,6 +133,20 @@ class AnalyticsBreakdownServiceTest {
     }
 
     @Test
+    void september_familyAndSupportListsEveryPersonWithTotalAndCount() {
+        OwnerLiveFixture f = new OwnerLiveFixture();
+        f.family.setAsksPerson(true);
+        AnalyticsBreakdownResponse r = f.breakdown.breakdown(SEP, SEP, TODAY);
+
+        Line family = line(r.getOut(), "cat:25");
+        assertThat(family.getPeople()).extracting("name", "amount", "count").containsExactly(
+                tuple("Xusanboy", n("2050000"), 5),
+                tuple("Tabassum", n("1900000"), 3));
+        // A category that does not ask who the money is for lists no people.
+        assertThat(line(r.getOut(), "cat:9").getPeople()).isEmpty();
+    }
+
+    @Test
     void september_theOutRowsByAmountAddUpToOutExactly() {
         OwnerLiveFixture f = new OwnerLiveFixture();
         AnalyticsBreakdownResponse r = f.breakdown.breakdown(SEP, SEP, TODAY);

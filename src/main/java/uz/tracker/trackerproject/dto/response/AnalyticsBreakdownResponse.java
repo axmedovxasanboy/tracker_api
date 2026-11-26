@@ -212,6 +212,12 @@ public class AnalyticsBreakdownResponse {
         private List<OtherMonth> otherMonth;
         /** out[] CATEGORY lines only: the 3 largest itemised everyday rows. */
         private List<TopRow> top;
+        /**
+         * out[] CATEGORY lines whose category (or a parent) asks who the money is for — Family &amp;
+         * support: every person given to in the scope, with their total and row count, largest first.
+         * Empty for any other line.
+         */
+        private List<PersonRow> people;
         /** The History filter that lists exactly this line's rows for the month; null when none can. */
         private LineHistory history;
         private List<Line> children;
@@ -221,6 +227,14 @@ public class AnalyticsBreakdownResponse {
     public static class OtherMonth {
         private LocalDate date;
         private BigDecimal amount;
+    }
+
+    /** One person a Family &amp; support line gave to: the total and how many rows it took. */
+    @Getter @Builder
+    public static class PersonRow {
+        private String name;
+        private BigDecimal amount;
+        private int count;
     }
 
     @Getter @Builder

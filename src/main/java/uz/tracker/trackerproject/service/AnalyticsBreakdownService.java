@@ -829,6 +829,7 @@ public class AnalyticsBreakdownService {
                     .sinceStart(sinceStart)
                     .otherMonth(id.part() == Part.INCOME ? otherMonth(lineRows) : List.of())
                     .top(outCategory && id.child() == null ? top(lineRows) : List.of())
+                    .people(outCategory && id.child() == null ? people(lineRows) : List.of())
                     .history(scope.oneMonth() ? history(id, ref, lineRows) : null)
                     .children(children)
                     .build();
@@ -886,6 +887,49 @@ public class AnalyticsBreakdownService {
             List<OtherMonth> out = new ArrayList<>();
             byDay.forEach((d, a) -> out.add(OtherMonth.builder().date(d).amount(a).build()));
             return out;
+        }
+
+        /**
+         * Family &amp; support (a category that asks who the money is for, itself or a parent): one row
+         * per person — the row's description is the person — with the total and the number of rows,
+         * largest total first, then more rows, then name. Names are matched ignoring case and
+         * surrounding spaces; the latest row's spelling is shown. Empty for any other category.
+         */
+        private List<AnalyticsBreakdownResponse.PersonRow> people(List<Row> rows) {
+            Map<String, String> names = new HashMap<>();
+            Map<String, LocalDate> latest = new HashMap<>();
+            Map<String, BigDecimal> sums = new LinkedHashMap<>();
+            Map<String, Integer> counts = new HashMap<>();
+            for (Row r : rows) {
+                if (!asksPerson(r.t().getCategory())) continue;
+                String name = r.t().getDescription() == null ? "" : r.t().getDescription().trim();
+                if (name.isEmpty()) name = "—";
+                String key = name.toLowerCase(java.util.Locale.ROOT);
+                LocalDate d = r.date();
+                if (!latest.containsKey(key) || (d != null && d.isAfter(latest.get(key)))) {
+                    latest.put(key, d);
+                    names.put(key, name);
+                }
+                sums.merge(key, r.amount(), BigDecimal::add);
+                counts.merge(key, 1, Integer::sum);
+            }
+            List<AnalyticsBreakdownResponse.PersonRow> out = new ArrayList<>();
+            sums.forEach((k, a) -> out.add(AnalyticsBreakdownResponse.PersonRow.builder()
+                    .name(names.get(k)).amount(a).count(counts.get(k)).build()));
+            out.sort(Comparator.comparing(AnalyticsBreakdownResponse.PersonRow::getAmount).reversed()
+                    .thenComparing(AnalyticsBreakdownResponse.PersonRow::getCount, Comparator.reverseOrder())
+                    .thenComparing(AnalyticsBreakdownResponse.PersonRow::getName, String.CASE_INSENSITIVE_ORDER));
+            return out;
+        }
+
+        /** The category, or one of its parents, asks who the money is for. */
+        private boolean asksPerson(Category c) {
+            Category at = tables.category(c);
+            for (int depth = 0; at != null && depth < 32; depth++) {
+                if (Boolean.TRUE.equals(at.getAsksPerson())) return true;
+                at = at.getParent() == null ? null : tables.category(at.getParent());
+            }
+            return false;
         }
 
         /** The largest itemised everyday rows, latest first among equals. */
